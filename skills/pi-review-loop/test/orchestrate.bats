@@ -107,6 +107,24 @@ fixture() {
 
 # --- Loop + hard caps --------------------------------------------------------
 
+@test "ISSUES_FOUND at round 3 (terminal) -> PASSED_WITH_FINDINGS, exit 0, findings in JSON" {
+  local i
+  for i in 2 4 6; do
+    fixture "$i" 'Still broken.' '- [a.txt:1] open defect' 'VERDICT: ISSUES_FOUND'
+  done
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  [ "$(pi_calls)" -eq 6 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASSED_WITH_FINDINGS" ]
+  [ "$(printf '%s' "$out" | jq -r .rounds)" = "3" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "ISSUES_FOUND" ]
+  local findings
+  findings="$(printf '%s' "$out" | jq -c .findings)"
+  [ "$findings" = '["[a.txt:1] open defect"]' ]
+}
+
 @test "default max-rounds 3 with ISSUES_FOUND at terminal round: PASSED_WITH_FINDINGS, 6 pi calls" {
   local i
   for i in 2 4 6; do
@@ -141,6 +159,16 @@ fixture() {
 
 @test "--max-rounds 5 is rejected (hard cap 3), exit 2" {
   run_driver --max-rounds 5 "do it"
+  [ "$status" -eq 2 ]
+  [ ! -s "$CALL_LOG" ]
+}
+
+@test "review-round cap: max 3 rounds (develop + 3 reviews + 2 fixes = 6), extra round refused, exit 2" {
+  local i
+  for i in 2 4 6; do
+    fixture "$i" 'Broken.' '- [a.txt:1] defect' 'VERDICT: ISSUES_FOUND'
+  done
+  run_driver --max-rounds 4 "do it"
   [ "$status" -eq 2 ]
   [ ! -s "$CALL_LOG" ]
 }
