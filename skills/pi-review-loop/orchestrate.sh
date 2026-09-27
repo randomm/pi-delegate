@@ -205,7 +205,7 @@ summarize_round() {
 extract_findings() {
   local text="$1"
   local f
-  f="$(printf '%s\n' "$text" | jq -R '[inputs | select(test("^\\s*[-*][[:space:]]") or test("^\\s*[0-9]+[.)][[:space:]]")) | sub("^\\s*[-*0-9.]+[[:space:]]*"; "") | select(length > 0)]' 2>/dev/null)" || f='[]'
+  f="$(printf '%s\n' "$text" | jq -Rrs '[split("\n") | .[:-1] | .[] | select(test("^[[:space:]]*[-*][[:space:]]") or test("^[[:space:]]*[0-9]+[.)][[:space:]]")) | sub("^[[:space:]]*[-*][[:space:]]*"; "") | sub("^[[:space:]]*[0-9]+[.)][[:space:]]*"; "") | select(length > 0)]' 2>/dev/null)" || f='[]'
   if ! printf '%s' "$f" | jq -e 'type == "array"' >/dev/null 2>&1; then
     f='[]'
   fi

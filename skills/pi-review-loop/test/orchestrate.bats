@@ -205,6 +205,20 @@ fixture() {
   [ "$findings" = '["[a.txt:1] naming nit"]' ]
 }
 
+@test "MINOR_OBSERVATIONS numbered-list findings (1. / 2)) are extracted" {
+  fixture 2 'Two nits.' '1. [a.txt:1] first' '2) [a.txt:2] second' 'VERDICT: MINOR_OBSERVATIONS'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  [ "$(pi_calls)" -eq 2 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "MINOR_OBSERVATIONS" ]
+  local findings
+  findings="$(printf '%s' "$out" | jq -c .findings)"
+  [ "$findings" = '["[a.txt:1] first","[a.txt:2] second"]' ]
+}
+
 @test "review prompt embeds the diff as real newlines, not literal \\n" {
   fixture 2 'Looks fine.' 'VERDICT: APPROVED'
   run_driver "do it"
