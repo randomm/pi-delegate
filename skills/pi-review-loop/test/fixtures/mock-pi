@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Mock `pi` binary for BATS tests of orchestrate.sh.
+#
+# Behaviour:
+#   - Appends its own argv to $MOCK_PI_CALL_LOG (one JSON array per line)
+#     and to $MOCK_PI_ARGV_LOG (raw arguments, one per line).
+#   - If $MOCK_PI_FIXTURES_DIR is set, looks for a numbered fixture file
+#     $MOCK_PI_FIXTURES_DIR/<call-count> where call-count is the number
+#     of lines now in the call log after this invocation. If that file
+#     does not exist, the call succeeds with empty output (pi returning
+#     nothing is a valid pi behavior; tests that expect a response must
+#     provide the fixture).
+#   - If the fixture starts with "EXIT:" it encodes a non-zero exit:
+#     the first line is EXIT:<code> and the remaining lines are emitted
+#     on stderr (simulating a pi crash / auth failure).
+#   - Otherwise the fixture is emitted on stdout and the call exits 0.
+
+log_call() {
+  local args_json="["
+  local sep=""
+  local arg
+  for arg in "$@"; do
+    args_json="${args_json}${sep}\"$(printf '%s' "$arg" | jq -Rs '.')\""
+    sep=","
+    printf '%s\n' "$arg" >>"${MOCK_PI_ARGV_LOG:-/dev/null}" 2>/dev/null || true
+  done
+  args_json="${args_json}]"
+  printf '%s\n' "$args_json" >>"${MOCK_PI_CALL_LOG:-/dev/null}" 2>/dev/null || true
+}
+
+log_call "$@"
+n="$(wc -l <"$MOCK_PI_CALL_LOG" | tr -d ' ')"
+
+if [ -n "${MOCK_PI_FIXTURES_DIR:-}" ] && [ -f "$MOCK_PI_FIXTURES_DIR/$n" ]; then
+  first="$(head -n 1 "$MOCK_PI_FIXTURES_DIR/$n")"
+  case "$first" in
+    EXIT:*)
+      code="${first#EXIT:}"
+      tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n" >&2
+      exit "$code"
+      ;;
+    *)
+      cat "$MOCK_PI_FIXTURES_DIR/$n"
+      ;;
+  esac
+fi
+
+exit 0

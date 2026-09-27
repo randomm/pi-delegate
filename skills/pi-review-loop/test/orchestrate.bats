@@ -1,0 +1,309 @@
+#!/usr/bin/env bats
+# BATS tests for orchestrate.sh — run via: bats skills/pi-review-loop/test/
+
+setup() {
+  # Resolve the skill directory from this file's real location so the suite
+  # works whether invoked from the repo worktree or from an installed copy.
+  # BATS_TEST_FILENAME is the path as invoked (possibly relative), so resolve
+  # it against the current directory to get the skill directory (the parent
+  # of this test file).
+  local test_file="$BATS_TEST_FILENAME"
+  case "$test_file" in
+    /*) ;;
+    *) test_file="$PWD/$test_file" ;;
+  esac
+  local skill_dir
+  skill_dir="$(cd "$(dirname "$test_file")/.." && pwd)"   # skills/pi-review-loop
+  REPO_ROOT="$(cd "$skill_dir/../.." && pwd)"   # repo root
+  SCRIPT="$REPO_ROOT/skills/pi-review-loop/orchestrate.sh"
+  FIXTURES="$REPO_ROOT/skills/pi-review-loop/test/fixtures"
+
+  # Temp git repo with a working-tree change so `git diff HEAD` is non-empty.
+  REPO="$(mktemp -d)"
+  cd "$REPO" || return 1
+  git init -q .
+  git config user.email t@t.t
+  git config user.name t
+  echo base > a.txt
+  git add a.txt
+  git commit -qm init
+  echo modified > a.txt
+
+  # Temp dirs for the mock pi and its call log.
+  CALL_LOG="$(mktemp)"
+  ARGV_LOG="$(mktemp)"
+  FIXTURES_DIR="$(mktemp -d)"
+  BIN_DIR="$(mktemp -d)"
+  ln -s "$FIXTURES/mock-pi" "$BIN_DIR/pi"
+  export PATH="$BIN_DIR:$PATH"
+  export MOCK_PI_CALL_LOG="$CALL_LOG"
+  export MOCK_PI_ARGV_LOG="$ARGV_LOG"
+  export MOCK_PI_FIXTURES_DIR="$FIXTURES_DIR"
+}
+
+teardown() {
+  cd "$REPO" 2>/dev/null || true
+  rm -rf "$REPO" "$CALL_LOG" "$ARGV_LOG" "$FIXTURES_DIR" "$BIN_DIR"
+}
+
+run_driver() {
+  local tmp
+  tmp="$(mktemp)"
+  local rc=0
+  bash "$SCRIPT" "$@" >"$tmp" 2>&1 || rc=$?
+  lines=()
+  while IFS= read -r l; do lines+=("$l"); done < "$tmp"
+  status=$rc
+  rm -f "$tmp"
+  return 0
+}
+
+# tail_json: print the last line (the JSON summary).
+tail_json() { printf '%s' "${lines[${#lines[@]}-1]}"; }
+
+# pi_calls: number of pi invocations made by the driver.
+pi_calls() { wc -l <"$CALL_LOG" | tr -d ' '; }
+
+# fixture <n> <text-lines...> — write a pi JSONL fixture for pi call number <n>.
+# The lines are joined with newlines and wrapped in a message_end assistant envelope.
+fixture() {
+  local n="$1"; shift
+  local text; text="$(printf '%s\n' "$@")"
+  printf '%s' "$text" | jq -Rs '{type:"message_end",message:{role:"assistant",stopReason:"stop",content:[{type:"text",text:.}]}}' > "$FIXTURES_DIR/$n"
+}
+
+# --- Entry ------------------------------------------------------------------
+
+@test "empty diff -> EMPTY_DIFF, exit 0, zero pi calls" {
+  git checkout -q a.txt
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  [ ! -s "$CALL_LOG" ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "EMPTY_DIFF" ]
+  [ "$(printf '%s' "$out" | jq -r .total_pi_calls)" = "0" ]
+}
+
+@test "not a git repo -> exit 3 with clear message" {
+  local dir out rc
+  dir="$(mktemp -d)"
+  rc=0
+  out="$(cd "$dir" && bash "$SCRIPT" "do it" 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"git"* ]]
+}
+
+@test "pi not found -> exit 3 with install hint" {
+  # Block both PATH and the well-known fallback locations by pointing HOME
+  # at an empty temp dir (the fallbacks are ~/.bun/bin and ~/.local/bin).
+  local fakehome out rc
+  fakehome="$(mktemp -d)"
+  rc=0
+  out="$(HOME="$fakehome" PATH=/usr/bin:/bin bash "$SCRIPT" "do it" 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"pi"* ]]
+}
+
+# --- Loop + hard caps --------------------------------------------------------
+
+@test "default max-rounds 3 with ISSUES_FOUND at terminal round: PASSED_WITH_FINDINGS, 6 pi calls" {
+  local i
+  for i in 2 4 6; do
+    fixture "$i" 'All checks failed.' '- finding one' '- finding two' 'VERDICT: ISSUES_FOUND'
+  done
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  [ "$(pi_calls)" -eq 6 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASSED_WITH_FINDINGS" ]
+  [ "$(printf '%s' "$out" | jq -r .total_pi_calls)" = "6" ]
+  [ "$(printf '%s' "$out" | jq -r .rounds)" = "3" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "ISSUES_FOUND" ]
+}
+
+@test "CRITICAL_ISSUES_FOUND at terminal round: REJECTED, 6 pi calls" {
+  local i
+  for i in 2 4 6; do
+    fixture "$i" 'Broken.' '- [a.txt:1] data loss' 'VERDICT: CRITICAL_ISSUES_FOUND'
+  done
+  run_driver "do it"
+  [ "$status" -eq 1 ]
+  [ "$(pi_calls)" -eq 6 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "REJECTED" ]
+  [ "$(printf '%s' "$out" | jq -r .total_pi_calls)" = "6" ]
+  [ "$(printf '%s' "$out" | jq -r .rounds)" = "3" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "CRITICAL_ISSUES_FOUND" ]
+}
+
+@test "--max-rounds 5 is rejected (hard cap 3), exit 2" {
+  run_driver --max-rounds 5 "do it"
+  [ "$status" -eq 2 ]
+  [ ! -s "$CALL_LOG" ]
+}
+
+
+
+# --- Happy paths --------------------------------------------------------------
+
+@test "APPROVED on first review -> PASS, 2 pi calls" {
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  [ "$(pi_calls)" -eq 2 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
+}
+
+@test "MINOR_OBSERVATIONS -> PASSED_WITH_FINDINGS, findings extracted, exit 0" {
+  fixture 2 'A few nits.' '- [a.txt:1] naming nit' 'VERDICT: MINOR_OBSERVATIONS'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  [ "$(pi_calls)" -eq 2 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASSED_WITH_FINDINGS" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "MINOR_OBSERVATIONS" ]
+  local findings
+  findings="$(printf '%s' "$out" | jq -c .findings)"
+  [ "$findings" = '["[a.txt:1] naming nit"]' ]
+}
+
+@test "ISSUES_FOUND then fix then APPROVED -> PASS, 4 pi calls" {
+  fixture 2 'Broken.' '- [a.txt:1] wrong value' 'VERDICT: ISSUES_FOUND'
+  fixture 3 'Fix applied.'
+  fixture 4 'All good now.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  [ "$(pi_calls)" -eq 4 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
+  [ "$(printf '%s' "$out" | jq -r .total_pi_calls)" = "4" ]
+}
+
+@test "fixer prompt threads the prior review findings forward" {
+  fixture 2 'Broken.' '- [a.txt:1] wrong value' 'VERDICT: ISSUES_FOUND'
+  fixture 3 'Fix applied.'
+  fixture 4 'All good now.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  [ "$(pi_calls)" -eq 4 ]
+  # The fix call (call 3) must reference the findings from the review (call 2).
+  # Verify by checking the ARGV_LOG: the fix prompt (last arg of call 3)
+  # should contain the finding text. Since multi-line args break the
+  # one-line-per-arg format, we grep for the finding text in the log
+  # and verify it appears in a line that also contains "findings".
+  grep -q "a.txt:1] wrong value" "$ARGV_LOG"
+}
+
+# --- Verdict parser -----------------------------------------------------------
+
+@test "last occurrence wins when verdict appears earlier in prose" {
+  fixture 2 'An earlier draft said VERDICT: ISSUES_FOUND but I walked it back.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
+}
+
+@test "case-insensitive verdict with markdown bold and missing colon" {
+  fixture 2 '**verdict** **approved**'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
+}
+
+@test "unparseable reviewer output -> INCOMPLETE, exit 2" {
+  fixture 2 'I could not reach a conclusion about this diff.'
+  run_driver "do it"
+  [ "$status" -eq 2 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "INCOMPLETE" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "null" ]
+}
+
+# --- pi error surface ----------------------------------------------------------
+
+@test "pi crash on review -> PI_ERROR, stderr surfaced verbatim, exit 3" {
+  printf 'EXIT:1\nauth failure: token expired\n' > "$FIXTURES_DIR/2"
+  run_driver "do it"
+  [ "$status" -eq 3 ]
+  [ "$(pi_calls)" -eq 2 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PI_ERROR" ]
+  printf '%s\n' "${lines[@]}" | grep -q "auth failure: token expired"
+}
+
+# --- pi call interface ---------------------------------------------------------
+
+@test "every pi call uses the headless json invocation with role templates" {
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  run_driver --model gpt-test "do it"
+  # Verify the key flags appear in the call log (each pi call logs all its args).
+  for flag in --mode -p --no-session --no-extensions --no-skills --no-prompt-templates; do
+    grep -q -- "$flag" "$ARGV_LOG"
+  done
+  grep -q "gpt-test" "$ARGV_LOG"
+}
+
+@test "developer gets full tools (no --tools); reviewer is restricted to read-only" {
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  # --tools appears exactly once (reviewer call); developer call has no --tools.
+  grep -q -- '--tools' "$ARGV_LOG"
+  grep -q 'read,grep,find,ls' "$ARGV_LOG"
+}
+
+@test "developer.md and adversarial-reviewer.md are passed via --append-system-prompt" {
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  # --append-system-prompt must appear (both calls use it); --system-prompt must not.
+  grep -q -- '--append-system-prompt' "$ARGV_LOG"
+  ! grep -q -- '--system-prompt ' "$ARGV_LOG"
+}
+
+@test "review prompt contains a fresh git diff snapshot" {
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  # The review prompt (call 2) must embed the current diff. The diff text
+  # appears in the ARGV_LOG as part of the review prompt arg.
+  grep -q "diff --git a/a.txt b/a.txt" "$ARGV_LOG"
+  grep -q -- "-base" "$ARGV_LOG"
+  grep -q -- "+modified" "$ARGV_LOG"
+}
+
+@test "round announcements go to stderr with round numbering" {
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  local all
+  all="$(printf '%s\n' "${lines[@]}")"
+  [[ "$all" == *"Round 1/3: reviewing"* ]]
+}
+
+# --- CLI validation -----------------------------------------------------------
+
+@test "unknown option -> usage error, exit 2" {
+  run_driver --bogus "x"
+  [ "$status" -eq 2 ]
+}
+
+@test "--max-rounds 0 -> usage error, exit 2" {
+  run_driver --max-rounds 0 "x"
+  [ "$status" -eq 2 ]
+}
+
+@test "missing task -> usage error, exit 2" {
+  run_driver
+  [ "$status" -eq 2 ]
+}
