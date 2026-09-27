@@ -13,45 +13,44 @@ headless `pi` coding agent. The loop is driven entirely by
 the loop. Your job is to invoke the script, read its JSON summary, verify
 pi's claims against the actual diff, and report the verdict.
 
-Bundled in this skill directory. Claude Code sets `CLAUDE_SKILL_DIR` to the
-absolute path of this skill's directory (the directory containing this
-SKILL.md); use it to locate the bundled files, which live next to it:
-
-- `${CLAUDE_SKILL_DIR}/orchestrate.sh` — the loop driver
-- `${CLAUDE_SKILL_DIR}/developer.md` — developer/fixer role prompt (passed to pi via `--append-system-prompt`)
-- `${CLAUDE_SKILL_DIR}/adversarial-reviewer.md` — reviewer role prompt (passed to pi via `--append-system-prompt`)
-
 ## Invocation
 
-Run the loop with the user's request as the task, passed through verbatim
-as `$ARGUMENTS`:
+Run the loop with the user's request as the task. Quote `$ARGUMENTS` and
+pass it through as a **single argument**:
 
 ```bash
-bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" $ARGUMENTS
+bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"
 ```
 
-- `$ARGUMENTS` is intentionally left **unquoted** so the user's request is
-  passed through verbatim: bash word-splits it but never re-evaluates it as
-  shell syntax, and `orchestrate.sh` re-folds the positionals back into a
-  single task string. Do **not** "fix" the splitting by switching to
-  `eval` / `sh -c` / `bash -c` — that would turn the passthrough into a
-  command-injection hole.
+- **Quote `$ARGUMENTS`.** An unquoted `$ARGUMENTS` still performs command
+  substitution: `bash orchestrate.sh $ARGUMENTS` with a request containing
+  `$(id -u)` executes that command before the script ever runs. Quoting is
+  the only safe passthrough — `orchestrate.sh` receives the request as one
+  argument and never re-evaluates it.
+- Do **not** use `eval` or `sh -c` / `bash -c` — that would execute the
+  request as shell code, not pass it as a task string.
 - All progress goes to **stderr**. Except for CLI usage errors, exactly
   **one JSON summary** is on the **last line of stdout** — parse that last
   line as JSON (e.g. with `jq`). A CLI usage error (bad flag, missing task,
-  invalid `--max-rounds`) exits 2 with an `ERROR:` message on stderr only —
-  there is **no JSON** to parse; read stderr.
-- The script requires git, jq, and the `pi` binary (PATH, then
-  `~/.bun/bin/pi`, then `~/.local/bin/pi`), and an empty `git diff HEAD`
-  produces an immediate `EMPTY_DIFF` result — do not pre-filter these
-  yourself; interpret them from the JSON summary / exit code.
+  invalid `--max-rounds`, invalid `PI_TIMEOUT`) exits 2 with an `ERROR:`
+  message on stderr only — no JSON; read stderr.
+- The script requires git, jq, and the `pi` binary, and an empty
+  `git diff HEAD` produces an immediate `EMPTY_DIFF` result — do not
+  pre-filter these yourself; interpret them from the JSON summary / exit
+  code.
+- Each pi call is bounded by `PI_TIMEOUT` seconds (default 1800). A call
+  that hangs past the limit surfaces as `PI_ERROR` / exit 3. If the entire
+  script produces no output for an extended period, check that the pi
+  binary and git are available and that the working tree has an uncommitted
+  diff; a run with no progress is safe to interrupt and re-run.
 
 ### Model passthrough
 
 - If the user explicitly named a model, prepend `--model <model>` to the
   same invocation:
-  `bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" --model <model> $ARGUMENTS`.
-  It is forwarded to every pi call in the loop.
+  `bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" --model <model> "$ARGUMENTS"`.
+  It is forwarded to every pi call in the loop. Quote `"$ARGUMENTS"`
+  throughout (see Invocation); never pass it through unquoted.
 - Otherwise omit `--model` — pi uses its configured default.
 - `--max-rounds <N>` (1–3, default 3) is also passed through if the user
   asks for a smaller review budget; the script rejects values above 3.
@@ -70,7 +69,8 @@ The summary on the last stdout line has this shape:
 | `verdict` | Reviewer verdict enum (`APPROVED`, `MINOR_OBSERVATIONS`, `ISSUES_FOUND`, `CRITICAL_ISSUES_FOUND`) or `null` |
 | `rounds` | Review rounds executed (develop round is not counted) |
 | `total_pi_calls` | Total pi invocations used (hard cap 6) |
-| `findings` | Findings list extracted from the latest review (may be empty) |
+| `fix_calls` | Fix rounds executed (0–2) |
+| `findings` | Bullet/numbered lines from the reviewer transcript (may be empty) — verify each against the diff before reporting |
 | `raw_output` | The final pi transcript of the last round — treat as claims to verify, not truth |
 
 ### Exit codes
@@ -79,8 +79,8 @@ The summary on the last stdout line has this shape:
 |---|---|
 | 0 | Success — status is `PASS`, `PASSED_WITH_FINDINGS`, or `EMPTY_DIFF` |
 | 1 | `REJECTED` — the loop budget ran out without a terminal approval (or `CRITICAL_ISSUES_FOUND` at the terminal round) |
-| 2 | `INCOMPLETE` — pi produced no parseable verdict (JSON summary emitted) — **or** a CLI usage error (bad flag / missing task / invalid `--max-rounds`), which exits with an `ERROR:` message on stderr only, no JSON |
-| 3 | `PI_ERROR` — pi missing, pi crashed, a `git diff HEAD` call failed, or a pi call timed out. Missing git/jq/pi exits with stderr only, no JSON; the other causes emit a JSON summary |
+| 2 | `INCOMPLETE` — pi produced no parseable verdict (JSON summary emitted) — **or** a CLI usage error (bad flag / missing task / invalid `--max-rounds` / invalid `PI_TIMEOUT`), which exits with an `ERROR:` message on stderr only, no JSON (see Invocation) |
+| 3 | `PI_ERROR` — pi missing, pi crashed, a `git diff HEAD` call failed, or a pi call timed out. Missing git/jq/pi exits with stderr only, no JSON (see Invocation); the other causes emit a JSON summary |
 
 ## Verifying pi's claims (colleague, not authority)
 
@@ -104,22 +104,11 @@ Report to the user, in this order:
    "Nothing to review — working tree clean").
 2. **The findings** — the `findings` list, one per line, after your own
    verification step above.
-3. **What was done about them** — how many fix rounds ran (derived from
-   `total_pi_calls` minus develop + review rounds) and whether the issues
-   were resolved, with what you verified in the diff.
+3. **What was done about them** — the `fix_calls` count (how many fix
+   rounds ran) and whether the issues were resolved, with what you
+   verified in the diff.
 4. **Failures** — for exit 2 or 3, relay the error context from stderr
-   and, if a JSON summary was emitted, its `raw_output` (usage errors and
-   missing git/jq/pi produce stderr only), and offer a re-run.
-   - **Usage errors** (exit 2, no JSON): the flag or task was malformed —
-     fix the invocation, don't change the environment.
-   - **INCOMPLETE** (exit 2, `status: "INCOMPLETE"`): the reviewer call
-     succeeded but produced no parseable `VERDICT:` line. Inspect
-     `raw_output` — if it has review text but no verdict line, the model
-     didn't follow instructions (re-run, possibly with a clearer task or a
-     different model); if it is empty, pi crashed silently — check the pi
-     binary and environment.
-   - **PI_ERROR** (exit 3, `status: "PI_ERROR"`): suggest fixing the
-     environment or the invocation (e.g. install pi/jq, check `git
-     status`), depending on the stderr message.
+   and, if a JSON summary was emitted, its `raw_output`. Usage errors and
+   missing git/jq/pi produce stderr only (see Invocation).
 
 Do not paste the full `raw_output` transcript unless the user asks for it.
