@@ -34,8 +34,9 @@
 #       with git's stderr surfaced verbatim, or pi timed out after
 #       PI_TIMEOUT seconds)
 #   2  is also used for CLI usage errors (unknown flag, missing task,
-#       invalid --max-rounds) — the spec defines exit codes 0-3 only, and
-#       a distinct usage code would require a new code; documented here.
+#       invalid --max-rounds, invalid PI_TIMEOUT) — the spec defines exit
+#       codes 0-3 only, and a distinct usage code would require a new code;
+#       documented here.
 
 set -euo pipefail
 
@@ -92,19 +93,23 @@ fi
 
 log() { printf '%s\n' "$*" >&2; }
 
+# die_env <hint|-> — fatal environment error (exit 3). When $1 is not "-",
+# an install hint for pi/jq is appended (for missing-binary errors only).
 die_env() {
-  log "ERROR: $1"
-  log "hint: install pi (bun install -g @earendil-works/pi-coding-agent) and jq (brew install jq)"
-  log "hint: run orchestrate.sh from inside a git repository"
+  local hint="${1:--}"
+  log "ERROR: $2"
+  if [ "$hint" != "-" ]; then
+    log "hint: install pi (bun install -g @earendil-works/pi-coding-agent) and jq (brew install jq)"
+  fi
   exit 3
 }
 
-command -v git >/dev/null 2>&1 || die_env "git is not installed or not on PATH"
-git rev-parse --git-dir >/dev/null 2>&1 || die_env "not inside a git repository"
-command -v jq >/dev/null 2>&1 || die_env "jq is not installed or not on PATH"
+command -v git >/dev/null 2>&1 || die_env "-" "git is not installed or not on PATH"
+git rev-parse --git-dir >/dev/null 2>&1 || die_env "-" "not inside a git repository"
+command -v jq >/dev/null 2>&1 || die_env hint "jq is not installed or not on PATH"
 
 for f in "$DEVELOPER_MD" "$REVIEWER_MD"; do
-  [ -f "$f" ] || die_env "missing role prompt: $f"
+  [ -f "$f" ] || die_env "-" "missing role prompt: $f"
 done
 
 # Load the role prompts once at startup (not via `cat` inside run_pi).
@@ -128,7 +133,7 @@ find_pi() {
   return 1
 }
 
-PI_BIN="$(find_pi)" || die_env "pi executable not found (PATH, ~/.bun/bin, ~/.local/bin)"
+PI_BIN="$(find_pi)" || die_env hint "pi executable not found (PATH, ~/.bun/bin, ~/.local/bin)"
 
 # pi timeout: `timeout` (coreutils) or `gtimeout` (macOS); unbounded if
 # neither exists (a warning is logged once).
@@ -454,8 +459,15 @@ fi
 log "=== Done: ${status} (rounds=${round}, pi_calls=${total_pi_calls}) ==="
 emit_json "$status" "$verdict" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"
 
+# Final exit mapping. INCOMPLETE exits 2 immediately after emitting its JSON
+# summary (above), so it never reaches this case; the *) arm guards against
+# an unhandled status leaking into the wrong exit code.
 case "$status" in
   PASS|PASSED_WITH_FINDINGS|EMPTY_DIFF) exit 0 ;;
   REJECTED) exit 1 ;;
-  *) exit 2 ;;
+  INCOMPLETE) exit 2 ;;
+  *)
+    log "internal error: unknown status '${status:-<unset>}'"
+    exit 3
+    ;;
 esac

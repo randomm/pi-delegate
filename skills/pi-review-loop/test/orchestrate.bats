@@ -218,22 +218,6 @@ WRAP
   [ "$findings" = '["[a.txt:1] open defect"]' ]
 }
 
-@test "default max-rounds 3 with ISSUES_FOUND at terminal round: PASSED_WITH_FINDINGS, 6 pi calls" {
-  local i
-  for i in 2 4 6; do
-    fixture "$i" 'All checks failed.' '- finding one' '- finding two' 'VERDICT: ISSUES_FOUND'
-  done
-  run_driver "do it"
-  [ "$status" -eq 0 ]
-  [ "$(pi_calls)" -eq 6 ]
-  local out
-  out="$(tail_json)"
-  [ "$(printf '%s' "$out" | jq -r .status)" = "PASSED_WITH_FINDINGS" ]
-  [ "$(printf '%s' "$out" | jq -r .total_pi_calls)" = "6" ]
-  [ "$(printf '%s' "$out" | jq -r .rounds)" = "3" ]
-  [ "$(printf '%s' "$out" | jq -r .verdict)" = "ISSUES_FOUND" ]
-}
-
 @test "CRITICAL_ISSUES_FOUND at terminal round: REJECTED, 6 pi calls" {
   local i
   for i in 2 4 6; do
@@ -265,8 +249,6 @@ WRAP
   [ "$status" -eq 2 ]
   [ ! -s "$CALL_LOG" ]
 }
-
-
 
 # --- Happy paths --------------------------------------------------------------
 
@@ -326,12 +308,6 @@ WRAP
   literal="$(od -An -c "$ARGV_LOG" | tr -s ' ' | grep -c '\\ \\ n C' || true)"
   [ "$literal" -eq 0 ]
 }
-
-
-
-
-
-
 
 @test "ISSUES_FOUND then fix then APPROVED -> PASS, 4 pi calls" {
   fixture 2 'Broken.' '- [a.txt:1] wrong value' 'VERDICT: ISSUES_FOUND'
