@@ -133,6 +133,9 @@ PI_BIN="$(find_pi)" || die_env "pi executable not found (PATH, ~/.bun/bin, ~/.lo
 # pi timeout: `timeout` (coreutils) or `gtimeout` (macOS); unbounded if
 # neither exists (a warning is logged once).
 PI_TIMEOUT="${PI_TIMEOUT:-1800}"
+if ! [[ "$PI_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$PI_TIMEOUT" -lt 1 ]; then
+  die_usage "PI_TIMEOUT must be a positive integer (got: $PI_TIMEOUT)"
+fi
 TIMEOUT_CMD=""
 if command -v timeout >/dev/null 2>&1; then
   TIMEOUT_CMD="timeout"
@@ -209,8 +212,9 @@ die_git_error() {
   exit 3
 }
 
-# Truncate the review diff to PI_DIFF_MAX_BYTES (default 100000), keeping
-# whole lines and appending a truncation notice if anything was dropped.
+# Truncate the review diff (or any embedded text such as the reviewer
+# transcript in a fix prompt) to PI_DIFF_MAX_BYTES (default 100000),
+# keeping whole lines and appending a truncation notice if dropped.
 # Rationale: the diff is embedded in a single argv element passed to pi,
 # and Linux caps one argument at ~128KB (MAX_ARG_STRLEN). Byte lengths
 # are computed with LC_ALL=C so ${#s} counts bytes, not characters.
@@ -226,8 +230,13 @@ trim_diff() {
   shown="$(printf '%s' "$raw" | head -c "$limit")"
   # If the cut landed mid-line, drop the trailing partial line so the
   # prompt never contains a broken diff line.
-  if [[ "$shown" != *$'\n' ]]; then
-    shown="$(printf '%s\n' "$shown" | head -n -1)"
+  # If the cut landed mid-line, drop the trailing partial line so the
+  # prompt never contains a broken diff line. Pure parameter expansion so
+  # the behaviour is identical on GNU and BSD (macOS `head -n -1` fails).
+  if [[ "$shown" == *$'\n'* ]]; then
+    shown="${shown%$'\n'*}"
+  else
+    shown=""
   fi
   printf '%s\n[diff truncated: %s of %s bytes shown (PI_DIFF_MAX_BYTES=%s)]' "$shown" "${#shown}" "$total" "$limit"
 }
@@ -329,9 +338,13 @@ dispatch_fix() {
   fix_calls=$((fix_calls + 1))
   log "${label} — dispatching fix (${fix_calls}/${MAX_FIXES})"
   log "=== Round ${round}/${max_rounds}: fix ==="
+  # Cap the reviewer transcript threaded into the fix prompt so the total
+  # prompt stays well under MAX_ARG_STRLEN (~128KB), like the review diff.
+  local transcript_to_embed
+  transcript_to_embed="$(trim_diff "$last_transcript")"
   local fix_prompt="Fix the following reviewer findings in the working tree. Address each finding; do not change anything else."
   [ -n "$last_review_summary" ] && fix_prompt="${fix_prompt}"$'\n\n'"Context from an earlier review round:"$'\n'"${last_review_summary}"
-  fix_prompt="${fix_prompt}"$'\n\n'"Current findings from the latest review:"$'\n'"${last_transcript}"
+  fix_prompt="${fix_prompt}"$'\n\n'"Current findings from the latest review:"$'\n'"${transcript_to_embed}"
   fix_prompt="${fix_prompt}"$'\n\n'"Task:"$'\n'"${task}"
   pi_stderr=""
   if ! run_pi "$fix_prompt" "$developer_md_content" "-"; then
@@ -344,6 +357,10 @@ dispatch_fix() {
 # --- Entry: diff must be non-empty ----------------------------------------
 
 GIT_ERR_FILE="$(mktemp)"
+# git stderr lands in GIT_ERR_FILE only on failure paths that exit
+# immediately (die_git_error / fail_pi_error / INCOMPLETE), so a single
+# EXIT trap covers every exit route without double-cleanup races.
+trap 'rm -f "$GIT_ERR_FILE"' EXIT
 entry_diff=""
 diff_rc=0
 entry_diff="$(get_diff "entry")" || diff_rc=$?
@@ -351,7 +368,6 @@ if [ "$diff_rc" -eq 2 ]; then
   die_git_error
 fi
 if [ "$diff_rc" -ne 0 ] || [ -z "$entry_diff" ]; then
-  rm -f "$GIT_ERR_FILE"
   emit_json "EMPTY_DIFF" "" 0 0 '[]' ""
   exit 0
 fi
@@ -379,7 +395,6 @@ while [ "$round" -lt "$max_rounds" ]; do
     die_git_error
   fi
   if [ "$diff_rc" -ne 0 ] || [ -z "$current_diff" ]; then
-    rm -f "$GIT_ERR_FILE"
     log "Working-tree diff is empty after round ${round} — nothing left to review."
     status="EMPTY_DIFF"
     emit_json "EMPTY_DIFF" "$verdict" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"

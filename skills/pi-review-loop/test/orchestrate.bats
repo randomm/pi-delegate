@@ -170,6 +170,25 @@ WRAP
   grep -q "PI_DIFF_MAX_BYTES=400)" "$ARGV_LOG"
   # The prompt must still embed the diff marker.
   grep -q "Current diff (git diff HEAD):" "$ARGV_LOG"
+  # The truncation must keep a non-trivial head of the diff — on BSD head
+  # (macOS) the old `head -n -1` line trim silently produced an empty diff.
+  # 400-byte cap on a ~5KB diff: at least the first diff line must remain.
+  grep -q "diff --git a/a.txt b/a.txt" "$ARGV_LOG"
+}
+
+@test "fix prompt embeds the reviewer transcript, capped (PI_DIFF_MAX_BYTES=50)" {
+  # A verbose reviewer transcript must be capped in the fix prompt, not
+  # embedded unbounded (the fix prompt shares the same MAX_ARG_STRLEN limit).
+  local big
+  big="$(head -c 1000 /dev/zero | tr '\0' 'x')"
+  fixture 2 "${big}" 'VERDICT: ISSUES_FOUND'
+  fixture 3 'Fix applied.'
+  PI_DIFF_MAX_BYTES=50 bash "$SCRIPT" "do it" >/dev/null 2>&1 || true
+  # The fix prompt (call 3) must carry a truncation notice for the transcript.
+  grep -q "diff truncated" "$ARGV_LOG"
+  # The bulk of the transcript must NOT be embedded (it would appear as
+  # 1000 consecutive 'x' characters in the argv log).
+  ! grep -q "${big}" "$ARGV_LOG"
 }
 
 @test "small diff is NOT truncated (no notice under PI_DIFF_MAX_BYTES)" {
