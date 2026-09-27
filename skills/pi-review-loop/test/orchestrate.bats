@@ -377,7 +377,22 @@ WRAP
   local out
   out="$(tail_json)"
   [ "$(printf '%s' "$out" | jq -r .status)" = "PI_ERROR" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "null" ]
   printf '%s\n' "${lines[@]}" | grep -q "auth failure: token expired"
+}
+
+@test "PI_ERROR summary exposes the verdict key (null when absent)" {
+  # Regression guard: the JSON contract says the `verdict` key is always
+  # present (null when no verdict was reached). If fail_pi_error ever
+  # stops passing the verdict argument, the key disappears from the
+  # summary and agents parsing with `.verdict` misclassify the schema.
+  printf 'EXIT:1\nboom\n' > "$FIXTURES_DIR/2"
+  run_driver "do it"
+  [ "$status" -eq 3 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r 'has("verdict")')" = "true" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "null" ]
 }
 
 @test "mock call log is valid JSON on every line (jq -Rs printf %j)" {
