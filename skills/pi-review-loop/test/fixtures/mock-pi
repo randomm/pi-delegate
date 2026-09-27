@@ -13,6 +13,9 @@
 #   - If the fixture starts with "EXIT:" it encodes a non-zero exit:
 #     the first line is EXIT:<code> and the remaining lines are emitted
 #     on stderr (simulating a pi crash / auth failure).
+#   - If the fixture starts with "SLEEP:<n>" it sleeps n seconds first
+#     (used to exercise the driver's PI_TIMEOUT path), then emits the
+#     remaining lines on stdout and exits 0.
 #   - Otherwise the fixture is emitted on stdout and the call exits 0.
 
 log_call() {
@@ -35,6 +38,9 @@ log_call() {
 log_call "$@"
 n="$(wc -l <"$MOCK_PI_CALL_LOG" | tr -d ' ')"
 
+# Never inherit an open stdin (a bare SLEEP: fixture would hang tail).
+exec </dev/null
+
 if [ -n "${MOCK_PI_FIXTURES_DIR:-}" ] && [ -f "$MOCK_PI_FIXTURES_DIR/$n" ]; then
   first="$(head -n 1 "$MOCK_PI_FIXTURES_DIR/$n")"
   case "$first" in
@@ -42,6 +48,10 @@ if [ -n "${MOCK_PI_FIXTURES_DIR:-}" ] && [ -f "$MOCK_PI_FIXTURES_DIR/$n" ]; then
       code="${first#EXIT:}"
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n" >&2
       exit "$code"
+      ;;
+    SLEEP:*)
+      sleep "${first#SLEEP:}"
+      tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
       ;;
     *)
       cat "$MOCK_PI_FIXTURES_DIR/$n"

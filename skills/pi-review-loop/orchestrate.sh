@@ -13,6 +13,16 @@
 #   --max-rounds <N> Review-round budget. Default 3, hard cap 3 (develop
 #                    1 + review 3 + fix 2 = 6 total pi invocations).
 #
+# Environment:
+#   PI_DIFF_MAX_BYTES  Max bytes of diff embedded in a review prompt.
+#                      Default 100000 (Linux caps a single argv element
+#                      at ~128KB, MAX_ARG_STRLEN; keep the prompt arg
+#                      well under that).
+#   PI_TIMEOUT         Seconds to allow each pi invocation. Default 1800.
+#                      Requires `timeout` (coreutils) or `gtimeout`
+#                      (macOS brew coreutils) on PATH; if neither exists,
+#                      pi runs unbounded and a warning is logged once.
+#
 # Output: all progress on stderr; exactly one JSON summary on the LAST
 # line of stdout (built with jq, never string interpolation).
 #
@@ -20,7 +30,9 @@
 #   0  PASS | PASSED_WITH_FINDINGS | EMPTY_DIFF
 #   1  REJECTED (budget exhausted, no terminal verdict reached)
 #   2  INCOMPLETE (no parseable verdict from pi)
-#   3  PI_ERROR   (pi missing, not a git repo, or pi crashed)
+#   3  PI_ERROR   (pi missing, pi crashed, a `git diff HEAD` call failed
+#       with git's stderr surfaced verbatim, or pi timed out after
+#       PI_TIMEOUT seconds)
 #   2  is also used for CLI usage errors (unknown flag, missing task,
 #       invalid --max-rounds) — the spec defines exit codes 0-3 only, and
 #       a distinct usage code would require a new code; documented here.
@@ -34,6 +46,9 @@ readonly REVIEWER_MD="${SCRIPT_DIR}/adversarial-reviewer.md"
 readonly DEFAULT_MAX_ROUNDS=3
 readonly HARD_MAX_ROUNDS=3
 readonly MAX_FIXES=2
+# MAX_TOTAL_CALLS is implied by the round cap + fix cap (develop 1 +
+# review 3 + fix 2 = 6); it is kept to mirror the spec's "total ≤ 6
+# pi invocations" wording and as a second, independent guard.
 readonly MAX_TOTAL_CALLS=6
 
 # --- CLI parsing ----------------------------------------------------------
@@ -92,6 +107,10 @@ for f in "$DEVELOPER_MD" "$REVIEWER_MD"; do
   [ -f "$f" ] || die_env "missing role prompt: $f"
 done
 
+# Load the role prompts once at startup (not via `cat` inside run_pi).
+developer_md_content="$(cat "$DEVELOPER_MD")"
+reviewer_md_content="$(cat "$REVIEWER_MD")"
+
 # pi discovery: PATH first (`command -v pi` + executable check), then
 # well-known install locations.
 find_pi() {
@@ -110,6 +129,17 @@ find_pi() {
 }
 
 PI_BIN="$(find_pi)" || die_env "pi executable not found (PATH, ~/.bun/bin, ~/.local/bin)"
+
+# pi timeout: `timeout` (coreutils) or `gtimeout` (macOS); unbounded if
+# neither exists (a warning is logged once).
+PI_TIMEOUT="${PI_TIMEOUT:-1800}"
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="gtimeout"
+fi
+no_timeout_warned=0
 
 # --- Loop state -----------------------------------------------------------
 
@@ -138,27 +168,99 @@ emit_json() {
 
 fail_pi_error() {
   # $1 = stderr text to surface verbatim
-  printf '%s\n' "$1" >&2
+  local stderr_text="$1"
+  [ -n "$stderr_text" ] || stderr_text="pi failed (no output)"
+  printf '%s\n' "$stderr_text" >&2
   emit_json "PI_ERROR" "$verdict" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"
   exit 3
 }
 
+# --- Diff snapshot --------------------------------------------------------
+# get_diff <label> — snapshot `git diff HEAD`. Returns 0 on a non-empty
+# diff (echoed on stdout), 1 on an empty diff, and 2 on a git failure.
+# On failure git's stderr is written to the file named by $GIT_ERR_FILE
+# (must be a writable path set by the caller). A variable cannot be used
+# because the function runs in a subshell when its stdout is captured.
+get_diff() {
+  local label="$1"
+  local diff rc errf
+  errf="$(mktemp)"
+  diff="$(git diff HEAD 2>"$errf")" || rc=$?
+  if [ "${rc:-0}" -ne 0 ]; then
+    cat "$errf" >"${GIT_ERR_FILE:?GIT_ERR_FILE not set}"
+    rm -f "$errf"
+    log "ERROR: git diff HEAD failed during ${label}"
+    return 2
+  fi
+  rm -f "$errf"
+  [ -n "$diff" ] || return 1
+  printf '%s' "$diff"
+}
+
+# die_git_error — surface a get_diff failure (rc 2) as PI_ERROR, reading
+# git's stderr from $GIT_ERR_FILE. Called from a plain statement (never
+# in an `if` condition), so its exit 3 is honored.
+die_git_error() {
+  local err=""
+  [ -s "${GIT_ERR_FILE:?}" ] && err="$(cat "$GIT_ERR_FILE")"
+  [ -n "$err" ] || err="git failed (no output)"
+  printf '%s\n' "$err" >&2
+  emit_json "PI_ERROR" "$verdict" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"
+  exit 3
+}
+
+# Truncate the review diff to PI_DIFF_MAX_BYTES (default 100000), keeping
+# whole lines and appending a truncation notice if anything was dropped.
+# Rationale: the diff is embedded in a single argv element passed to pi,
+# and Linux caps one argument at ~128KB (MAX_ARG_STRLEN). Byte lengths
+# are computed with LC_ALL=C so ${#s} counts bytes, not characters.
+trim_diff() {
+  local raw="$1" limit="${PI_DIFF_MAX_BYTES:-100000}"
+  local total shown
+  LC_ALL=C
+  total="${#raw}"
+  if [ "$total" -le "$limit" ]; then
+    printf '%s' "$raw"
+    return 0
+  fi
+  shown="$(printf '%s' "$raw" | head -c "$limit")"
+  # If the cut landed mid-line, drop the trailing partial line so the
+  # prompt never contains a broken diff line.
+  if [[ "$shown" != *$'\n' ]]; then
+    shown="$(printf '%s\n' "$shown" | head -n -1)"
+  fi
+  printf '%s\n[diff truncated: %s of %s bytes shown (PI_DIFF_MAX_BYTES=%s)]' "$shown" "${#shown}" "$total" "$limit"
+}
+
 # --- pi invocation --------------------------------------------------------
-# run_pi <prompt> <system-prompt-file|-> [tools]
+# run_pi <prompt> <system-prompt-content|-> [tools]
 # Runs pi headless in JSON mode; stores the extracted final text in
 # $last_transcript. Returns 1 (and sets $pi_stderr) on non-zero exit.
 run_pi() {
-  local prompt="$1" system_prompt_file="$2" tools="${3:--}"
+  local prompt="$1" system_prompt="$2" tools="${3:--}"
   local args=(--mode json -p --no-session --no-extensions --no-skills --no-prompt-templates)
-  [ "$system_prompt_file" != "-" ] && args+=(--append-system-prompt "$(cat "$system_prompt_file")")
+  [ "$system_prompt" != "-" ] && args+=(--append-system-prompt "$system_prompt")
   [ "$tools" != "-" ] && args+=(--tools "$tools")
   [ -n "$model_arg" ] && args+=(--model "$model_arg")
   args+=("$prompt")
 
   local rc=0
   local output
-  output="$("$PI_BIN" "${args[@]}" 2>&1)" || rc=$?
+  if [ -n "$TIMEOUT_CMD" ]; then
+    output="$("$TIMEOUT_CMD" "$PI_TIMEOUT" "$PI_BIN" "${args[@]}" </dev/null 2>&1)" || rc=$?
+  else
+    if [ "$no_timeout_warned" -eq 0 ]; then
+      no_timeout_warned=1
+      log "WARNING: neither timeout nor gtimeout found on PATH; pi calls run without a time limit"
+    fi
+    output="$("$PI_BIN" "${args[@]}" </dev/null 2>&1)" || rc=$?
+  fi
   total_pi_calls=$((total_pi_calls + 1))
+
+  if [ "$rc" -eq 124 ]; then
+    pi_stderr="pi timed out after ${PI_TIMEOUT}s"
+    return 1
+  fi
 
   if [ "$rc" -ne 0 ]; then
     pi_stderr="$output"
@@ -212,9 +314,44 @@ extract_findings() {
   findings_json="$f"
 }
 
+# dispatch_fix <label>
+# Shared body for the ISSUES_FOUND and CRITICAL_ISSUES_FOUND fix arms:
+# check the fix budget, then run one developer round against the
+# findings from the latest review. On success, threads the round summary
+# forward and returns 0; when the budget is exhausted, returns 1 (the
+# caller sets the terminal status).
+dispatch_fix() {
+  local label="$1"
+  if [ "$fix_calls" -ge "$MAX_FIXES" ] || [ "$total_pi_calls" -ge "$MAX_TOTAL_CALLS" ]; then
+    log "Fix budget exhausted (${fix_calls}/${MAX_FIXES}) without a terminal verdict."
+    return 1
+  fi
+  fix_calls=$((fix_calls + 1))
+  log "${label} — dispatching fix (${fix_calls}/${MAX_FIXES})"
+  log "=== Round ${round}/${max_rounds}: fix ==="
+  local fix_prompt="Fix the following reviewer findings in the working tree. Address each finding; do not change anything else."
+  [ -n "$last_review_summary" ] && fix_prompt="${fix_prompt}"$'\n\n'"Context from an earlier review round:"$'\n'"${last_review_summary}"
+  fix_prompt="${fix_prompt}"$'\n\n'"Current findings from the latest review:"$'\n'"${last_transcript}"
+  fix_prompt="${fix_prompt}"$'\n\n'"Task:"$'\n'"${task}"
+  pi_stderr=""
+  if ! run_pi "$fix_prompt" "$developer_md_content" "-"; then
+    fail_pi_error "$pi_stderr"
+  fi
+  last_review_summary="$(summarize_round "$last_transcript")"
+  return 0
+}
+
 # --- Entry: diff must be non-empty ----------------------------------------
 
-if [ -z "$(git diff HEAD 2>/dev/null)" ]; then
+GIT_ERR_FILE="$(mktemp)"
+entry_diff=""
+diff_rc=0
+entry_diff="$(get_diff "entry")" || diff_rc=$?
+if [ "$diff_rc" -eq 2 ]; then
+  die_git_error
+fi
+if [ "$diff_rc" -ne 0 ] || [ -z "$entry_diff" ]; then
+  rm -f "$GIT_ERR_FILE"
   emit_json "EMPTY_DIFF" "" 0 0 '[]' ""
   exit 0
 fi
@@ -223,7 +360,7 @@ fi
 
 log "=== Develop round (task: ${task}) ==="
 pi_stderr=""
-if ! run_pi "$task" "$DEVELOPER_MD" "-"; then
+if ! run_pi "$task" "$developer_md_content" "-"; then
   fail_pi_error "$pi_stderr"
 fi
 
@@ -233,9 +370,16 @@ while [ "$round" -lt "$max_rounds" ]; do
   round=$((round + 1))
   log "=== Round ${round}/${max_rounds}: reviewing ==="
 
-  # Fresh diff snapshot before every review round.
-  current_diff="$(git diff HEAD 2>/dev/null)"
-  if [ -z "$current_diff" ]; then
+  # Fresh diff snapshot before every review round (git errors here are
+  # PI_ERROR; a genuinely empty diff ends the loop with EMPTY_DIFF).
+  current_diff=""
+  diff_rc=0
+  current_diff="$(get_diff "review round ${round}")" || diff_rc=$?
+  if [ "$diff_rc" -eq 2 ]; then
+    die_git_error
+  fi
+  if [ "$diff_rc" -ne 0 ] || [ -z "$current_diff" ]; then
+    rm -f "$GIT_ERR_FILE"
     log "Working-tree diff is empty after round ${round} — nothing left to review."
     status="EMPTY_DIFF"
     emit_json "EMPTY_DIFF" "$verdict" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"
@@ -245,10 +389,10 @@ while [ "$round" -lt "$max_rounds" ]; do
   review_prompt="Adversarially review the current working-tree diff against the task below."
   [ -n "$last_review_summary" ] && review_prompt="${review_prompt}"$'\n\n'"Context from the previous review round:"$'\n'"${last_review_summary}"
   review_prompt="${review_prompt}"$'\n\n'"Task:"$'\n'"${task}"
-  review_prompt="${review_prompt}"$'\n\n'"Current diff (git diff HEAD):"$'\n'"${current_diff}"
+  review_prompt="${review_prompt}"$'\n\n'"Current diff (git diff HEAD):"$'\n'"$(trim_diff "$current_diff")"
 
   pi_stderr=""
-  if ! run_pi "$review_prompt" "$REVIEWER_MD" "read,grep,find,ls"; then
+  if ! run_pi "$review_prompt" "$reviewer_md_content" "read,grep,find,ls"; then
     fail_pi_error "$pi_stderr"
   fi
 
@@ -272,50 +416,20 @@ while [ "$round" -lt "$max_rounds" ]; do
         # ISSUES_FOUND at the terminal round: passed with findings.
         log "ISSUES_FOUND at terminal round — PASSED_WITH_FINDINGS."
         status="PASSED_WITH_FINDINGS"
-        break
-      elif [ "$fix_calls" -lt "$MAX_FIXES" ] && [ "$total_pi_calls" -lt "$MAX_TOTAL_CALLS" ]; then
-        fix_calls=$((fix_calls + 1))
-        log "Findings — dispatching fix (${fix_calls}/${MAX_FIXES})"
-        log "=== Round ${round}/${max_rounds}: fix ==="
-        fix_prompt="Fix the following reviewer findings in the working tree. Address each finding; do not change anything else."
-        [ -n "$last_review_summary" ] && fix_prompt="${fix_prompt}"$'\n\n'"Context from an earlier review round:"$'\n'"${last_review_summary}"
-        fix_prompt="${fix_prompt}"$'\n\n'"Current findings from the latest review:"$'\n'"${last_transcript}"
-        fix_prompt="${fix_prompt}"$'\n\n'"Task:"$'\n'"${task}"
-        pi_stderr=""
-        if ! run_pi "$fix_prompt" "$DEVELOPER_MD" "-"; then
-          fail_pi_error "$pi_stderr"
-        fi
-        last_review_summary="$(summarize_round "$last_transcript")"
-      else
-        log "Fix budget exhausted (${fix_calls}/${MAX_FIXES}) without a terminal verdict."
+      elif ! dispatch_fix "Findings"; then
         status="REJECTED"
-        break
       fi
+      [ -n "$status" ] && break
       ;;
     CRITICAL_ISSUES_FOUND)
       extract_findings "$last_transcript"
       if [ "$round" -eq "$max_rounds" ]; then
         log "CRITICAL_ISSUES_FOUND at terminal round — REJECTED."
         status="REJECTED"
-        break
-      elif [ "$fix_calls" -lt "$MAX_FIXES" ] && [ "$total_pi_calls" -lt "$MAX_TOTAL_CALLS" ]; then
-        fix_calls=$((fix_calls + 1))
-        log "Critical findings — dispatching fix (${fix_calls}/${MAX_FIXES})"
-        log "=== Round ${round}/${max_rounds}: fix ==="
-        fix_prompt="Fix the following critical reviewer findings in the working tree. Address each finding; do not change anything else."
-        [ -n "$last_review_summary" ] && fix_prompt="${fix_prompt}"$'\n\n'"Context from an earlier review round:"$'\n'"${last_review_summary}"
-        fix_prompt="${fix_prompt}"$'\n\n'"Current findings from the latest review:"$'\n'"${last_transcript}"
-        fix_prompt="${fix_prompt}"$'\n\n'"Task:"$'\n'"${task}"
-        pi_stderr=""
-        if ! run_pi "$fix_prompt" "$DEVELOPER_MD" "-"; then
-          fail_pi_error "$pi_stderr"
-        fi
-        last_review_summary="$(summarize_round "$last_transcript")"
-      else
-        log "Fix budget exhausted (${fix_calls}/${MAX_FIXES}) without a terminal verdict."
+      elif ! dispatch_fix "Critical findings"; then
         status="REJECTED"
-        break
       fi
+      [ -n "$status" ] && break
       ;;
   esac
 done

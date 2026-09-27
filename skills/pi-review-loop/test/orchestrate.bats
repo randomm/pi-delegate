@@ -107,6 +107,77 @@ fixture() {
   [[ "$out" == *"pi"* ]]
 }
 
+@test "git failure mid-loop -> PI_ERROR, exit 3, git stderr surfaced" {
+  # Wrapper git: `git diff HEAD` succeeds on the entry snapshot but fails
+  # on the second call (the round-1 review snapshot) — via a marker file.
+  local wrap_dir out rc=0
+  wrap_dir="$(mktemp -d)"
+  cat > "$wrap_dir/git" <<'WRAP'
+#!/bin/bash
+if [ -n "${GITDIFF_FAIL_MARKER:-}" ] && [ "$1" = "diff" ] && [ "$2" = "HEAD" ]; then
+  if [ -f "$GITDIFF_FAIL_MARKER" ]; then
+    echo "fatal: bad thing happened" >&2
+    exit 129
+  fi
+  touch "$GITDIFF_FAIL_MARKER"
+fi
+exec /usr/bin/git "$@"
+WRAP
+  chmod +x "$wrap_dir/git"
+  local marker="$REPO/gdiff-marker" out rc=0
+  rm -f "$marker"
+  out="$(GITDIFF_FAIL_MARKER="$marker" PATH="$wrap_dir:$PATH" bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  rm -f "$marker" "$wrap_dir/git"; rmdir "$wrap_dir"
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"fatal: bad thing happened"* ]]
+  [[ "$out" == *"git diff HEAD failed"* ]]
+}
+
+@test "git failure at entry -> PI_ERROR, exit 3" {
+  # Wrapper git: fail the very first `git diff HEAD`.
+  local wrap_dir out rc=0
+  wrap_dir="$(mktemp -d)"
+  cat > "$wrap_dir/git" <<'WRAP'
+#!/bin/bash
+if [ "$1" = "diff" ] && [ "$2" = "HEAD" ]; then
+  echo "fatal: entry boom" >&2
+  exit 129
+fi
+exec /usr/bin/git "$@"
+WRAP
+  chmod +x "$wrap_dir/git"
+  out="$(PATH="$wrap_dir:$PATH" bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  rm -f "$wrap_dir/git"; rmdir "$wrap_dir"
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"fatal: entry boom"* ]]
+}
+
+@test "pi timeout (SLEEP fixture, PI_TIMEOUT=1) -> PI_ERROR, exit 3, timeout message" {
+  printf 'SLEEP:2\nshould never appear\n' > "$FIXTURES_DIR/1"
+  local out rc=0
+  out="$(PI_TIMEOUT=1 bash "$SCRIPT" "do it" 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"pi timed out after 1s"* ]]
+}
+
+@test "oversized diff is truncated with a notice (PI_DIFF_MAX_BYTES=400)" {
+  # a.txt is ~5KB; the review prompt's embedded diff must carry the
+  # truncation notice and the head of the diff, but not its tail.
+  head -c 5000 /dev/zero | tr '\0' 'a' > a.txt
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  PI_DIFF_MAX_BYTES=400 bash "$SCRIPT" "do it" >/dev/null 2>&1 || true
+  grep -q "diff truncated" "$ARGV_LOG"
+  grep -q "PI_DIFF_MAX_BYTES=400)" "$ARGV_LOG"
+  # The prompt must still embed the diff marker.
+  grep -q "Current diff (git diff HEAD):" "$ARGV_LOG"
+}
+
+@test "small diff is NOT truncated (no notice under PI_DIFF_MAX_BYTES)" {
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  PI_DIFF_MAX_BYTES=999999 bash "$SCRIPT" "do it" >/dev/null 2>&1 || true
+  ! grep -q "diff truncated" "$ARGV_LOG"
+}
+
 # --- Loop + hard caps --------------------------------------------------------
 
 @test "ISSUES_FOUND at round 3 (terminal) -> PASSED_WITH_FINDINGS, exit 0, findings in JSON" {
