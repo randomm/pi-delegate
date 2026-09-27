@@ -25,7 +25,7 @@
   },
   {
     "key": "operator:merge-authority",
-    "value": "Auto-merge once CI is green and review passes",
+    "value": "The /work driver may auto-merge once the adversarial review and lens review both pass; once CI exists, CI must also be green",
     "provenance": "asked",
     "date": "2026-09-27"
   },

@@ -3,7 +3,7 @@
 ## Operator choices
 
 - **Review-blocking severity:** CRITICAL and ISSUES block merge
-- **Merge authority:** Auto-merge once CI is green and review passes
+- **Merge authority:** The /work driver may auto-merge once the adversarial review and lens review both pass; once CI exists, CI must also be green
 - **Project intent & stack:** Claude Code skill package: bash + jq + BATS, delegating work to the pi CLI
 
 
