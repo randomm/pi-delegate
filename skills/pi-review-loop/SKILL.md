@@ -13,7 +13,9 @@ headless `pi` coding agent. The loop is driven entirely by
 the loop. Your job is to invoke the script, read its JSON summary, verify
 pi's claims against the actual diff, and report the verdict.
 
-Bundled in this skill directory (referenced via `${CLAUDE_SKILL_DIR}`):
+Bundled in this skill directory. Claude Code sets `CLAUDE_SKILL_DIR` to the
+absolute path of this skill's directory (the directory containing this
+SKILL.md); use it to locate the bundled files, which live next to it:
 
 - `${CLAUDE_SKILL_DIR}/orchestrate.sh` — the loop driver
 - `${CLAUDE_SKILL_DIR}/developer.md` — developer/fixer role prompt (passed to pi via `--append-system-prompt`)
@@ -28,8 +30,17 @@ as `$ARGUMENTS`:
 bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" $ARGUMENTS
 ```
 
-- All progress goes to **stderr**; exactly **one JSON summary** is on the
-  **last line of stdout**. Parse that last line as JSON (e.g. with `jq`).
+- `$ARGUMENTS` is intentionally left **unquoted** so the user's request is
+  passed through verbatim: bash word-splits it but never re-evaluates it as
+  shell syntax, and `orchestrate.sh` re-folds the positionals back into a
+  single task string. Do **not** "fix" the splitting by switching to
+  `eval` / `sh -c` / `bash -c` — that would turn the passthrough into a
+  command-injection hole.
+- All progress goes to **stderr**. Except for CLI usage errors, exactly
+  **one JSON summary** is on the **last line of stdout** — parse that last
+  line as JSON (e.g. with `jq`). A CLI usage error (bad flag, missing task,
+  invalid `--max-rounds`) exits 2 with an `ERROR:` message on stderr only —
+  there is **no JSON** to parse; read stderr.
 - The script requires git, jq, and the `pi` binary (PATH, then
   `~/.bun/bin/pi`, then `~/.local/bin/pi`), and an empty `git diff HEAD`
   produces an immediate `EMPTY_DIFF` result — do not pre-filter these
@@ -68,8 +79,8 @@ The summary on the last stdout line has this shape:
 |---|---|
 | 0 | Success — status is `PASS`, `PASSED_WITH_FINDINGS`, or `EMPTY_DIFF` |
 | 1 | `REJECTED` — the loop budget ran out without a terminal approval (or `CRITICAL_ISSUES_FOUND` at the terminal round) |
-| 2 | `INCOMPLETE` — pi produced no parseable verdict, **or** a CLI usage error (bad flag / missing task / invalid `--max-rounds`) |
-| 3 | `PI_ERROR` — pi missing, pi crashed, a `git diff HEAD` call failed, or a pi call timed out |
+| 2 | `INCOMPLETE` — pi produced no parseable verdict (JSON summary emitted) — **or** a CLI usage error (bad flag / missing task / invalid `--max-rounds`), which exits with an `ERROR:` message on stderr only, no JSON |
+| 3 | `PI_ERROR` — pi missing, pi crashed, a `git diff HEAD` call failed, or a pi call timed out. Missing git/jq/pi exits with stderr only, no JSON; the other causes emit a JSON summary |
 
 ## Verifying pi's claims (colleague, not authority)
 
@@ -97,8 +108,18 @@ Report to the user, in this order:
    `total_pi_calls` minus develop + review rounds) and whether the issues
    were resolved, with what you verified in the diff.
 4. **Failures** — for exit 2 or 3, relay the error context from stderr
-   and `raw_output`, suggest fixing the environment or the invocation
-   (e.g. install pi/jq, fix the task description, check `git status`),
-   and offer a re-run.
+   and, if a JSON summary was emitted, its `raw_output` (usage errors and
+   missing git/jq/pi produce stderr only), and offer a re-run.
+   - **Usage errors** (exit 2, no JSON): the flag or task was malformed —
+     fix the invocation, don't change the environment.
+   - **INCOMPLETE** (exit 2, `status: "INCOMPLETE"`): the reviewer call
+     succeeded but produced no parseable `VERDICT:` line. Inspect
+     `raw_output` — if it has review text but no verdict line, the model
+     didn't follow instructions (re-run, possibly with a clearer task or a
+     different model); if it is empty, pi crashed silently — check the pi
+     binary and environment.
+   - **PI_ERROR** (exit 3, `status: "PI_ERROR"`): suggest fixing the
+     environment or the invocation (e.g. install pi/jq, check `git
+     status`), depending on the stderr message.
 
 Do not paste the full `raw_output` transcript unless the user asks for it.
