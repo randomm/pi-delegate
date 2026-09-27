@@ -162,11 +162,12 @@ WRAP
 
 @test "oversized diff is truncated with a notice (PI_DIFF_MAX_BYTES=400)" {
   # a.txt is ~5KB; the review prompt's embedded diff must carry the
-  # truncation notice and the head of the diff, but not its tail.
+  # truncation notice (with actual shown/total byte counts) and the head
+  # of the diff, but not its tail.
   head -c 5000 /dev/zero | tr '\0' 'a' > a.txt
   fixture 2 'Looks fine.' 'VERDICT: APPROVED'
   PI_DIFF_MAX_BYTES=400 bash "$SCRIPT" "do it" >/dev/null 2>&1 || true
-  grep -q "diff truncated" "$ARGV_LOG"
+  grep -q "truncated: [1-9][0-9]* of [1-9][0-9]* bytes shown" "$ARGV_LOG"
   grep -q "PI_DIFF_MAX_BYTES=400)" "$ARGV_LOG"
   # The prompt must still embed the diff marker.
   grep -q "Current diff (git diff HEAD):" "$ARGV_LOG"
@@ -185,7 +186,7 @@ WRAP
   fixture 3 'Fix applied.'
   PI_DIFF_MAX_BYTES=50 bash "$SCRIPT" "do it" >/dev/null 2>&1 || true
   # The fix prompt (call 3) must carry a truncation notice for the transcript.
-  grep -q "diff truncated" "$ARGV_LOG"
+  grep -q "truncated: [1-9][0-9]* of [1-9][0-9]* bytes shown" "$ARGV_LOG"
   # The bulk of the transcript must NOT be embedded (it would appear as
   # 1000 consecutive 'x' characters in the argv log).
   ! grep -q "${big}" "$ARGV_LOG"
@@ -194,7 +195,7 @@ WRAP
 @test "small diff is NOT truncated (no notice under PI_DIFF_MAX_BYTES)" {
   fixture 2 'Looks fine.' 'VERDICT: APPROVED'
   PI_DIFF_MAX_BYTES=999999 bash "$SCRIPT" "do it" >/dev/null 2>&1 || true
-  ! grep -q "diff truncated" "$ARGV_LOG"
+  ! grep -q "bytes shown (PI_DIFF_MAX_BYTES" "$ARGV_LOG"
 }
 
 # --- Loop + hard caps --------------------------------------------------------

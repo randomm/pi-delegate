@@ -181,21 +181,19 @@ fail_pi_error() {
 # --- Diff snapshot --------------------------------------------------------
 # get_diff <label> — snapshot `git diff HEAD`. Returns 0 on a non-empty
 # diff (echoed on stdout), 1 on an empty diff, and 2 on a git failure.
-# On failure git's stderr is written to the file named by $GIT_ERR_FILE
-# (must be a writable path set by the caller). A variable cannot be used
-# because the function runs in a subshell when its stdout is captured.
+# Git's stderr is redirected straight into $GIT_ERR_FILE (a writable path
+# created once at startup; the function runs in a subshell when its stdout
+# is captured, so a variable could not be used) and truncated first so a
+# stale failure message from an earlier round is never re-surfaced.
 get_diff() {
   local label="$1"
-  local diff rc errf
-  errf="$(mktemp)"
-  diff="$(git diff HEAD 2>"$errf")" || rc=$?
+  local diff rc
+  : >"${GIT_ERR_FILE:?GIT_ERR_FILE not set}"
+  diff="$(git diff HEAD 2>"$GIT_ERR_FILE")" || rc=$?
   if [ "${rc:-0}" -ne 0 ]; then
-    cat "$errf" >"${GIT_ERR_FILE:?GIT_ERR_FILE not set}"
-    rm -f "$errf"
     log "ERROR: git diff HEAD failed during ${label}"
     return 2
   fi
-  rm -f "$errf"
   [ -n "$diff" ] || return 1
   printf '%s' "$diff"
 }
@@ -217,19 +215,17 @@ die_git_error() {
 # keeping whole lines and appending a truncation notice if dropped.
 # Rationale: the diff is embedded in a single argv element passed to pi,
 # and Linux caps one argument at ~128KB (MAX_ARG_STRLEN). Byte lengths
-# are computed with LC_ALL=C so ${#s} counts bytes, not characters.
+# are measured with `wc -c` (locale-independent) so the notice always
+# shows byte counts even in a UTF-8 locale.
 trim_diff() {
   local raw="$1" limit="${PI_DIFF_MAX_BYTES:-100000}"
   local total shown
-  LC_ALL=C
-  total="${#raw}"
+  total="$(printf '%s' "$raw" | wc -c | tr -d ' ' )"
   if [ "$total" -le "$limit" ]; then
     printf '%s' "$raw"
     return 0
   fi
   shown="$(printf '%s' "$raw" | head -c "$limit")"
-  # If the cut landed mid-line, drop the trailing partial line so the
-  # prompt never contains a broken diff line.
   # If the cut landed mid-line, drop the trailing partial line so the
   # prompt never contains a broken diff line. Pure parameter expansion so
   # the behaviour is identical on GNU and BSD (macOS `head -n -1` fails).
@@ -238,7 +234,7 @@ trim_diff() {
   else
     shown=""
   fi
-  printf '%s\n[diff truncated: %s of %s bytes shown (PI_DIFF_MAX_BYTES=%s)]' "$shown" "${#shown}" "$total" "$limit"
+  printf '%s\n[truncated: %s of %s bytes shown (PI_DIFF_MAX_BYTES=%s)]' "$shown" "$(printf '%s' "$shown" | wc -c | tr -d ' ')" "$total" "$limit"
 }
 
 # --- pi invocation --------------------------------------------------------
@@ -356,10 +352,10 @@ dispatch_fix() {
 
 # --- Entry: diff must be non-empty ----------------------------------------
 
-GIT_ERR_FILE="$(mktemp)"
 # git stderr lands in GIT_ERR_FILE only on failure paths that exit
 # immediately (die_git_error / fail_pi_error / INCOMPLETE), so a single
 # EXIT trap covers every exit route without double-cleanup races.
+GIT_ERR_FILE="$(mktemp)"
 trap 'rm -f "$GIT_ERR_FILE"' EXIT
 entry_diff=""
 diff_rc=0
