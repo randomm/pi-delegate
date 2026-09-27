@@ -87,9 +87,7 @@ The summary on the last stdout line has this shape:
 | `raw_output` | The final pi transcript of the last round — treat as claims to verify, not truth |
 
 The summary is exactly these six fields — there is no `fix_calls` or other
-fix-round count in the JSON. To infer how many fix rounds ran, derive it
-from `total_pi_calls` minus develop (1) plus review (`rounds`); the
-developer/fixer share the same pi role, so the arithmetic is exact.
+fix-round count in the JSON.
 
 ### Exit codes
 
@@ -122,10 +120,8 @@ Report to the user, in this order:
    "Nothing to review — working tree clean").
 2. **The findings** — the `findings` list, one per line, after your own
    verification step above.
-3. **What was done about them** — the fix-round count (derived from
-   `total_pi_calls` minus develop + review rounds, per the JSON schema note
-   above) and whether the issues were resolved, with what you verified in
-   the diff.
+3. **What was done about them** — whether the issues were resolved, with
+   what you verified in the diff.
 4. **Failures** — for exit 2 or 3, relay the error context from stderr
    and, if a JSON summary was emitted, its `raw_output` (usage errors and
    missing git/jq/pi produce stderr only), and offer a re-run.
