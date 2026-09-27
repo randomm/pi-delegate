@@ -16,12 +16,16 @@
 #   - Otherwise the fixture is emitted on stdout and the call exits 0.
 
 log_call() {
+  # One JSON array per call: each argument is JSON-encoded with jq -Rs,
+  # so the assembled array is always valid JSON.
   local args_json="["
   local sep=""
   local arg
   for arg in "$@"; do
-    args_json="${args_json}${sep}\"$(printf '%s' "$arg" | jq -Rs '.')\""
-    sep=","
+    local encoded
+    encoded="$(printf '%s' "$arg" | jq -Rs '.')"
+    args_json="${args_json}${sep}${encoded}"
+    sep=','
     printf '%s\n' "$arg" >>"${MOCK_PI_ARGV_LOG:-/dev/null}" 2>/dev/null || true
   done
   args_json="${args_json}]"

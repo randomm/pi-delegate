@@ -21,6 +21,9 @@
 #   1  REJECTED (budget exhausted, no terminal verdict reached)
 #   2  INCOMPLETE (no parseable verdict from pi)
 #   3  PI_ERROR   (pi missing, not a git repo, or pi crashed)
+#   2  is also used for CLI usage errors (unknown flag, missing task,
+#       invalid --max-rounds) — the spec defines exit codes 0-3 only, and
+#       a distinct usage code would require a new code; documented here.
 
 set -euo pipefail
 
@@ -242,7 +245,7 @@ while [ "$round" -lt "$max_rounds" ]; do
   review_prompt="Adversarially review the current working-tree diff against the task below."
   [ -n "$last_review_summary" ] && review_prompt="${review_prompt}"$'\n\n'"Context from the previous review round:"$'\n'"${last_review_summary}"
   review_prompt="${review_prompt}"$'\n\n'"Task:"$'\n'"${task}"
-  review_prompt="${review_prompt}\n\nCurrent diff (git diff HEAD):\n${current_diff}"
+  review_prompt="${review_prompt}"$'\n\n'"Current diff (git diff HEAD):"$'\n'"${current_diff}"
 
   pi_stderr=""
   if ! run_pi "$review_prompt" "$REVIEWER_MD" "read,grep,find,ls"; then
@@ -259,8 +262,10 @@ while [ "$round" -lt "$max_rounds" ]; do
     APPROVED)
       status="PASS"; break ;;
     MINOR_OBSERVATIONS)
+      # Spec: APPROVED/MINOR_OBSERVATIONS -> PASS. Findings are still
+      # carried in the JSON summary.
       extract_findings "$last_transcript"
-      status="PASSED_WITH_FINDINGS"; break ;;
+      status="PASS"; break ;;
     ISSUES_FOUND)
       extract_findings "$last_transcript"
       if [ "$round" -eq "$max_rounds" ]; then

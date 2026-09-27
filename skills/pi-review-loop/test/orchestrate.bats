@@ -18,6 +18,8 @@ setup() {
   SCRIPT="$REPO_ROOT/skills/pi-review-loop/orchestrate.sh"
   FIXTURES="$REPO_ROOT/skills/pi-review-loop/test/fixtures"
 
+  command -v jq >/dev/null 2>&1 || { skip "jq is not installed"; }
+
   # Temp git repo with a working-tree change so `git diff HEAD` is non-empty.
   REPO="$(mktemp -d)"
   cd "$REPO" || return 1
@@ -188,19 +190,43 @@ fixture() {
   [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
 }
 
-@test "MINOR_OBSERVATIONS -> PASSED_WITH_FINDINGS, findings extracted, exit 0" {
+@test "MINOR_OBSERVATIONS -> PASS, findings still extracted into JSON, exit 0" {
   fixture 2 'A few nits.' '- [a.txt:1] naming nit' 'VERDICT: MINOR_OBSERVATIONS'
   run_driver "do it"
   [ "$status" -eq 0 ]
   [ "$(pi_calls)" -eq 2 ]
   local out
   out="$(tail_json)"
-  [ "$(printf '%s' "$out" | jq -r .status)" = "PASSED_WITH_FINDINGS" ]
+  # Spec terminal semantics: APPROVED/MINOR_OBSERVATIONS -> PASS.
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
   [ "$(printf '%s' "$out" | jq -r .verdict)" = "MINOR_OBSERVATIONS" ]
   local findings
   findings="$(printf '%s' "$out" | jq -c .findings)"
   [ "$findings" = '["[a.txt:1] naming nit"]' ]
 }
+
+@test "review prompt embeds the diff as real newlines, not literal \\n" {
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  # The review prompt (last arg of pi call 2) contains the marker
+  # "Current diff (git diff HEAD):" exactly once in the ARGV_LOG file.
+  # od -c renders a real newline (0x0a) as two chars "\n"; a literal
+  # two-char "\n" in the prompt would render as four chars "\ \\ n".
+  # Count occurrences of the real-newline rendering before the marker
+  # ("\\n C") — must be >= 1 — and of the literal rendering
+  # ("\\ \\ n C") — must be 0.
+  local real literal
+  real="$(od -An -c "$ARGV_LOG" | tr -s ' ' | grep -c '\\n C' || true)"
+  [ "$real" -ge 1 ]
+  literal="$(od -An -c "$ARGV_LOG" | tr -s ' ' | grep -c '\\ \\ n C' || true)"
+  [ "$literal" -eq 0 ]
+}
+
+
+
+
+
+
 
 @test "ISSUES_FOUND then fix then APPROVED -> PASS, 4 pi calls" {
   fixture 2 'Broken.' '- [a.txt:1] wrong value' 'VERDICT: ISSUES_FOUND'
@@ -271,6 +297,18 @@ fixture() {
   out="$(tail_json)"
   [ "$(printf '%s' "$out" | jq -r .status)" = "PI_ERROR" ]
   printf '%s\n' "${lines[@]}" | grep -q "auth failure: token expired"
+}
+
+@test "mock call log is valid JSON on every line (jq -Rs printf %j)" {
+  fixture 2 'Broken.' '- [a.txt:1] wrong value' 'VERDICT: ISSUES_FOUND'
+  fixture 3 'Fix applied.'
+  fixture 4 'All good now.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  local line
+  while IFS= read -r line; do
+    printf '%s' "$line" | jq -e 'type == "array"' >/dev/null
+  done < "$CALL_LOG"
+  [ "$(pi_calls)" -eq 4 ]
 }
 
 # --- pi call interface ---------------------------------------------------------
