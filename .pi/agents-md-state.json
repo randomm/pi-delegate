@@ -1,0 +1,86 @@
+[
+  {
+    "key": "omit:quality-gates",
+    "value": "no gate commands could be derived from the project manifest",
+    "provenance": "auto",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "omit:commands",
+    "value": "no commands could be derived from the project manifest",
+    "provenance": "auto",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "omit:environment",
+    "value": "no recognised manifest was detected",
+    "provenance": "auto",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "operator:review-blocking",
+    "value": "CRITICAL and ISSUES block merge",
+    "provenance": "asked",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "operator:merge-authority",
+    "value": "Auto-merge once CI is green and review passes",
+    "provenance": "asked",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "operator:intent",
+    "value": "Claude Code skill package: bash + jq + BATS, delegating work to the pi CLI",
+    "provenance": "asked",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "architecture-notes",
+    "value": "agent",
+    "provenance": "detected",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "scaffolded:minimalist-engineering",
+    "value": "scaffolded",
+    "provenance": "auto",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "scaffolded:git-workflow",
+    "value": "scaffolded",
+    "provenance": "auto",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "scaffolded:documentation-policy",
+    "value": "scaffolded",
+    "provenance": "auto",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "scaffolded:issue-driven-development",
+    "value": "scaffolded",
+    "provenance": "auto",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "scaffolded:code-review-doctrine",
+    "value": "scaffolded",
+    "provenance": "auto",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "scaffolded:context7-protocol",
+    "value": "scaffolded",
+    "provenance": "auto",
+    "date": "2026-09-27"
+  },
+  {
+    "key": "scaffolded:testing-standards",
+    "value": "scaffolded",
+    "provenance": "auto",
+    "date": "2026-09-27"
+  }
+]
