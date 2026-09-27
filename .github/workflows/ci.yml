@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck and bats
+        run: |
+          brew install shellcheck bats
+          shellcheck --version | head -n 1
+          bats --version
+
+      - name: shellcheck + bash -n on all *.sh files
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh_files="$(find . -name '*.sh' -type f -not -path './.git/*' | sort)"
+          if [ -z "$sh_files" ]; then
+            echo "No *.sh files found — nothing to shellcheck. Skipping."
+            exit 0
+          fi
+          echo "$sh_files"
+          # Block on errors and warnings only; style nits never fail CI.
+          echo "$sh_files" | xargs -r shellcheck --severity=warning
+          while IFS= read -r f; do
+            bash -n "$f"
+          done <<< "$sh_files"
+          echo "shellcheck + bash -n passed on $(echo "$sh_files" | wc -l | tr -d ' ') file(s)."
+
+      - name: Run BATS test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          bats_files="$(find . -name '*.bats' -type f -not -path './.git/*' | sort)"
+          if [ -z "$bats_files" ]; then
+            echo "No *.bats files found — nothing to test. Skipping."
+            exit 0
+          fi
+          echo "$bats_files" | xargs -r bats
+          echo "BATS suite passed."
