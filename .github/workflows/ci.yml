@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install shellcheck and bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck bats
+          shellcheck --version | head -n 1
+          bats --version
+
+      - name: shellcheck + bash -n on all *.sh files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' files < <(find . -name '*.sh' -type f -not -path './.git/*' -print0 | sort -z)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No *.sh files found — nothing to shellcheck. Skipping."
+            exit 0
+          fi
+          # Block on errors and warnings only; style nits never fail CI.
+          shellcheck --norc --severity=warning "${files[@]}"
+          for f in "${files[@]}"; do
+            bash -n "$f"
+          done
+          echo "shellcheck + bash -n passed on ${#files[@]} file(s)."
+
+      - name: Run BATS test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' files < <(find . -name '*.bats' -type f -not -path './.git/*' -print0 | sort -z)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No *.bats files found — nothing to test. Skipping."
+            exit 0
+          fi
+          bats "${files[@]}"
+          echo "BATS suite passed on ${#files[@]} file(s)."
