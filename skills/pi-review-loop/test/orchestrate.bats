@@ -320,7 +320,6 @@ WRAP
   out="$(tail_json)"
   [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
   [ "$(printf '%s' "$out" | jq -r .total_pi_calls)" = "4" ]
-  [ "$(printf '%s' "$out" | jq -r .fix_calls)" = "1" ]
 }
 
 @test "fixer prompt threads the prior review findings forward" {

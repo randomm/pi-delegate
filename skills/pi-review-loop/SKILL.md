@@ -40,10 +40,7 @@ bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"
   code, not pass it as a task string.
 - If the request contains a single quote, write it as a double-quoted
   shell argument so it survives verbatim (e.g.
-  `bash "$SCRIPT" "fix the it's-broken bug"`). Alternatively pass it via a
-  here-doc-safe method — `bash "$SCRIPT" "$(cat <<'EOF' ... EOF)"` with a
-  quoted here-doc delimiter expands nothing inside, so the request arrives
-  intact. Never use `eval` for this.
+  `bash "$SCRIPT" "fix the it's-broken bug"`). Never use `eval` for this.
 - All progress goes to **stderr**. Except for CLI usage errors, exactly
   **one JSON summary** is on the **last line of stdout** — parse that last
   line as JSON (e.g. with `jq`). A CLI usage error (bad flag, missing task,

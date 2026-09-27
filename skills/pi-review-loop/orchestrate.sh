@@ -161,18 +161,17 @@ last_review_summary=""
 status=""
 
 # --- JSON summary ---------------------------------------------------------
-# emit_json <status> <verdict-or-null> <rounds> <total_pi_calls> <fix_calls> <findings-json> <raw>
+# emit_json <status> <verdict-or-null> <rounds> <total_pi_calls> <findings-json> <raw>
 emit_json() {
-  local s="$1" v="$2" r="$3" t="$4" fc="$5" f="$6" raw="$7"
+  local s="$1" v="$2" r="$3" t="$4" f="$5" raw="$6"
   jq -cn \
     --arg status "$s" \
     --arg verdict "${v}" \
     --argjson rounds "$r" \
     --argjson total_pi_calls "$t" \
-    --argjson fix_calls "${fc:-0}" \
     --argjson findings "$f" \
     --arg raw_output "$raw" \
-    '{status: $status, verdict: (if $verdict == "" then null else $verdict end), rounds: $rounds, total_pi_calls: $total_pi_calls, fix_calls: $fix_calls, findings: $findings, raw_output: $raw_output}'
+    '{status: $status, verdict: (if $verdict == "" then null else $verdict end), rounds: $rounds, total_pi_calls: $total_pi_calls, findings: $findings, raw_output: $raw_output}'
 }
 
 fail_pi_error() {
@@ -180,7 +179,7 @@ fail_pi_error() {
   local stderr_text="$1"
   [ -n "$stderr_text" ] || stderr_text="pi failed (no output)"
   printf '%s\n' "$stderr_text" >&2
-  emit_json "PI_ERROR" "$verdict" "$round" "$total_pi_calls" "$fix_calls" "$findings_json" "$last_transcript"
+  emit_json "PI_ERROR" "$verdict" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"
   exit 3
 }
 
@@ -212,7 +211,7 @@ die_git_error() {
   [ -s "${GIT_ERR_FILE:?}" ] && err="$(cat "$GIT_ERR_FILE")"
   [ -n "$err" ] || err="git failed (no output)"
   printf '%s\n' "$err" >&2
-  emit_json "PI_ERROR" "$verdict" "$round" "$total_pi_calls" "$fix_calls" "$findings_json" "$last_transcript"
+  emit_json "PI_ERROR" "$verdict" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"
   exit 3
 }
 
@@ -370,7 +369,7 @@ if [ "$diff_rc" -eq 2 ]; then
   die_git_error
 fi
 if [ "$diff_rc" -ne 0 ] || [ -z "$entry_diff" ]; then
-  emit_json "EMPTY_DIFF" "" 0 0 0 '[]' ""
+  emit_json "EMPTY_DIFF" "" 0 0 '[]' ""
   exit 0
 fi
 
@@ -399,7 +398,7 @@ while [ "$round" -lt "$max_rounds" ]; do
   if [ "$diff_rc" -ne 0 ] || [ -z "$current_diff" ]; then
     log "Working-tree diff is empty after round ${round} — nothing left to review."
     status="EMPTY_DIFF"
-    emit_json "EMPTY_DIFF" "$verdict" "$round" "$total_pi_calls" "$fix_calls" "$findings_json" "$last_transcript"
+    emit_json "EMPTY_DIFF" "$verdict" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"
     exit 0
   fi
 
@@ -414,7 +413,7 @@ while [ "$round" -lt "$max_rounds" ]; do
   fi
 
   if ! parse_verdict "$last_transcript"; then
-    emit_json "INCOMPLETE" "" "$round" "$total_pi_calls" "$fix_calls" "$findings_json" "$last_transcript"
+    emit_json "INCOMPLETE" "" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"
     exit 2
   fi
   log "Verdict: ${verdict}"
@@ -458,7 +457,7 @@ if [ "$status" = "" ]; then
 fi
 
 log "=== Done: ${status} (rounds=${round}, pi_calls=${total_pi_calls}) ==="
-emit_json "$status" "$verdict" "$round" "$total_pi_calls" "$fix_calls" "$findings_json" "$last_transcript"
+emit_json "$status" "$verdict" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"
 
 # Final exit mapping. INCOMPLETE exits 2 immediately after emitting its JSON
 # summary (above), so it never reaches this case; the *) arm guards against
