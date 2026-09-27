@@ -5,13 +5,16 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   ci:
     name: CI
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install shellcheck and bats
         run: |
@@ -24,28 +27,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sh_files="$(find . -name '*.sh' -type f -not -path './.git/*' -print0 | sort -z | tr '\0' '\n')"
-          if [ -z "$sh_files" ]; then
+          mapfile -d '' files < <(find . -name '*.sh' -type f -not -path './.git/*' -print0 | sort -z)
+          if [ "${#files[@]}" -eq 0 ]; then
             echo "No *.sh files found — nothing to shellcheck. Skipping."
             exit 0
           fi
-          echo "$sh_files"
           # Block on errors and warnings only; style nits never fail CI.
-          find . -name '*.sh' -type f -not -path './.git/*' -print0 | sort -z | xargs -0 -r shellcheck --norc --severity=warning
-          while IFS= read -r f; do
+          shellcheck --norc --severity=warning "${files[@]}"
+          for f in "${files[@]}"; do
             bash -n "$f"
-          done <<< "$sh_files"
-          echo "shellcheck + bash -n passed on $(echo "$sh_files" | wc -l | tr -d ' ') file(s)."
+          done
+          echo "shellcheck + bash -n passed on ${#files[@]} file(s)."
 
       - name: Run BATS test suite
         shell: bash
         run: |
           set -euo pipefail
-          bats_files="$(find . -name '*.bats' -type f -not -path './.git/*' -print0 | sort -z | tr '\0' '\n')"
-          if [ -z "$bats_files" ]; then
+          mapfile -d '' files < <(find . -name '*.bats' -type f -not -path './.git/*' -print0 | sort -z)
+          if [ "${#files[@]}" -eq 0 ]; then
             echo "No *.bats files found — nothing to test. Skipping."
             exit 0
           fi
-          echo "$bats_files"
-          find . -name '*.bats' -type f -not -path './.git/*' -print0 | sort -z | xargs -0 -r bats
-          echo "BATS suite passed."
+          bats "${files[@]}"
+          echo "BATS suite passed on ${#files[@]} file(s)."
