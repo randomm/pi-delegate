@@ -200,7 +200,7 @@ markdown bold.
 |---|---|---|
 | `APPROVED` | Change is correct and complete | `PASS` |
 | `MINOR_OBSERVATIONS` | Only informational notes | `PASS` |
-| `ISSUES_FOUND` | Real problems, non-critical | `PASSED_WITH_FINDINGS` (terminal; findings surfaced, not blocking) |
+| `ISSUES_FOUND` | Real problems, non-critical | Triggers a fix round at any non-terminal round; at the terminal round → `PASSED_WITH_FINDINGS` (findings surfaced, not blocking) |
 | `CRITICAL_ISSUES_FOUND` | Blocking problems | Triggers a fix round at any non-terminal round; if the round budget is exhausted → `REJECTED` |
 
 ## Troubleshooting
