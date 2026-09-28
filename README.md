@@ -57,10 +57,11 @@ You need three things: Claude Code, a working `pi` installation, and `jq`.
 
 ## Usage — pi-oneshot
 
-`pi-oneshot` is the lightweight skill: a single `pi -p --no-session "$ARGUMENTS"`
-call — text mode, pi's full default toolset, no review loop, no structured JSON
-parsing. Claude runs it, reads pi's output, and summarizes what happened back to
-you.
+`pi-oneshot` is the lightweight skill: a single `pi -p --no-session` call
+with `--no-extensions --no-skills --no-prompt-templates` (same isolation as
+the review loop — context files stay loaded by design) — text mode, pi's full
+default toolset, no review loop, no structured JSON parsing. Claude runs it,
+reads pi's output, and summarizes what happened back to you.
 
 Good fits — mechanical, self-contained, verifiable tasks:
 
@@ -259,7 +260,9 @@ all.
                  │
                  ▼
         Claude Code (orchestrator)
-        ├── pi-oneshot  ─────────────────────────►  pi -p --no-session "$ARGUMENTS"
+        ├── pi-oneshot  ─────────────────────────►  pi -p --no-session \
+        │                                            --no-extensions --no-skills \
+        │                                            --no-prompt-templates "$ARGUMENTS"
         │                                            (single call, full tools,
         │                                             text mode, passthrough)
         └── pi-review-loop

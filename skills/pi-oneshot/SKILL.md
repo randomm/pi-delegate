@@ -42,12 +42,16 @@ Run the task as a single one-shot, stateless call, passing the user's
 request through as `$ARGUMENTS` (the full task description):
 
 ```bash
-"$PI_BIN" -p --no-session "$ARGUMENTS"
+"$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
 ```
 
 - `-p` — print mode: pi runs headless and emits its final text on stdout.
 - `--no-session` — no session is persisted or resumed; each invocation is
   self-contained.
+- `--no-extensions --no-skills --no-prompt-templates` — same isolation flags
+  `pi-review-loop` uses: installed pi extensions, skills, and prompt templates
+  are not loaded, so the task runs exactly as asked. (Context files are still
+  loaded by design — the repo's `AGENTS.md`/`CLAUDE.md` conventions are useful to the delegated run.)
 - Full default toolset — pi reads, edits, and runs commands as needed.
   Do not restrict tools with `--tools`.
 - Plain text mode (no `--mode json`) — stdout is the transcript's final
