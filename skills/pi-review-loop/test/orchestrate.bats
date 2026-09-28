@@ -74,9 +74,9 @@ fixture() {
   printf '%s' "$text" | jq -Rs '{type:"message_end",message:{role:"assistant",stopReason:"stop",content:[{type:"text",text:.}]}}' > "$FIXTURES_DIR/$n"
 }
 
-# --- Entry ------------------------------------------------------------------
+# --- EMPTY_DIFF (post-develop) -----------------------------------------------
 
-@test "untracked file alone (no tracked change) still proceeds past entry gate" {
+@test "untracked file alone (no tracked change) still proceeds to develop and review" {
   # Clean the tracked tree; leave only an untracked file. The change set
   # (start-ref diff + untracked) is non-empty, so the driver must NOT
   # bail with EMPTY_DIFF. It should run develop (call 1) and review (call 2)
@@ -91,6 +91,16 @@ fixture() {
   [[ "$out" != *"\"status\":\"EMPTY_DIFF\""* ]]
 }
 
+@test "clean tree at entry -> develop still runs (no entry gate)" {
+  # A clean working tree at entry is normal for a develop-first loop: the
+  # developer round must run even when there is nothing to review yet.
+  git checkout -q a.txt
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$(pi_calls)" -eq 1 ]
+  [[ "$out" != *"\"status\":\"EMPTY_DIFF\""* ]]
+}
+
 @test "untracked file appears in the review diff (start-ref diff + untracked)" {
   echo new-module > newfile.txt
   fixture 2 'Reviewing the new module.' 'VERDICT: APPROVED'
@@ -100,7 +110,7 @@ fixture() {
   grep -q "newfile.txt" "$ARGV_LOG"
 }
 
-@test "committed change after develop round appears in the review diff" {
+@test "developer commits its change -> change is reviewed and PASS" {
   # A develop round that commits (pi often does when the task says so)
   # leaves `git diff HEAD` empty. The review diff must still cover the
   # commit: it diffs against the start ref recorded at entry, not HEAD.
@@ -123,7 +133,21 @@ F
   grep -q "$base" "$ARGV_LOG"
   local out
   out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
   [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
+}
+
+@test "unborn repo (no commits yet): develop runs, new file reviewed" {
+  # A repo with no commits: `git rev-parse HEAD` fails, so the driver must
+  # fall back to the empty tree as the start ref. The developer round runs
+  # (call 1), and the tracked file it produces appears in the review diff.
+  git rm -rq a.txt
+  echo fresh > unborn.txt
+  fixture 2 'Reviewing the new repo.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  grep -q "fresh" "$ARGV_LOG"
+  grep -q "unborn.txt" "$ARGV_LOG"
 }
 
 @test "ignored files do NOT appear in the review diff" {
@@ -144,35 +168,43 @@ F
   ! grep -q "ignored-secret" "$ARGV_LOG"
 }
 
-@test "entry gate: clean tree + no untracked -> EMPTY_DIFF, exit 0, zero pi calls" {
-  # The only case that must still be EMPTY_DIFF: nothing changed AND no
-  # new untracked files. The entry gate now uses the full change set
-  # (start-ref diff + untracked), so a truly empty change set bails.
-  git checkout -q a.txt
-  # No untracked files, no tracked changes.
+@test "non-empty working tree at entry: develop runs, review proceeds (no EMPTY_DIFF)" {
+  # The working tree has a change at entry (a.txt is modified in setup). A
+  # clean tree would be normal for develop-first, but a dirty tree must not
+  # be rejected either: develop runs (call 1), the diff is non-empty, so the
+  # reviewer is invoked (call 2) instead of ending EMPTY_DIFF.
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
   run_driver "do it"
   [ "$status" -eq 0 ]
-  [ "$(pi_calls)" -eq 0 ]
+  [ "$(pi_calls)" -eq 2 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
+}
+
+@test "post-develop empty diff -> EMPTY_DIFF, exit 0, 1 pi call" {
+  # Clean tree at entry (develop-first is normal): the developer round runs
+  # (call 1), nothing changed vs the start ref afterward, so the review
+  # round ends with EMPTY_DIFF before any reviewer call. Exit stays 0.
+  git checkout -q a.txt
+  fixture 1 'Done.'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  [ "$(pi_calls)" -eq 1 ]
   local out
   out="$(tail_json)"
   [ "$(printf '%s' "$out" | jq -r .status)" = "EMPTY_DIFF" ]
-  [ "$(printf '%s' "$out" | jq -r .total_pi_calls)" = "0" ]
+  [ "$(printf '%s' "$out" | jq -r .total_pi_calls)" = "1" ]
+  [ "$(printf '%s' "$out" | jq -r .rounds)" = "1" ]
 }
 
-@test "entry gate: untracked file alone -> NOT EMPTY_DIFF (proceeds to develop)" {
-  # Issue #24 core acceptance: an untracked file alone is a valid change
-  # set. The driver must proceed past the entry gate (develop + review)
-  # rather than bailing EMPTY_DIFF.
+@test "post-develop EMPTY_DIFF stderr says the developer produced no change" {
   git checkout -q a.txt
-  echo brand-new-content > orphan.txt
-  local out rc=0
-  # No fixture for call 1 (develop) — the mock pi will return empty output
-  # and the develop call will "succeed" with no visible change.
-  # Call 2 (review) also has no fixture, so the review will be INCOMPLETE.
-  # The critical assertion: pi was CALLED (i.e., we did not bail at entry).
-  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
-  [ "$(pi_calls)" -ge 1 ]
-  [[ "$out" != *"\"status\":\"EMPTY_DIFF\""* ]]
+  fixture 1 'Done.'
+  run_driver "do it"
+  local all
+  all="$(printf '%s\n' "${lines[@]}")"
+  [[ "$all" == *"developer produced no change"* ]]
 }
 
 @test "not a git repo -> exit 3 with clear message" {
@@ -196,26 +228,25 @@ F
 }
 
 @test "git failure mid-loop -> PI_ERROR, exit 3, git stderr surfaced" {
-  # Wrapper git: `git diff HEAD` succeeds on the entry snapshot but fails
-  # on the second call (the round-1 review snapshot) — via a marker file.
+  # Wrapper git: every `git diff HEAD` call fails (there is no entry
+  # snapshot any more — the first diff happens at review round 1 after
+  # the develop round). git's stderr must be surfaced verbatim.
   local wrap_dir out rc=0
   wrap_dir="$(mktemp -d)"
   cat > "$wrap_dir/git" <<'WRAP'
 #!/bin/bash
-if [ -n "${GITDIFF_FAIL_MARKER:-}" ] && [ "$1" = "diff" ] && [ "$2" != "--no-index" ]; then
-  if [ -f "$GITDIFF_FAIL_MARKER" ]; then
-    echo "fatal: bad thing happened" >&2
-    exit 129
-  fi
-  touch "$GITDIFF_FAIL_MARKER"
+# Fail the very first `git diff` (against the start ref, not HEAD). The
+# `--no-index` arm is excluded so the untracked-file enumeration is not
+# confused with the tracked-diff failure.
+if [ "$1" = "diff" ] && [ "$2" != "--no-index" ]; then
+  echo "fatal: bad thing happened" >&2
+  exit 129
 fi
 exec /usr/bin/git "$@"
 WRAP
   chmod +x "$wrap_dir/git"
-  local marker="$REPO/gdiff-marker" out rc=0
-  rm -f "$marker"
-  out="$(GITDIFF_FAIL_MARKER="$marker" PATH="$wrap_dir:$PATH" bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
-  rm -f "$marker" "$wrap_dir/git"; rmdir "$wrap_dir"
+  out="$(PATH="$wrap_dir:$PATH" bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  rm -f "$wrap_dir/git"; rmdir "$wrap_dir"
   [ "$rc" -eq 3 ]
   [[ "$out" == *"fatal: bad thing happened"* ]]
   [[ "$out" == *"git diff"* ]]

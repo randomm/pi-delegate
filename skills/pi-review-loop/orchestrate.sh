@@ -418,28 +418,30 @@ dispatch_fix() {
   return 0
 }
 
-# --- Entry: diff must be non-empty ----------------------------------------
+# --- Diff snapshots ---------------------------------------------------------
 
 # git stderr lands in GIT_ERR_FILE only on failure paths that exit
 # immediately (die_git_error / fail_pi_error / INCOMPLETE), so a single
 # EXIT trap covers every exit route without double-cleanup races.
 GIT_ERR_FILE="$(mktemp)"
 trap 'rm -f "$GIT_ERR_FILE"' EXIT
+# Record the start ref before the develop round so the review diff covers
+# work the developer commits (a bare `git diff HEAD` would miss it). On an
+# unborn repo (no commits yet) HEAD does not resolve, so fall back to the
+# empty tree: everything present after develop is then "new".
 START_REF="$(git rev-parse HEAD 2>"$GIT_ERR_FILE")" || {
-  # git rev-parse failure before the loop starts (corrupt repo). Surface
-  # as PI_ERROR rather than proceeding with an empty start ref.
-  die_git_error
+  local empty_tree="$(git hash-object -t tree /dev/null)"
+  [ -n "$empty_tree" ] || {
+    # git hash-object failure: a real git failure — surface verbatim.
+    die_git_error
+  }
+  START_REF="$empty_tree"
 }
 
-diff_rc=0
-get_diff "entry" >/dev/null || diff_rc=$?
-if [ "$diff_rc" -eq 2 ]; then
-  die_git_error
-fi
-if [ "$diff_rc" -ne 0 ]; then
-  emit_json "EMPTY_DIFF" "" 0 0 '[]' ""
-  exit 0
-fi
+# A clean working tree at entry is normal for a develop-first loop: the
+# developer round is what produces the work. There is no entry-time diff
+# gate; EMPTY_DIFF is only reported post-develop, when the developer left
+# no change at all relative to the start ref.
 
 # --- Develop (exactly once) -------------------------------------------------
 
@@ -464,7 +466,10 @@ while [ "$round" -lt "$max_rounds" ]; do
     die_git_error
   fi
   if [ "$diff_rc" -ne 0 ] || [ -z "$current_diff" ]; then
-    log "Working-tree diff is empty after round ${round} — nothing left to review."
+    # EMPTY_DIFF is NOT an error: the loop ran, the developer simply
+    # produced no change in the working tree. Exit stays 0; the JSON
+    # summary (status=EMPTY_DIFF) and this stderr line make that explicit.
+    log "EMPTY_DIFF: the developer produced no change in the working tree; nothing to review."
     status="EMPTY_DIFF"
     emit_json "EMPTY_DIFF" "$verdict" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"
     exit 0
