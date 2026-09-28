@@ -20,7 +20,7 @@ setup() {
 
   command -v jq >/dev/null 2>&1 || { skip "jq is not installed"; }
 
-  # Temp git repo with a working-tree change so `git diff HEAD` is non-empty.
+  # Temp git repo with a working-tree change so the start-ref diff is non-empty.
   REPO="$(mktemp -d)"
   cd "$REPO" || return 1
   git init -q .
@@ -37,7 +37,13 @@ setup() {
   FIXTURES_DIR="$(mktemp -d)"
   BIN_DIR="$(mktemp -d)"
   ln -s "$FIXTURES/mock-pi" "$BIN_DIR/pi"
-  export PATH="$BIN_DIR:$PATH"
+  # Test isolation: a fake HOME so pi's well-known fallback locations
+  # (~/.bun/bin, ~/.local/bin) are unreachable and the mock pi is the ONLY
+  # pi on PATH. If a real pi were ever invoked, it would spend tokens and
+  # the call log would be empty — tests that expect pi calls assert on the
+  # log for this reason.
+  export HOME="$(mktemp -d)"
+  export PATH="$BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/local/sbin"
   export MOCK_PI_CALL_LOG="$CALL_LOG"
   export MOCK_PI_ARGV_LOG="$ARGV_LOG"
   export MOCK_PI_FIXTURES_DIR="$FIXTURES_DIR"
@@ -94,11 +100,18 @@ fixture() {
 @test "clean tree at entry -> develop still runs (no entry gate)" {
   # A clean working tree at entry is normal for a develop-first loop: the
   # developer round must run even when there is nothing to review yet.
+  # The developer round must run (call 1) — there is no entry gate that
+  # short-circuits a clean tree to EMPTY_DIFF before develop.
   git checkout -q a.txt
-  local out rc=0
-  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  fixture 1 'Developed in a clean tree.'
+  run_driver "do it"
   [ "$(pi_calls)" -eq 1 ]
-  [[ "$out" != *"\"status\":\"EMPTY_DIFF\""* ]]
+  local out
+  out="$(tail_json)"
+  # The run goes through develop and reaches the review round; the JSON
+  # summary is emitted (run_driver captures stderr, so check pi call count
+  # as the proof that develop ran, not a pre-develop bail).
+  printf '%s' "$out" | jq -e . >/dev/null
 }
 
 @test "untracked file appears in the review diff (start-ref diff + untracked)" {
@@ -112,7 +125,7 @@ fixture() {
 
 @test "developer commits its change -> change is reviewed and PASS" {
   # A develop round that commits (pi often does when the task says so)
-  # leaves `git diff HEAD` empty. The review diff must still cover the
+  # leaves a diff against HEAD empty. The review diff must still cover the
   # commit: it diffs against the start ref recorded at entry, not HEAD.
   local base
   base="$(git rev-parse HEAD)"
@@ -141,7 +154,7 @@ F
   # A repo with no commits: `git rev-parse HEAD` fails, so the driver must
   # fall back to the empty tree as the start ref. The developer round runs
   # (call 1), and the tracked file it produces appears in the review diff.
-  git rm -rq a.txt
+  git rm -rqf a.txt
   echo fresh > unborn.txt
   fixture 2 'Reviewing the new repo.' 'VERDICT: APPROVED'
   run_driver "do it"
@@ -228,9 +241,10 @@ F
 }
 
 @test "git failure mid-loop -> PI_ERROR, exit 3, git stderr surfaced" {
-  # Wrapper git: every `git diff HEAD` call fails (there is no entry
-  # snapshot any more — the first diff happens at review round 1 after
-  # the develop round). git's stderr must be surfaced verbatim.
+  # Wrapper git: every `git diff` (against the start ref) call fails —
+  # the first diff happens at review round 1 after the develop round.
+  # The `--no-index` arm is excluded so the untracked-file enumeration is
+  # not confused with the tracked-diff failure.
   local wrap_dir out rc=0
   wrap_dir="$(mktemp -d)"
   cat > "$wrap_dir/git" <<'WRAP'
@@ -273,7 +287,8 @@ WRAP
 
 @test "git rev-parse failure at entry -> PI_ERROR, exit 3" {
   # Wrapper git: fail the very first `git rev-parse HEAD` (start-ref
-  # recording). The driver must not proceed with an empty start ref.
+  # recording), but let `git rev-parse --git-dir` (preflight) succeed. The
+  # driver must not proceed with an empty start ref.
   local wrap_dir out rc=0
   wrap_dir="$(mktemp -d)"
   cat > "$wrap_dir/git" <<'WRAP'
@@ -293,8 +308,9 @@ WRAP
 
 @test "git status failure mid-loop -> PI_ERROR, exit 3" {
   # Wrapper git: `git status --porcelain` fails on the second call (the
-  # round-1 review snapshot) but succeeds at entry — via a marker file.
-  # This exercises the new untracked-enumeration path's failure arm.
+  # round-1 review snapshot) but succeeds on the first (entry) — via a
+  # marker file. This exercises the untracked-enumeration path's failure
+  # arm inside the review loop.
   local wrap_dir out rc=0
   wrap_dir="$(mktemp -d)"
   cat > "$wrap_dir/git" <<'WRAP'
@@ -309,8 +325,8 @@ fi
 exec /usr/bin/git "$@"
 WRAP
   chmod +x "$wrap_dir/git"
-  local marker="$REPO/gstatus-marker" out rc=0
-  rm -f "$marker"
+  local marker out rc=0
+  marker="$(mktemp)"
   out="$(GITSTATUS_FAIL_MARKER="$marker" PATH="$wrap_dir:$PATH" bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
   rm -f "$marker" "$wrap_dir/git"; rmdir "$wrap_dir"
   [ "$rc" -eq 3 ]

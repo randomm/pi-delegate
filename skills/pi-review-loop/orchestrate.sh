@@ -215,7 +215,8 @@ get_diff() {
   local untracked_part=""
   : >"${GIT_ERR_FILE:?GIT_ERR_FILE not set}"
 
-  # Tracked changes since the start ref.
+  # Tracked changes since the start ref (a commit recorded at entry, or the
+  # empty-tree hash on an unborn repo; both are valid `git diff` refs).
   head_part="$(git diff "$START_REF" 2>"$GIT_ERR_FILE")" || rc=$?
   if [ "${rc:-0}" -ne 0 ]; then
     log "ERROR: git diff ${START_REF} failed during ${label}"
@@ -223,6 +224,9 @@ get_diff() {
   fi
 
   # Untracked, non-ignored files (new files the develop/fix round produced).
+  # Renames are excluded from the `??` arm on purpose: the tracked diff above
+  # already reports the rename, and folding `--no-index` output of a renamed
+  # file would double-report the same change.
   local status_out
   status_out="$(git status --porcelain 2>"$GIT_ERR_FILE")" || rc=$?
   if [ "${rc:-0}" -ne 0 ]; then
@@ -426,17 +430,27 @@ dispatch_fix() {
 GIT_ERR_FILE="$(mktemp)"
 trap 'rm -f "$GIT_ERR_FILE"' EXIT
 # Record the start ref before the develop round so the review diff covers
-# work the developer commits (a bare `git diff HEAD` would miss it). On an
-# unborn repo (no commits yet) HEAD does not resolve, so fall back to the
-# empty tree: everything present after develop is then "new".
-START_REF="$(git rev-parse HEAD 2>"$GIT_ERR_FILE")" || {
-  local empty_tree="$(git hash-object -t tree /dev/null)"
-  [ -n "$empty_tree" ] || {
-    # git hash-object failure: a real git failure — surface verbatim.
+# work the developer commits (a diff against a moving ref would miss it).
+# On an unborn repo (no commits yet) HEAD does not resolve, so fall back
+# to the empty tree: everything present after develop is then "new".
+# If git itself fails (corrupt repo), surface it as PI_ERROR.
+if ! git rev-parse HEAD >/dev/null 2>"$GIT_ERR_FILE"; then
+  # Distinguish unborn repo (expected) from a real git failure (PI_ERROR).
+  # An unborn repo: `git rev-parse --git-dir` succeeds (we're in a repo),
+  # `git rev-parse HEAD` fails with exit 128. A real git failure: any
+  # other non-zero exit.
+  git_rc=0
+  git rev-parse HEAD >/dev/null 2>"$GIT_ERR_FILE" && git_rc=0 || git_rc=$?
+  if [ "$git_rc" -eq 128 ]; then
+    empty_tree="$(git hash-object -t tree /dev/null)"
+    [ -n "$empty_tree" ] || die_git_error
+    START_REF="$empty_tree"
+  else
     die_git_error
-  }
-  START_REF="$empty_tree"
-}
+  fi
+else
+  START_REF="$(git rev-parse HEAD 2>"$GIT_ERR_FILE")"
+fi
 
 # A clean working tree at entry is normal for a develop-first loop: the
 # developer round is what produces the work. There is no entry-time diff
