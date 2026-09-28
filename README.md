@@ -320,3 +320,7 @@ A deliberate doctrine runs through the whole design: pi's output is treated as a
 **colleague, not an authority**. Claude verifies the claims in `findings`
 against `git diff HEAD` before reporting them, and an `APPROVED` verdict never
 replaces Claude's own judgment about the diff.
+
+## License
+
+Licensed under the Apache License, Version 2.0 — see LICENSE. Copyright 2026 Janni Turunen.
