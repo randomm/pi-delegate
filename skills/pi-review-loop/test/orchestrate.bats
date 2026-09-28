@@ -413,10 +413,17 @@ WRAP
   fixture 2 'Looks fine.' 'VERDICT: APPROVED'
   run_driver --model gpt-test "do it"
   # Verify the key flags appear in the call log (each pi call logs all its args).
-  for flag in --mode -p --no-session --no-extensions --no-skills --no-prompt-templates; do
+  for flag in --mode -p --no-session --no-extensions --no-skills --no-prompt-templates --no-context-files; do
     grep -q -- "$flag" "$ARGV_LOG"
   done
   grep -q "gpt-test" "$ARGV_LOG"
+}
+
+@test "PI_CONTEXT_FILES=1 opts out of --no-context-files" {
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  PI_CONTEXT_FILES=1 run_driver "do it"
+  [ "$status" -eq 0 ]
+  ! grep -q -- '--no-context-files' "$ARGV_LOG"
 }
 
 @test "developer gets full tools (no --tools); reviewer is restricted to read-only" {

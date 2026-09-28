@@ -14,6 +14,11 @@
 #                    1 + review 3 + fix 2 = 6 total pi invocations).
 #
 # Environment:
+#   PI_CONTEXT_FILES   When set to a non-empty value (e.g. 1), pi context
+#                      files (AGENTS.md/CLAUDE.md) are loaded for every pi
+#                      call. Unset/empty by default: every pi call passes
+#                      --no-context-files so the target repo's agent
+#                      instructions do not override the role prompts.
 #   PI_DIFF_MAX_BYTES  Max bytes of diff embedded in a review prompt.
 #                      Default 100000 (Linux caps a single argv element
 #                      at ~128KB, MAX_ARG_STRLEN; keep the prompt arg
@@ -249,6 +254,7 @@ trim_diff() {
 run_pi() {
   local prompt="$1" system_prompt="$2" tools="${3:--}"
   local args=(--mode json -p --no-session --no-extensions --no-skills --no-prompt-templates)
+  [ -z "${PI_CONTEXT_FILES:-}" ] && args+=(--no-context-files)
   [ "$system_prompt" != "-" ] && args+=(--append-system-prompt "$system_prompt")
   [ "$tools" != "-" ] && args+=(--tools "$tools")
   [ -n "$model_arg" ] && args+=(--model "$model_arg")
