@@ -85,7 +85,7 @@ run the review loop: implement retry_with_backoff() in src/retry.py
 The driver takes your request as the develop-round task, then loops:
 
 ```
-develop ──> review ──> fix ──> review ──> … (rounds ≤ 3, capped at 5)
+develop ──> review ──> fix ──> review ──> … (≤ 3 rounds, hard cap 3)
 ```
 
 - **Round 1 (develop):** pi implements your task with full tool access.
@@ -96,7 +96,7 @@ develop ──> review ──> fix ──> review ──> … (rounds ≤ 3, cap
   findings threaded in, then the loop reviews again.
 
 Each fix consumes a review round; there is at most one develop round, at most
-3 review rounds (cap 5), and at most 2 fix rounds.
+3 review rounds (hard cap 3), and at most 2 fix rounds.
 
 ### Expected output
 
@@ -131,7 +131,17 @@ orchestrate.sh --model <model> --max-rounds <N> "<task description>"
 
 - `--model <model>` — forwarded to every pi invocation; omit to use pi's
   configured default.
-- `--max-rounds <N>` — review-round budget (default 3, hard cap 5).
+- `--max-rounds <N>` — review-round budget (default 3, hard cap 3).
+
+### Environment
+
+- `PI_TIMEOUT` — seconds allowed per pi invocation (default 1800). Requires
+  `timeout` (coreutils) or `gtimeout` (macOS brew coreutils) on `PATH`; if
+  neither exists, pi calls run without a time limit and a warning is logged
+  once. Must be a positive integer, or the driver exits 2.
+- `PI_DIFF_MAX_BYTES` — max bytes of the diff (or fix-prompt transcript) embedded
+  in a review prompt (default 100000); larger content is truncated with a
+  notice.
 
 ## Model selection guide
 
@@ -176,8 +186,9 @@ where you should not skimp on model quality.
 |---|---|---|
 | 0 | `PASS`, `PASSED_WITH_FINDINGS`, or `EMPTY_DIFF` | Report the verdict. For `PASSED_WITH_FINDINGS`, surface the `findings` array as observations. |
 | 1 | `REJECTED` — `CRITICAL_ISSUES_FOUND` with the round budget exhausted | Relay the findings; do **not** claim the change is safe. |
-| 2 | `INCOMPLETE` — no parseable verdict (malformed pi output) | Re-run, or inspect `raw_output` to see what pi actually emitted. |
-| 3 | `PI_ERROR` — pi missing/unresolvable, not a git repo, or pi crashed (auth, etc.) | Fix the environment, then re-run. |
+| 2 | `INCOMPLETE` — no parseable verdict (malformed pi output); JSON summary is emitted | Re-run, or inspect `raw_output` to see what pi actually emitted. |
+| 2 | CLI usage error (unknown flag, missing task, invalid `--max-rounds` or `PI_TIMEOUT`); stderr `ERROR:`, no JSON | Fix the command line, then re-run. |
+| 3 | `PI_ERROR` — pi missing/unresolvable, not a git repo, git/jq missing, pi crashed (auth, etc.), a `git diff HEAD` call failed, or pi timed out after `PI_TIMEOUT` seconds | Fix the environment, then re-run. |
 
 ### Verdicts
 
@@ -189,8 +200,8 @@ markdown bold.
 |---|---|---|
 | `APPROVED` | Change is correct and complete | `PASS` |
 | `MINOR_OBSERVATIONS` | Only informational notes | `PASS` |
-| `ISSUES_FOUND` | Real problems, non-critical | `PASSED_WITH_FINDINGS` (findings surfaced, not blocking) |
-| `CRITICAL_ISSUES_FOUND` | Blocking problems | Fix round; after budget exhausted → `REJECTED` |
+| `ISSUES_FOUND` | Real problems, non-critical | `PASSED_WITH_FINDINGS` (terminal; findings surfaced, not blocking) |
+| `CRITICAL_ISSUES_FOUND` | Blocking problems | Triggers a fix round at any non-terminal round; if the round budget is exhausted → `REJECTED` |
 
 ## Troubleshooting
 
@@ -232,8 +243,7 @@ The reviewer found critical issues and the round budget is exhausted. The change
 is **not** safe as-is. Read the `findings` array, then either:
 
 - fix the findings yourself and re-run the loop, or
-- re-run with `--max-rounds 5` to give the loop more budget (the driver is
-  hard-capped at 5).
+- re-run with `--max-rounds 3` (the maximum; the driver is hard-capped at 3).
 
 ### The diff is empty at entry
 
@@ -256,10 +266,12 @@ all.
                  │
                  ▼
            orchestrate.sh  (deterministic bash driver, repo root)
-           ├── round 1: developer  ──►  pi --mode json -p --no-session
+           ├── round 1: developer  ──►  pi --mode json -p --no-session \
+           │                             --no-extensions --no-skills --no-prompt-templates
            │                             --append-system-prompt developer.md
            │                             (full tools)
-           ├── round N: reviewer   ──►  pi --mode json -p --no-session
+           ├── round N: reviewer   ──►  pi --mode json -p --no-session \
+           │                             --no-extensions --no-skills --no-prompt-templates
            │                             --append-system-prompt adversarial-reviewer.md
            │                             --tools read,grep,find,ls   (read-only)
            └── fix rounds: developer ─►  (same as round 1, findings threaded in)
@@ -274,7 +286,7 @@ all.
    succeeds. `git diff HEAD` empty → `EMPTY_DIFF`, exit 0, zero pi calls.
 2. **Develop:** one pi call with `developer.md` as the appended system prompt;
    the task description is the user prompt.
-3. **Review (≤ 3 rounds, cap 5):** the diff is re-read fresh from
+3. **Review (≤ 3 rounds, hard cap 3):** the diff is re-read fresh from
    `git diff HEAD` each round and embedded in the review prompt, along with the
    original task and any previous-round findings (so findings cannot regress
    unnoticed). The reviewer runs read-only.
