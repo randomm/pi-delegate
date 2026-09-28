@@ -91,8 +91,9 @@ develop ──> review ──> fix ──> review ──> … (≤ 3 rounds, har
 
 - **Round 1 (develop):** pi implements your task with full tool access.
 - **Each review round:** a *separate* pi instance, run **read-only**
-  (`--tools read,grep,find,ls`), reviews the fresh `git diff HEAD` and ends
-  with a `VERDICT:` line.
+  (`--tools read,grep,find,ls`), reviews the changes against the base commit
+  recorded before the develop round — committed work and new untracked
+  (non-ignored) files included — and ends with a `VERDICT:` line.
 - **Fix round:** on a blocking verdict, the developer prompt re-runs with the
   findings threaded in, then the loop reviews again.
 
@@ -117,7 +118,7 @@ stdout**:
 
 | Field | Meaning |
 |---|---|
-| `status` | Terminal loop state: `PASS`, `PASSED_WITH_FINDINGS`, `EMPTY_DIFF`, `REJECTED`, `INCOMPLETE`, `PI_ERROR` |
+| `status` | Terminal loop state: `PASS`, `PASSED_WITH_FINDINGS`, `EMPTY_DIFF` (the develop round produced no change vs the base), `REJECTED`, `INCOMPLETE`, `PI_ERROR` |
 | `verdict` | Last parsed reviewer verdict, or `null` |
 | `rounds` | Review rounds that ran |
 | `total_pi_calls` | Total pi invocations (develop + reviews + fixes) |
@@ -185,11 +186,11 @@ where you should not skimp on model quality.
 
 | Code | Meaning | What to do |
 |---|---|---|
-| 0 | `PASS`, `PASSED_WITH_FINDINGS`, or `EMPTY_DIFF` | Report the verdict. For `PASSED_WITH_FINDINGS`, surface the `findings` array as observations. |
+| 0 | `PASS`, `PASSED_WITH_FINDINGS`, or `EMPTY_DIFF` | Report the verdict. For `PASSED_WITH_FINDINGS`, surface the `findings` array as observations. For `EMPTY_DIFF`, the develop round produced no change vs the base — nothing was reviewed. |
 | 1 | `REJECTED` — `CRITICAL_ISSUES_FOUND` with the round budget exhausted | Relay the findings; do **not** claim the change is safe. |
 | 2 | `INCOMPLETE` — no parseable verdict (malformed pi output); JSON summary is emitted | Re-run, or inspect `raw_output` to see what pi actually emitted. |
 | 2 | CLI usage error (unknown flag, missing task, invalid `--max-rounds` or `PI_TIMEOUT`); stderr `ERROR:`, no JSON | Fix the command line, then re-run. |
-| 3 | `PI_ERROR` — pi missing/unresolvable, not a git repo, git/jq missing, pi crashed (auth, etc.), a `git diff HEAD` call failed, or pi timed out after `PI_TIMEOUT` seconds | Fix the environment, then re-run. |
+| 3 | `PI_ERROR` — pi missing/unresolvable, not a git repo, git/jq missing, pi crashed (auth, etc.), a diff snapshot against the base failed, or pi timed out after `PI_TIMEOUT` seconds | Fix the environment, then re-run. |
 
 ### Verdicts
 
@@ -246,10 +247,14 @@ is **not** safe as-is. Read the `findings` array, then either:
 - fix the findings yourself and re-run the loop, or
 - re-run with `--max-rounds 3` (the maximum; the driver is hard-capped at 3).
 
-### The diff is empty at entry
+### The develop round produced no change
 
-Exit 0 with `EMPTY_DIFF` — nothing to review. The driver does not invoke pi at
-all.
+A clean working tree at entry is normal — the loop is develop-first, so the
+base commit (the HEAD before the develop round; the empty tree for unborn
+repos) is recorded first and the diff is taken against it, which includes
+committed work and new untracked (non-ignored) files. `EMPTY_DIFF` (exit 0)
+means the develop round itself produced no change vs that base — nothing was
+reviewed; the JSON summary and stderr say so.
 
 ## How it works
 
@@ -286,11 +291,12 @@ all.
 ### Loop sequence
 
 1. **Preflight:** `jq` present, `pi` resolvable, `git rev-parse --git-dir`
-   succeeds. `git diff HEAD` empty → `EMPTY_DIFF`, exit 0, zero pi calls.
+   succeeds. A base commit is recorded before the develop round (`git rev-parse HEAD`, or the empty tree for unborn repos) — a clean working tree at entry is normal and is not a short-circuit.
 2. **Develop:** one pi call with `developer.md` as the appended system prompt;
    the task description is the user prompt.
-3. **Review (≤ 3 rounds, hard cap 3):** the diff is re-read fresh from
-   `git diff HEAD` each round and embedded in the review prompt, along with the
+3. **Review (≤ 3 rounds, hard cap 3):** the diff against the base commit is
+   re-read fresh each round (including committed work and new untracked
+   non-ignored files) and embedded in the review prompt, along with the
    original task and any previous-round findings (so findings cannot regress
    unnoticed). The reviewer runs read-only.
 4. **Verdict parsing:** the final assistant text is extracted from the last
@@ -301,7 +307,9 @@ all.
    `ISSUES_FOUND` → `PASSED_WITH_FINDINGS` (terminal);
    `CRITICAL_ISSUES_FOUND` → fix round + re-review while budget remains, else
    `REJECTED`; no parseable verdict → one more round if budget remains, else
-   `INCOMPLETE`.
+   `INCOMPLETE`. If the diff against the base is empty after the develop
+   round, the loop ends with `EMPTY_DIFF`, exit 0 — the develop round
+   produced nothing to review.
 
 ### Prompt flow
 
@@ -321,7 +329,8 @@ which replaces pi's system prompt and breaks tool-calling).
 
 A deliberate doctrine runs through the whole design: pi's output is treated as a
 **colleague, not an authority**. Claude verifies the claims in `findings`
-against `git diff HEAD` before reporting them, and an `APPROVED` verdict never
+against the diff (against the base commit, so committed and newly created
+files are covered) before reporting them, and an `APPROVED` verdict never
 replaces Claude's own judgment about the diff.
 
 ## License
