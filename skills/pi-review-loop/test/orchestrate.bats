@@ -469,3 +469,113 @@ WRAP
   run_driver
   [ "$status" -eq 2 ]
 }
+
+# --- Issue #16 coverage: verdict variants, round-cap sentinel, mid-loop INCOMPLETE, JSON shape
+
+# --- Verdict parser: case-insensitive variants --------------------------------
+
+@test "verdict variant: 'verdict: approved' (lowercase + colon) parses to APPROVED" {
+  fixture 2 'All good.' 'verdict: approved'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
+}
+
+@test "verdict variant: 'VERDICT: APPROVED' (uppercase + colon) parses to APPROVED" {
+  fixture 2 'All good.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
+}
+
+@test "verdict variant: '**VERDICT**: Approved' (bold + colon + mixed case) parses to APPROVED" {
+  fixture 2 'All good.' '**VERDICT**: Approved'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
+}
+
+# --- Hard caps: 7th pi call is impossible --------------------------------------
+
+@test "always-CRITICAL review: hard cap holds, exactly 6 pi calls, round-7 sentinel never fires" {
+  # Every review (calls 2, 4, 6) returns CRITICAL_ISSUES_FOUND, so the driver
+  # must keep dispatching fixes until both hard caps (3 rounds, 6 total calls)
+  # exhaust. Fixture 7 is a sentinel: it is only served if the driver ever
+  # makes a 7th pi call, which it must not. A missing fixture would be
+  # indistinguishable from "never called", so the sentinel file IS created
+  # and the test asserts its content never leaks into any driver output.
+  local i
+  for i in 2 4 6; do
+    fixture "$i" 'Broken beyond repair.' '- [a.txt:1] unrecoverable defect' 'VERDICT: CRITICAL_ISSUES_FOUND'
+  done
+  fixture 7 'SENTINEL_ROUND_7_MUST_NEVER_APPEAR'
+  run_driver "do it"
+  [ "$status" -eq 1 ]
+  [ "$(pi_calls)" -eq 6 ]
+  local out all
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "REJECTED" ]
+  [ "$(printf '%s' "$out" | jq -r .total_pi_calls)" = "6" ]
+  [ "$(printf '%s' "$out" | jq -r .rounds)" = "3" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "CRITICAL_ISSUES_FOUND" ]
+  all="$(printf '%s\n' "${lines[@]}")"
+  [[ "$all" != *"SENTINEL_ROUND_7_MUST_NEVER_APPEAR"* ]]
+  ! grep -q "SENTINEL_ROUND_7_MUST_NEVER_APPEAR" "$ARGV_LOG"
+}
+
+# --- Mid-loop INCOMPLETE --------------------------------------------------------
+
+@test "INCOMPLETE at round 3 (unparseable reviewer output mid-loop) -> exit 2, rounds=3, 6 pi calls" {
+  # Rounds 1-2 (calls 2, 4) return ISSUES_FOUND, so two fixes run (calls 3, 5).
+  # Round 3 (call 6) returns prose with NO verdict line anywhere — the parser
+  # must find nothing (last-occurrence rule makes any stray verdict count)
+  # and the driver must bail INCOMPLETE at round 3, having already spent
+  # develop + 3 reviews + 2 fixes = 6 pi calls.
+  fixture 2 'Broken.' '- [a.txt:1] defect one' 'VERDICT: ISSUES_FOUND'
+  fixture 3 'Fix applied.'
+  fixture 4 'Still not right.' '- [a.txt:2] defect two' 'VERDICT: ISSUES_FOUND'
+  fixture 5 'Fix applied.'
+  fixture 6 'I am unsure how to proceed with this change set.'
+  run_driver "do it"
+  [ "$status" -eq 2 ]
+  [ "$(pi_calls)" -eq 6 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "INCOMPLETE" ]
+  [ "$(printf '%s' "$out" | jq -r .rounds)" = "3" ]
+  [ "$(printf '%s' "$out" | jq -r .total_pi_calls)" = "6" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "null" ]
+}
+
+# --- JSON summary shape / types --------------------------------------------------
+
+@test "JSON summary shape: last stdout line parses with exactly the 6 contract keys, correct types" {
+  # PASS path so the string (not null) verdict branch is exercised.
+  fixture 2 'Looks fine.' '- [a.txt:1] nit' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  local out
+  out="$(tail_json)"
+  # The last stdout line must be valid JSON.
+  printf '%s' "$out" | jq -e . >/dev/null
+  # Key set is exactly {status, verdict, rounds, total_pi_calls, findings, raw_output}.
+  [ "$(printf '%s' "$out" | jq -r 'keys_unsorted | sort | join(",")')" \
+    = "findings,raw_output,rounds,status,total_pi_calls,verdict" ]
+  # Types: status string, verdict string-or-null, rounds/total_pi_calls numbers,
+  # findings array, raw_output string.
+  [ "$(printf '%s' "$out" | jq -er '.status | type')" = "string" ]
+  [ "$(printf '%s' "$out" | jq -er 'if .verdict == null then "null" else (.verdict | type) end')" = "string" ]
+  [ "$(printf '%s' "$out" | jq -er '.rounds | type')" = "number" ]
+  [ "$(printf '%s' "$out" | jq -er '.total_pi_calls | type')" = "number" ]
+  [ "$(printf '%s' "$out" | jq -r '.findings | type')" = "array" ]
+  [ "$(printf '%s' "$out" | jq -r '.raw_output | type')" = "string" ]
+}
