@@ -23,7 +23,7 @@ setup() {
   # Temp git repo with a working-tree change so `git diff HEAD` is non-empty.
   REPO="$(mktemp -d)"
   cd "$REPO" || return 1
-  git init -q .
+  git init -q -b main .
   git config user.email t@t.t
   git config user.name t
   echo base > a.txt
@@ -32,7 +32,9 @@ setup() {
   echo modified > a.txt
   # Create and switch to a feature branch so the safety preflight (which
   # refuses the default branch) does not fire for the existing tests. The
-  # default branch is "main" (git's default for `git init` on modern git).
+  # default branch is "main" — pinned via `git init -b main` so the suite
+  # is deterministic regardless of the machine's init.defaultBranch default
+  # (CI git defaults to "master").
   git checkout -q -b feature/test-branch
 
   # Temp dirs for the mock pi and its call log.
