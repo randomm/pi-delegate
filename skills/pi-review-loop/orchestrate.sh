@@ -581,14 +581,22 @@ run_pi() {
   # 124 = timed out (SIGTERM honored); 137 = survived SIGTERM, SIGKILLed
   # at the --kill-after grace expiry (128+9). Both are timeouts; the fixed
   # message overrides $output so partial output from the hung run never
-  # leaks into pi_stderr.
+  # leaks into pi_stderr. The message names the SIGKILL escalation so the
+  # caller knows the second phase exists and its cost (PI_KILL_AFTER).
   if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-    pi_stderr="pi timed out after ${PI_TIMEOUT}s"
+    pi_stderr="pi timed out after ${PI_TIMEOUT}s (SIGKILL after a further ${PI_KILL_AFTER}s if needed)"
+    # The hung run never produced a usable transcript; drop whatever a
+    # prior successful call left in $last_transcript so the PI_ERROR
+    # summary's raw_output reflects this failed call, not an old one.
+    last_transcript=""
     return 1
   fi
 
   if [ "$rc" -ne 0 ]; then
     pi_stderr="$output"
+    # Same as the timeout branch: a failed call's summary must not carry a
+    # previous call's transcript (issue #50).
+    last_transcript=""
     return 1
   fi
 

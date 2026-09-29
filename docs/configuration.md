@@ -34,6 +34,9 @@ into their own session (`setsid`/daemons) escape the timeout entirely.
 - **Exit 137** — pi ignored SIGTERM and was SIGKILLed (SIGKILL escalation) at `PI_TIMEOUT + PI_KILL_AFTER`:
   the call **timed out**.
 
+The driver reports both as `pi timed out after ${PI_TIMEOUT}s (SIGKILL after a further ${PI_KILL_AFTER}s if needed)`
+(the clause documents the second phase and its cost).
+
 Any other non-zero exit is a genuine pi failure and is relayed verbatim. On
 the unbounded path (no `timeout`/`gtimeout` binary) there is no 124/137 at
 all — only Claude Code's Bash-tool timeout bounds the run.

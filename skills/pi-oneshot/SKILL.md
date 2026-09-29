@@ -258,8 +258,8 @@ After pi exits, **summarize** its output and report it to the user:
 - Summarize what pi did and found — do not paste the full transcript
   back unless the user asked for it.
 - If pi exited **124** or **137**, it timed out — say so ("pi timed out
-  after ${PI_TIMEOUT}s"), suggest raising `PI_TIMEOUT`/`PI_KILL_AFTER` and
-  re-running.
+  after ${PI_TIMEOUT}s (SIGKILL after a further ${PI_KILL_AFTER}s if
+  needed)"), suggest raising `PI_TIMEOUT`/`PI_KILL_AFTER` and re-running.
 - If pi exited non-zero for any other reason, or printed an error (auth
   failure, model unavailable, crash), relay the error verbatim and suggest
   fixing the environment, then re-running.

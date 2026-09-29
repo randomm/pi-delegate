@@ -456,6 +456,9 @@ WRAP
   out="$(PI_TIMEOUT=1 bash "$SCRIPT" "do it" 2>&1)" || rc=$?
   [ "$rc" -eq 3 ]
   [[ "$out" == *"pi timed out after 1s"* ]]
+  # The message must mention the SIGKILL escalation and its cost
+  # (PI_KILL_AFTER defaults to 30) so users know both phases exist.
+  [[ "$out" == *"SIGKILL after a further 30s if needed"* ]]
 }
 
 @test "pi timeout (SLEEP-IGNORE-TERM fixture, PI_TIMEOUT=1 PI_KILL_AFTER=1) -> PI_ERROR, exit 3, < 10s" {
@@ -471,6 +474,7 @@ WRAP
   elapsed=$((t1 - t0))
   [ "$rc" -eq 3 ]
   [[ "$out" == *"pi timed out after 1s"* ]]
+  [[ "$out" == *"SIGKILL after a further 1s if needed"* ]]
   [ "$elapsed" -lt 10 ]
 }
 
@@ -485,7 +489,50 @@ WRAP
   elapsed=$((t1 - t0))
   [ "$rc" -eq 3 ]
   [[ "$out" == *"pi timed out after 1s"* ]]
+  [[ "$out" == *"SIGKILL after a further 2s if needed"* ]]
   [ "$elapsed" -lt 10 ]
+}
+
+@test "timeout message names the SIGKILL escalation for rc 137 (PI_KILL_AFTER=1)" {
+  printf 'SLEEP-IGNORE-TERM:30\nnever reached\n' > "$FIXTURES_DIR/1"
+  local out rc=0
+  out="$(PI_TIMEOUT=1 PI_KILL_AFTER=1 bash "$SCRIPT" "do it" 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  # The escalation clause must name the actual PI_KILL_AFTER value, not a
+  # hardcoded default, for the rc 137 (SIGKILL'd) path.
+  [[ "$out" == *"pi timed out after 1s (SIGKILL after a further 1s if needed)"* ]]
+}
+
+@test "PI_ERROR raw_output does not carry a prior call's transcript after a timeout" {
+  # Issue #50: a successful call's transcript must not leak into the raw_output
+  # of a later PI_ERROR summary. Call 2 (review) succeeds with a distinct
+  # transcript; call 3 (fix) hangs and hits PI_TIMEOUT, so the summary's
+  # raw_output must be empty — the timed-out call's own (empty) output —
+  # and must not contain the earlier reviewer transcript.
+  fixture 2 'UNIQUE-REVIEW-TRANSCRIPT-X' '- [a.txt:1] a nit' 'VERDICT: ISSUES_FOUND'
+  printf 'SLEEP:2\nnever emitted\n' > "$FIXTURES_DIR/3"
+  local out rc=0
+  out="$(PI_TIMEOUT=1 bash "$SCRIPT" "do it" 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  local raw
+  raw="$(printf '%s' "$out" | tail -n 1 | jq -r .raw_output)"
+  [ -z "$raw" ]
+  [[ "$out" != *"UNIQUE-REVIEW-TRANSCRIPT-X"* ]]
+}
+
+@test "PI_ERROR raw_output is reset on a plain pi crash (not just timeouts)" {
+  # The transcript reset applies to ANY non-zero pi exit, not only 124/137:
+  # a mid-loop crash after a successful review must also yield an empty
+  # raw_output, never the reviewer's transcript.
+  fixture 2 'UNIQUE-REVIEW-TRANSCRIPT-Y' '- [a.txt:1] a nit' 'VERDICT: ISSUES_FOUND'
+  printf 'EXIT:1\nauth failure: token expired\n' > "$FIXTURES_DIR/3"
+  run_driver "do it"
+  [ "$status" -eq 3 ]
+  local raw
+  raw="$(printf '%s' "$(tail_json)" | jq -r .raw_output)"
+  [ -z "$raw" ]
+  printf '%s\n' "${lines[@]}" | grep -q "auth failure: token expired"
+  [[ "${lines[*]}" != *"UNIQUE-REVIEW-TRANSCRIPT-Y"* ]]
 }
 
 @test "oversized diff is truncated with a notice (PI_DIFF_MAX_BYTES=400)" {
