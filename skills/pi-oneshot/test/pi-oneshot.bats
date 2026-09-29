@@ -29,38 +29,81 @@ skill_section() {
   awk -v h="$1" 'BEGIN{s=0} $0 == h {s=1; next} s && /^##(#[^#]|[^# ])/ {s=0} s {print}' "$SKILL_FILE"
 }
 
-# --- README + docs: pi-oneshot section (re-pointed from README to
-# docs/configuration.md, issue #45 — identical literal checks) ---
+# --- docs/configuration.md is the single source of truth for the timeout
+# contract (issue #45). The literals below are asserted in the ONE owning
+# file (docs/configuration.md), never with an `A || B` across files. ---
 
-@test "README or docs names PI_TIMEOUT/PI_KILL_AFTER with the 1800/30 defaults for pi-oneshot" {
-  grep -qF 'PI_TIMEOUT:-1800' "$CONFIG_FILE" || grep -qF 'PI_TIMEOUT:-1800' "$README_FILE"
-  grep -qF 'PI_KILL_AFTER:-30' "$CONFIG_FILE" || grep -qF 'PI_KILL_AFTER:-30' "$README_FILE"
+@test "docs/configuration.md owns PI_TIMEOUT/PI_KILL_AFTER with the 1800/30 defaults" {
+  grep -qF 'PI_TIMEOUT:-1800' "$CONFIG_FILE"
+  grep -qF 'PI_KILL_AFTER:-30' "$CONFIG_FILE"
 }
 
-@test "README or docs names the timeout wrapper (--kill-after) for pi-oneshot" {
-  grep -q -- '--kill-after' "$CONFIG_FILE" || grep -q -- '--kill-after' "$README_FILE"
+@test "docs/configuration.md owns the timeout wrapper (--kill-after)" {
+  grep -q -- '--kill-after' "$CONFIG_FILE"
 }
 
-@test "README or docs mentions gtimeout for pi-oneshot" {
-  grep -q 'gtimeout' "$CONFIG_FILE" || grep -q 'gtimeout' "$README_FILE"
+@test "docs/configuration.md owns the gtimeout fallback" {
+  grep -q 'gtimeout' "$CONFIG_FILE"
 }
 
-@test "README or docs documents 124/137 = timed out for pi-oneshot" {
-  grep -qE '(^|[^0-9])124([^0-9]|$)' "$CONFIG_FILE" || grep -qE '(^|[^0-9])124([^0-9]|$)' "$README_FILE"
-  grep -qE '(^|[^0-9])137([^0-9]|$)' "$CONFIG_FILE" || grep -qE '(^|[^0-9])137([^0-9]|$)' "$README_FILE"
+@test "docs/configuration.md owns 124/137 = timed out" {
+  grep -qE '(^|[^0-9])124([^0-9]|$)' "$CONFIG_FILE"
+  grep -qE '(^|[^0-9])137([^0-9]|$)' "$CONFIG_FILE"
 }
 
-@test "README or docs documents the pi-oneshot unbounded-with-warning path" {
-  grep -qEi 'unbounded|no time limit|without a time limit' "$CONFIG_FILE" || grep -qEi 'unbounded|no time limit|without a time limit' "$README_FILE"
-  grep -q 'warn' "$CONFIG_FILE" || grep -q 'warn' "$README_FILE"
+@test "docs/configuration.md owns the unbounded-with-warning path" {
+  grep -qEi 'unbounded|no time limit|without a time limit' "$CONFIG_FILE"
+  grep -qi 'warn' "$CONFIG_FILE"
 }
 
-@test "README or docs carries the long-run guidance (run_in_background) for both skills" {
-  grep -q 'run_in_background' "$CONFIG_FILE" || grep -q 'run_in_background' "$README_FILE"
+@test "docs/configuration.md owns the long-run guidance (run_in_background)" {
+  grep -q 'run_in_background' "$CONFIG_FILE"
 }
 
-@test "README or docs states the correct worst-case loop wall clock (183 min, not 33)" {
-  grep -q '183 min' "$CONFIG_FILE" || grep -q '183 min' "$README_FILE"
+@test "docs/configuration.md owns the worst-case loop wall clock (183 min, not 33)" {
+  grep -q '183 min' "$CONFIG_FILE"
+}
+
+@test "README carries no timeout-contract literals (single source: docs/configuration.md)" {
+  # The README points at configuration.md instead of re-stating the
+  # contract, so the literals must NOT appear there. (run_in_background
+  # may still appear as a pointer; the contract literals may not.)
+  run grep -qF 'PI_TIMEOUT:-1800' "$README_FILE"
+  [ "$status" -ne 0 ]
+  run grep -qF 'PI_KILL_AFTER:-30' "$README_FILE"
+  [ "$status" -ne 0 ]
+  run grep -q -- '--kill-after' "$README_FILE"
+  [ "$status" -ne 0 ]
+  run grep -q 'gtimeout' "$README_FILE"
+  [ "$status" -ne 0 ]
+  run grep -qE '(^|[^0-9])124([^0-9]|$)' "$README_FILE"
+  [ "$status" -ne 0 ]
+  run grep -qE '(^|[^0-9])137([^0-9]|$)' "$README_FILE"
+  [ "$status" -ne 0 ]
+  run grep -qi 'unbounded' "$README_FILE"
+  [ "$status" -ne 0 ]
+  run grep -q '183 min' "$README_FILE"
+  [ "$status" -ne 0 ]
+}
+
+# --- Cross-file agreement: docs/configuration.md vs pi-oneshot SKILL.md
+# (SKILL.md is the executable wrapper spec; it must agree with the doc.) ---
+
+@test "docs/configuration.md and pi-oneshot SKILL.md agree on the 1800 default" {
+  grep -qE '(^|[^0-9])1800([^0-9]|$)' "$SKILL_FILE"
+  grep -qE '(^|[^0-9])1800([^0-9]|$)' "$CONFIG_FILE"
+}
+
+@test "docs/configuration.md and pi-oneshot SKILL.md agree on the 30 default" {
+  grep -qF 'PI_KILL_AFTER:-30' "$SKILL_FILE"
+  grep -qF 'PI_KILL_AFTER:-30' "$CONFIG_FILE"
+}
+
+@test "docs/configuration.md and pi-oneshot SKILL.md agree on 124/137 = timed out" {
+  grep -qE '(^|[^0-9])124([^0-9]|$)' "$SKILL_FILE"
+  grep -qE '(^|[^0-9])137([^0-9]|$)' "$SKILL_FILE"
+  grep -qE '(^|[^0-9])124([^0-9]|$)' "$CONFIG_FILE"
+  grep -qE '(^|[^0-9])137([^0-9]|$)' "$CONFIG_FILE"
 }
 
 # --- pi-oneshot SKILL.md: Invocation block has the timeout wrapper ---
@@ -154,24 +197,9 @@ skill_section() {
   grep -q 'run_in_background' "$SKILL_FILE"
 }
 
-# --- Cross-file consistency: README and SKILL.md agree ---
-
-@test "README or docs and SKILL.md agree on the 1800 default" {
-  grep -qE '(^|[^0-9])1800([^0-9]|$)' "$SKILL_FILE"
-  grep -qE '(^|[^0-9])1800([^0-9]|$)' "$CONFIG_FILE" || grep -qE '(^|[^0-9])1800([^0-9]|$)' "$README_FILE"
-}
-
-@test "README or docs and SKILL.md agree on the 30 default" {
-  grep -qF 'PI_KILL_AFTER:-30' "$SKILL_FILE"
-  grep -qF 'PI_KILL_AFTER:-30' "$CONFIG_FILE" || grep -qF 'PI_KILL_AFTER:-30' "$README_FILE"
-}
-
-@test "README or docs and SKILL.md agree on 124/137 = timed out" {
-  grep -qE '(^|[^0-9])124([^0-9]|$)' "$SKILL_FILE"
-  grep -qE '(^|[^0-9])137([^0-9]|$)' "$SKILL_FILE"
-  grep -qE '(^|[^0-9])124([^0-9]|$)' "$CONFIG_FILE" || grep -qE '(^|[^0-9])124([^0-9]|$)' "$README_FILE"
-  grep -qE '(^|[^0-9])137([^0-9]|$)' "$CONFIG_FILE" || grep -qE '(^|[^0-9])137([^0-9]|$)' "$README_FILE"
-}
+# (Cross-file agreement tests with pi-oneshot SKILL.md live in the
+# "Cross-file agreement" block above; SKILL.md-vs-orchestrate.sh checks
+# for the wrapper are in the Invocation-block tests.)
 
 # --- Issue #30: safety preflight doc-drift ---
 

@@ -3,6 +3,11 @@
 # README.md and docs/*.md must resolve to an existing in-tree file (images
 # included). External URLs (http://, https://, mailto: and other schemes),
 # absolute paths, and pure in-page anchors are skipped by design.
+#
+# Anchor handling (issue #45 review): the `#fragment` is stripped BEFORE
+# classification, so `file.md#anchor` links validate their file part; only
+# pure in-page anchors (`#...` with no file part) are skipped. The anchor
+# slug itself is not resolved (GitHub's slugification is not emulated).
 
 setup() {
   local test_dir root
@@ -15,16 +20,18 @@ setup() {
 check_file_links() {
   # $1 = path to a markdown file, relative to the repo root
   local rel="$1"
-  local base_dir line target stripped
+  local base_dir line stripped
   base_dir="$REPO_ROOT/$(dirname "$rel")"
   while IFS= read -r line; do
-    case "$line" in
-      *\#*|http:*|https:*|mailto:*) continue ;;
+    # $line is the raw match: `path` or `path#frag` (with the `](` prefix
+    # already stripped by the producer sed) plus the trailing `)`.
+    # Strip the trailing `)` first, then strip any in-page anchor fragment,
+    # so `file.md#anchor` links are validated by their file part.
+    stripped="$(printf '%s' "$line" | sed -E 's/\)$//; s/#.*//')"
+    [ -n "$stripped" ] || continue  # pure in-page anchor (`#...`) — skip
+    case "$stripped" in
+      http:*|https:*|mailto:*|/*) continue ;;  # external / absolute — skip
     esac
-    target="$(printf '%s' "$line" | sed -E 's/^[^)]*\(\.?.*//; s/\)$//')"
-    # Strip any in-page anchor fragment.
-    stripped="$(printf '%s' "$target" | sed -E 's/#.*//')"
-    [ -n "$stripped" ] || continue
     [ -e "$base_dir/$stripped" ] || { echo "BROKEN: $rel -> $line"; return 1; }
   done < <(grep -Eo '\]\([^)]+\)' "$REPO_ROOT/$rel" | sed -E 's/^\]\(//')
   return 0

@@ -34,7 +34,7 @@ harness — or a plain shell — can drive it directly.
    stream; the `VERDICT:` line is parsed (last occurrence, case-insensitive,
    optional colon/bold) and the `## Findings` section is extracted.
 5. **Loop or terminate** — the two blocking arms diverge only at the terminal
-   round:
+   round (`INCOMPLETE`, exit 2, ends the loop if no verdict is ever parsed):
    - `APPROVED` / `MINOR_OBSERVATIONS` → `PASS`.
    - `ISSUES_FOUND` → a fix round at any **non-terminal** round; at the
      terminal round → `PASSED_WITH_FINDINGS` (findings surfaced, not
@@ -48,7 +48,9 @@ harness — or a plain shell — can drive it directly.
    review.
 
 Each fix consumes a review round; there is at most one develop round, at most
-3 review rounds (hard cap 3), and at most 2 fix rounds (6 pi invocations total).
+3 review rounds (hard cap 3), and at most 2 fix rounds (6 pi invocations
+total). At `--max-rounds 1` the single review round is terminal, so there is
+no fix round — a blocking verdict at round 1 ends the loop immediately.
 
 ## Verdicts
 
@@ -116,12 +118,12 @@ never replaces the orchestrator's own judgment about the diff.
 **Worst case.** At the default budget (3 review rounds), the loop can make up to
 6 pi calls (develop 1 + review 3 + fix 2). Each is bounded by
 `PI_TIMEOUT` (default 1800 s) plus the `PI_KILL_AFTER` (default 30 s) SIGKILL
-escalation, so the worst-case wall clock is `6 × (1800 + 30)` s ≈ **183 min**
-(~3 h) — for non-detached processes (a process that detaches into its own
+escalation — for non-detached processes (a process that detaches into its own
 session escapes the timeout entirely). That is far above Claude Code's Bash
 foreground ceiling, which is why long runs go through
-`run_in_background` + polling (see
-[configuration → Long runs](configuration.md#long-runs-under-claude-codes-bash-tool)).
+`run_in_background` + polling — see
+[configuration → Long runs](configuration.md#long-runs-under-claude-codes-bash-tool)
+for the worst-case derivation.
 
 **Cost rationale.** The pattern works because the two agents have different
 price profiles:

@@ -19,8 +19,9 @@ cheap model *after an adversarial pass*".
 ### 1. Install
 
 Prerequisites: a working `pi` (step 2 sets it up) and `jq`. On macOS,
-`brew install jq coreutils` — `gtimeout` from coreutils bounds each pi call;
-without it, runs are unbounded (with a warning).
+`brew install jq coreutils` installs the GNU timeout binary that bounds each
+pi call (the timeout contract is documented in
+[configuration](docs/configuration.md#pi_timeout--seconds-allowed-per-pi-invocation-default-1800)).
 
 Primary — install as a Claude Code plugin:
 
@@ -81,28 +82,26 @@ Ask your agent for a trivial one-shot task:
 delegate to pi: write a bash function that prints today's date in ISO format
 ```
 
-Then check the run log for the `provider/model` line pi printed to stderr
-(e.g. `pi call 1: provider/model anthropic/…`) — that line proves pi actually
-ran and shows which model answered.
+Then check the run log for the `provider/model` line printed to stderr
+(e.g. `pi call 1: provider/model anthropic/claude-opus-4`) — that line
+proves which model actually answered.
 
 ## The skills
 
 **`pi-oneshot`** — invoke as `/pi-delegate:pi-oneshot` (or "delegate to pi:
 …"). One headless `pi -p --no-session` call with pi's full toolset, text mode,
 no review loop: best for mechanical, self-contained, verifiable tasks. The
-call is wrapped in a per-call timeout — `timeout --kill-after=${PI_KILL_AFTER:-30} ${PI_TIMEOUT:-1800}`
-(`gtimeout` fallback on macOS; if neither binary exists the call runs unbounded
-with a warning). Exit 124 (SIGTERM at `PI_TIMEOUT`) and 137 (SIGKILL escalation
-at `PI_TIMEOUT + PI_KILL_AFTER`) both mean the call timed out.
+call is per-call bounded with a documented timeout wrapper — see
+[configuration](docs/configuration.md#pi_timeout--seconds-allowed-per-pi-invocation-default-1800).
 
 **`pi-review-loop`** — invoke as `/pi-delegate:pi-review-loop` (or "run the
 review loop: …"). Runs `orchestrate.sh`, a deterministic bash driver: one
 develop round, up to 3 read-only adversarial review rounds, up to 2 fix rounds
 (hard cap 6 pi calls). All progress goes to stderr; exactly one JSON summary
 is the last line of stdout (`status`, `verdict`, `rounds`, `total_pi_calls`,
-`findings`, `raw_output`). The loop's worst case is ~183 min (~3 h), so run it
-in the background (`run_in_background: true`) and poll the output until the
-JSON summary appears — see [configuration](docs/configuration.md).
+`findings`, `raw_output`). Long runs exceed the Bash tool's foreground
+ceiling: run in the background and poll — see
+[configuration → Long runs](docs/configuration.md#long-runs-under-claude-codes-bash-tool).
 
 Both skills are packaged as Claude Code skills, but `orchestrate.sh` is plain
 bash with a small documented contract — usable from any agent harness.

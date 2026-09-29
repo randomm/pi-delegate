@@ -8,7 +8,7 @@
 | 1 | `REJECTED` — `CRITICAL_ISSUES_FOUND` with the round budget exhausted | Relay the findings; do **not** claim the change is safe. |
 | 2 | `INCOMPLETE` — no parseable verdict (malformed pi output); JSON summary is emitted | Re-run, or inspect `raw_output` to see what pi actually emitted. |
 | 2 | CLI usage error (unknown flag, missing task, invalid `--max-rounds`, `PI_TIMEOUT`, or `PI_KILL_AFTER`); stderr `ERROR:`, no JSON | Fix the command line, then re-run. |
-| 3 | `PI_ERROR` — pi missing/unresolvable, not a git repo, git/jq missing, pi crashed (auth, etc.), a diff snapshot against the base failed, pi timed out (exit 124 / 137), or the safety preflight refused the run (`REFUSED:` on stderr) | Fix the environment (or the refusal), then re-run. |
+| 3 | `PI_ERROR` — pi missing/unresolvable, not a git repo, git/jq missing, pi crashed (auth, etc.), a diff snapshot against the base failed, pi timed out (exit 124 / 137 — semantics in [configuration](configuration.md#timeout-exit-codes-124-and-137-sigterm-at-pi_timeout-sigkill-escalation)), or the safety preflight refused the run (`REFUSED:` on stderr) | Fix the environment (or the refusal), then re-run. |
 
 ## `pi not found`
 
