@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # orchestrate.sh — deterministic develop → review → [fix → review] loop
-# over the working-tree diff (`git diff HEAD`), delegating each round to
-# the `pi` coding agent.
+# over the change set since a start ref recorded at entry (`git diff
+# <start-ref>` plus `git diff --no-index` for untracked, non-ignored
+# files), delegating each round to the `pi` coding agent.
 #
 # Usage: orchestrate.sh [--model <model>] [--max-rounds <N>] <task...>
 #
@@ -35,7 +36,8 @@
 #   0  PASS | PASSED_WITH_FINDINGS | EMPTY_DIFF
 #   1  REJECTED (budget exhausted, no terminal verdict reached)
 #   2  INCOMPLETE (no parseable verdict from pi)
-#   3  PI_ERROR   (pi missing, pi crashed, a `git diff HEAD` call failed
+#   3  PI_ERROR   (pi missing, pi crashed, a diff snapshot failed
+#       (git rev-parse / git diff / git status / git diff --no-index)
 #       with git's stderr surfaced verbatim, or pi timed out after
 #       PI_TIMEOUT seconds)
 #   2  is also used for CLI usage errors (unknown flag, missing task,
@@ -189,23 +191,83 @@ fail_pi_error() {
 }
 
 # --- Diff snapshot --------------------------------------------------------
-# get_diff <label> — snapshot `git diff HEAD`. Returns 0 on a non-empty
-# diff (echoed on stdout), 1 on an empty diff, and 2 on a git failure.
+# get_diff <label> — snapshot the full change set since START_REF:
+#   - `git diff $START_REF`          tracked changes (also covers work
+#     committed during the develop/fix rounds, since START_REF is the
+#     pre-develop commit, not HEAD), and
+#   - `git diff --no-index /dev/null <f>` per untracked, non-ignored file
+#     from `git ls-files --others --exclude-standard -z` (NUL-delimited, so
+#     paths with spaces, newlines, or other special characters are safe, and
+#     files inside a new directory are listed individually rather than as a
+#     `?? dir/` entry), which shows new files to the reviewer. `--no-index`
+#     exits 0/1 when the files are alike/differ (both are the diff, captured
+#     on stdout) and 2 on a real failure, captured via GIT_ERR_FILE so a
+#     genuine failure surfaces as PI_ERROR.
 # Git's stderr is redirected straight into $GIT_ERR_FILE (a writable path
 # created once at startup; the function runs in a subshell when its stdout
 # is captured, so a variable could not be used) and truncated first so a
 # stale failure message from an earlier round is never re-surfaced.
+# Returns 0 on a non-empty diff (echoed on stdout), 1 on an empty diff,
+# and 2 on a git failure.
 get_diff() {
   local label="$1"
-  local diff rc
+  local rc
+  local head_part=""
+  local f
+  local untracked_part=""
   : >"${GIT_ERR_FILE:?GIT_ERR_FILE not set}"
-  diff="$(git diff HEAD 2>"$GIT_ERR_FILE")" || rc=$?
-  if [ "${rc:-0}" -ne 0 ]; then
-    log "ERROR: git diff HEAD failed during ${label}"
+
+  # Tracked changes since the start ref (a commit recorded at entry, or the
+  # empty-tree hash on an unborn repo; both are valid `git diff` refs).
+  rc=0
+  head_part="$(git diff "$START_REF" 2>"$GIT_ERR_FILE")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "ERROR: git diff ${START_REF} failed during ${label}"
     return 2
   fi
-  [ -n "$diff" ] || return 1
-  printf '%s' "$diff"
+
+  # Untracked, non-ignored files (new files the develop/fix round produced).
+  # The tracked diff above already covers modifications and deletions of
+  # tracked files (including renames), so only genuinely new files are
+  # appended here. `git ls-files --others --exclude-standard -z` emits
+  # NUL-delimited paths (no C-quoting), enumerates files inside a new
+  # directory individually (not as a `dir/` entry), and honors .gitignore
+  # via --exclude-standard. `git diff --no-index -- /dev/null <f>` renders
+  # the file as an addition; --no-index exits 1 when the files differ
+  # (that IS the diff), 0 when alike, and 2 on a real failure.
+  rc=0
+  git ls-files --others --exclude-standard -z >"$LS_FILE" 2>"$GIT_ERR_FILE" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "ERROR: git ls-files failed during ${label}"
+    return 2
+  fi
+  while IFS= read -r -d '' f; do
+    local untracked_diff
+    rc=0
+    untracked_diff="$(git diff --no-index -- /dev/null "$f" 2>"$GIT_ERR_FILE")" || rc=$?
+    if [ "$rc" -gt 1 ]; then
+      log "ERROR: git diff --no-index failed during ${label} for ${f}"
+      return 2
+    fi
+    if [ -n "$untracked_diff" ]; then
+      if [ -n "$untracked_part" ]; then
+        untracked_part="${untracked_part}"$'\n'"${untracked_diff}"
+      else
+        untracked_part="$untracked_diff"
+      fi
+    fi
+  done <"$LS_FILE"
+
+  local combined="${head_part}"
+  if [ -n "$untracked_part" ]; then
+    if [ -n "$combined" ]; then
+      combined="${combined}"$'\n'"${untracked_part}"
+    else
+      combined="$untracked_part"
+    fi
+  fi
+  [ -n "$combined" ] || return 1
+  printf '%s' "$combined"
 }
 
 # die_git_error — surface a get_diff failure (rc 2) as PI_ERROR, reading
@@ -361,23 +423,30 @@ dispatch_fix() {
   return 0
 }
 
-# --- Entry: diff must be non-empty ----------------------------------------
+# --- Diff snapshots ---------------------------------------------------------
 
 # git stderr lands in GIT_ERR_FILE only on failure paths that exit
 # immediately (die_git_error / fail_pi_error / INCOMPLETE), so a single
 # EXIT trap covers every exit route without double-cleanup races.
 GIT_ERR_FILE="$(mktemp)"
-trap 'rm -f "$GIT_ERR_FILE"' EXIT
-entry_diff=""
-diff_rc=0
-entry_diff="$(get_diff "entry")" || diff_rc=$?
-if [ "$diff_rc" -eq 2 ]; then
-  die_git_error
+LS_FILE="$(mktemp)"
+trap 'rm -f "$GIT_ERR_FILE" "$LS_FILE"' EXIT
+# Record the start ref before the develop round so the review diff covers
+# work the developer commits (a diff against a moving ref would miss it).
+# On an unborn repo (no commits yet) HEAD does not resolve, so fall back
+# to the empty tree: everything present after develop is then "new".
+# If git itself fails (corrupt repo), surface it as PI_ERROR.
+if START_REF="$(git rev-parse --verify -q HEAD 2>"$GIT_ERR_FILE")"; then
+  :
+else
+  # Unborn repo (no commits yet): diff against the empty tree.
+  START_REF="$(git hash-object -t tree /dev/null 2>"$GIT_ERR_FILE")" || die_git_error
 fi
-if [ "$diff_rc" -ne 0 ] || [ -z "$entry_diff" ]; then
-  emit_json "EMPTY_DIFF" "" 0 0 '[]' ""
-  exit 0
-fi
+
+# A clean working tree at entry is normal for a develop-first loop: the
+# developer round is what produces the work. There is no entry-time diff
+# gate; EMPTY_DIFF is only reported post-develop, when the developer left
+# no change at all relative to the start ref.
 
 # --- Develop (exactly once) -------------------------------------------------
 
@@ -402,16 +471,19 @@ while [ "$round" -lt "$max_rounds" ]; do
     die_git_error
   fi
   if [ "$diff_rc" -ne 0 ] || [ -z "$current_diff" ]; then
-    log "Working-tree diff is empty after round ${round} — nothing left to review."
+    # EMPTY_DIFF is NOT an error: the loop ran, the developer simply
+    # produced no change in the working tree. Exit stays 0; the JSON
+    # summary (status=EMPTY_DIFF) and this stderr line make that explicit.
+    log "EMPTY_DIFF: the developer produced no change in the working tree; nothing to review."
     status="EMPTY_DIFF"
     emit_json "EMPTY_DIFF" "$verdict" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"
     exit 0
   fi
 
-  review_prompt="Adversarially review the current working-tree diff against the task below."
+  review_prompt="Adversarially review the current change set (since ${START_REF}, including new untracked files) against the task below."
   [ -n "$last_review_summary" ] && review_prompt="${review_prompt}"$'\n\n'"Context from the previous review round:"$'\n'"${last_review_summary}"
   review_prompt="${review_prompt}"$'\n\n'"Task:"$'\n'"${task}"
-  review_prompt="${review_prompt}"$'\n\n'"Current diff (git diff HEAD):"$'\n'"$(trim_diff "$current_diff")"
+  review_prompt="${review_prompt}"$'\n\n'"Current diff (git diff ${START_REF} + untracked):"$'\n'"$(trim_diff "$current_diff")"
 
   pi_stderr=""
   if ! run_pi "$review_prompt" "$reviewer_md_content" "read,grep,find,ls"; then

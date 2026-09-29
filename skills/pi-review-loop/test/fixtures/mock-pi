@@ -49,6 +49,16 @@ if [ -n "${MOCK_PI_FIXTURES_DIR:-}" ] && [ -f "$MOCK_PI_FIXTURES_DIR/$n" ]; then
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n" >&2
       exit "$code"
       ;;
+    COMMIT:*)
+      # Simulate a develop round that commits its own work: stage and
+      # commit, then emit the remaining lines as pi output. If there is
+      # nothing to commit, `git commit` exits non-zero (1) — that is
+      # expected here, not a failure of the mock, so swallow it and still
+      # exit 0 like a successful pi call.
+      git add -A
+      git commit -qm "${first#COMMIT:}" || true
+      tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
+      ;;
     SLEEP:*)
       sleep "${first#SLEEP:}"
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
