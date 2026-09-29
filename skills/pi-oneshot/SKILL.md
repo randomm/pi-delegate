@@ -39,11 +39,67 @@ then offer to re-run once it is available.
 ## Invocation
 
 Run the task as a single one-shot, stateless call, passing the user's
-request through as `$ARGUMENTS` (the full task description):
+request through as `$ARGUMENTS` (the full task description). The call is wrapped in `timeout` exactly the way `orchestrate.sh` wraps its
+pi calls (`PI_TIMEOUT` default 1800 s, `PI_KILL_AFTER` default 30 s,
+`timeout` preferred with a `gtimeout` fallback):
 
 ```bash
-"$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="gtimeout"
+fi
+
+if [ -n "$TIMEOUT_CMD" ]; then
+  "$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}" \
+    "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
+else
+  echo "warning: neither timeout nor gtimeout found; pi call is unbounded at the script level (only Claude Code's Bash tool timeout still applies)" >&2
+  "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
+fi
 ```
+
+### Timeout wrapper
+
+When the wrapper runs, a deadline failure surfaces as pi's exit code:
+
+- **124** — pi was SIGTERMed at `PI_TIMEOUT` seconds: the call **timed out**.
+- **137** — pi ignored SIGTERM and was SIGKILLed at `PI_TIMEOUT + PI_KILL_AFTER` seconds: the call **timed out**.
+
+Both mean "timed out" — tell the user the single pi call hit the time limit
+and offer a re-run (optionally with a larger `PI_TIMEOUT`). Any other
+non-zero exit is a genuine pi failure and is relayed verbatim per the
+"Reporting back" section below.
+
+On the **unbounded path** (neither `timeout`/`gtimeout` on `PATH`), the
+warning is printed to stderr and there is no script-level deadline —
+exit codes 124/137 from this wrapper do not apply; only Claude Code's
+Bash tool timeout (below) can kill the run, and a bare non-zero exit is
+pi's own.
+
+### Long runs under Claude Code's Bash tool
+
+Claude Code's Bash tool imposes a per-foreground-call timeout: `BASH_DEFAULT_TIMEOUT_MS`
+defaults to `120000` ms (2 minutes) and `BASH_MAX_TIMEOUT_MS` defaults to
+`600000` ms (10 minutes); `timeout` values above the max are silently clamped
+to the max. A single pi task can legitimately run for well over 10 minutes
+(the wrapper above defaults to a 30-minute deadline), so a foreground
+invocation can be killed mid-run by the Bash tool even when the script-level
+timeout would not fire.
+
+So: **do not** try to fix long runs by passing a larger foreground `timeout`
+parameter — values above the ceiling are silently clamped. Instead:
+
+1. Run the invocation command with the Bash tool's `run_in_background` set
+   to `true`.
+2. Poll by reading the background task's output file with the `Read` tool,
+   at an interval of a few minutes, until the output stops growing.
+3. When pi exits, report per the "Reporting back" section below. On a
+   deadline kill, the exit code is 124 or 137 = "timed out" (see above).
+
+Background tasks are not subject to the foreground `BASH_MAX_TIMEOUT_MS`
+ceiling, so the full `${PI_TIMEOUT}` budget is honored.
 
 - `-p` — print mode: pi runs headless and emits its final text on stdout.
 - `--no-session` — no session is persisted or resumed; each invocation is
@@ -57,70 +113,27 @@ request through as `$ARGUMENTS` (the full task description):
 - Plain text mode (no `--mode json`) — stdout is the transcript's final
   text, nothing to parse.
 
-### Timeouts and the Bash tool ceiling
-
-A single pi run can be long (tens of minutes). Claude Code's Bash tool kills
-a foreground command at its timeout: the default is **2 minutes**
-(`BASH_DEFAULT_TIMEOUT_MS` = 120000 ms) and the ceiling is **10 minutes**
-(`BASH_MAX_TIMEOUT_MS` = 600000 ms), with values above the ceiling silently
-clamped. So a bare `pi` call above — left to the Bash tool's default — is
-killed at 2 minutes. Handle this on **two layers**:
-
-1. **Script-level (this skill's job):** wrap the `pi` call in `timeout`
-   (or `gtimeout` on macOS) so a runaway run is bounded by *this* skill, not
-   by the Bash tool. `--kill-after` escalates to SIGKILL if pi ignores the
-   SIGTERM. Resolve the binary and invoke:
-
-   ```bash
-   if command -v timeout >/dev/null 2>&1; then
-     timeout --kill-after="${PI_KILL_AFTER:-30}" ${PI_TIMEOUT:-1800} \
-       "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
-   elif command -v gtimeout >/dev/null 2>&1; then
-     gtimeout --kill-after="${PI_KILL_AFTER:-30}" ${PI_TIMEOUT:-1800} \
-       "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
-   else
-     echo "WARNING: neither timeout nor gtimeout on PATH; pi call is unbounded — run is limited only by the Bash tool ceiling" >&2
-     "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
-   fi
-   ```
-
-   - `PI_TIMEOUT` (default **1800** s) is the SIGTERM deadline; `PI_KILL_AFTER`
-     (default **30** s) is the grace window before SIGKILL.
-   - Exit **124** (SIGTERM at `PI_TIMEOUT`) and **137** (SIGKILL at
-     `PI_TIMEOUT + PI_KILL_AFTER`) both mean *"pi timed out"* — report it
-     that way, not as a crash. Any other non-zero exit is a real failure
-     (auth, model unavailable, crash) — relay verbatim per the Reporting back
-     section.
-   - If neither binary exists the call runs **unbounded** at the script level
-     — warn the user (as above), note the run is then limited only by the
-     Bash tool's 10-minute ceiling (next layer), and state the 124/137
-     semantics do not apply. Install GNU coreutils (`brew install coreutils`
-     on macOS for `gtimeout`) to get the bound back.
-
-2. **Bash-tool-level (Claude's job):** a wrapped call with
-   `PI_TIMEOUT=1800` is bounded to ~30 minutes, which is **above** the Bash
-   tool's 10-minute foreground ceiling. So the Bash tool must be told to
-   **run the command in the background and poll** — pass
-   `run_in_background: true` to the Bash tool and then poll the background
-   task's output file (the `backgroundTaskId`'s output via `Read`) until the
-   run finishes. Passing a larger foreground `timeout` does **not** work: it
-   is clamped to 600000 ms (10 min), so a long task would still be killed.
-   The background path is the only way a single long pi run survives.
-
 - **Prompt transport:** if the task description is long (more than a few
-  hundred words), pass it via stdin instead of as a positional argument.
-  The timeout wrapper wraps only `pi`, not `printf`, so the pipe stays
-  `printf '%s' "$ARGUMENTS" | timeout --kill-after="${PI_KILL_AFTER:-30}" ${PI_TIMEOUT:-1800} "$PI_BIN" -p --no-session ...`.
-  This avoids `E2BIG` on Linux where a single argv element is capped at 128
-  KiB (`MAX_ARG_STRLEN`). Short prompts (a sentence or two) work fine as a
+  hundred words), pass it via stdin instead of as a positional argument,
+  keeping the wrapper around pi only:
+  `printf '%s' "$ARGUMENTS" | "$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}" "$PI_BIN" -p --no-session ...`
+  (the pipe feeds pi's stdin; the timeout command is never piped). This avoids
+  `E2BIG` on Linux where a single argv element is capped at 128 KiB
+  (`MAX_ARG_STRLEN`). Short prompts (a sentence or two) work fine as a
   positional argument.
 
 ### Model
 
-- If the user explicitly named a model, append `--model <model>` to the
-  **same wrapped invocation** — the timeout wrapper wraps the whole command
-  (… `"$PI_BIN" … "$ARGUMENTS" [--model X]`), so the model-passthrough variant
-  is bounded identically.
+The timeout wrapper must wrap the **whole** command, model flag included —
+never append `--model` to an un-wrapped call:
+
+```bash
+"$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}" \
+  "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS" --model <model>
+```
+
+- If the user explicitly named a model, use the wrapped `--model <model>`
+  variant above.
 - Otherwise omit `--model` entirely — pi falls back to its configured
   default.
 

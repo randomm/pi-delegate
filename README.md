@@ -71,8 +71,35 @@ use pi for: write a bats test for scripts/validate.sh
 pi oneshot: scaffold a Makefile with build, test, and clean targets
 ```
 
-`--model <model>` is passed through to pi only when you explicitly name a model;
-otherwise pi uses its configured default.
+### Per-call timeout
+
+The pi invocation is wrapped in `timeout` the same way `orchestrate.sh`
+wraps its pi calls:
+
+```bash
+timeout --kill-after="$PI_KILL_AFTER" "$PI_TIMEOUT" pi -p --no-session ...
+```
+
+- `PI_TIMEOUT` — seconds allowed per pi invocation (default 1800).
+- `PI_KILL_AFTER` — seconds to wait after the `PI_TIMEOUT` SIGTERM before
+  escalating to SIGKILL (default 30; passed to timeout as `--kill-after`).
+- The wrapper prefers `timeout` (coreutils) and falls back to `gtimeout`
+  (macOS brew coreutils); if neither exists, the call runs unbounded at the
+  script level and a warning is printed to stderr.
+- **Exit codes 124 and 137 mean "timed out"** — 124 is pi SIGTERMed at
+  `PI_TIMEOUT`, 137 is pi SIGKILLed at `PI_TIMEOUT + PI_KILL_AFTER` after
+  ignoring SIGTERM. Any other non-zero exit is a genuine pi failure.
+  (On the unbounded path, 124/137 from this wrapper do not apply.)
+
+### Long runs under Claude Code's Bash tool
+
+Claude Code's Bash tool imposes a per-foreground-call timeout (`BASH_DEFAULT_TIMEOUT_MS`
+defaults to 120000 ms / 2 minutes; `BASH_MAX_TIMEOUT_MS` defaults to 600000 ms /
+10 minutes; values above the max are silently clamped). A single pi task can
+legitimately run far longer than the 10-minute foreground ceiling, so the skill
+instructs Claude to run the invocation with `run_in_background: true` and poll
+the background task's output file with the `Read` tool until pi exits — not
+to pass a larger foreground `timeout` (clamped values would not help).
 
 **Timeout wrapper.** The skill wraps the `pi` call in an inline `timeout`
 (or `gtimeout` on macOS) so a runaway run is bounded by the skill itself,
@@ -150,15 +177,18 @@ orchestrate.sh --model <model> --max-rounds <N> "<task description>"
   configured default.
 - `--max-rounds <N>` — review-round budget (default 3, hard cap 3).
 
-**Long runs — background + poll.** A full loop (develop + up to 3 reviews + 2
-fixes) can easily exceed the Bash tool's foreground ceiling (default 120000 ms
-= 2 min, max 600000 ms = 10 min; values above the max are silently clamped;
-`BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` env vars — re-verify current
-values). If the run may exceed 10 minutes, pass `run_in_background: true` to
-the Bash tool and poll by reading the background task's output file (via
-`Read`) until the final JSON line (the summary) appears. Do **not** try to
-pass a larger foreground `timeout` — it will be clamped to the ceiling and
-the run killed.
+### Long runs under Claude Code's Bash tool
+
+Claude Code's Bash tool imposes a per-foreground-call timeout (`BASH_DEFAULT_TIMEOUT_MS`
+defaults to 120000 ms / 2 minutes; `BASH_MAX_TIMEOUT_MS` defaults to 600000 ms /
+10 minutes; values above the max are silently clamped). The loop's worst-case
+wall clock is `6 × (PI_TIMEOUT + PI_KILL_AFTER)` — at the defaults ≈ 183 min
+(~3 h) — which exceeds even the 10-minute foreground ceiling, so a foreground
+invocation is always killed mid-loop. The skill therefore instructs Claude to
+run `orchestrate.sh` with the Bash tool's `run_in_background: true` and poll
+the background task's output file with the `Read` tool until the final JSON
+line (the summary) appears — background tasks are not subject to the
+foreground ceiling, so the full per-call budget is honored.
 
 ### Environment
 

@@ -35,7 +35,9 @@ bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"
 per-foreground-call timeout: `BASH_DEFAULT_TIMEOUT_MS` defaults to
 `120000` ms (2 minutes) and `BASH_MAX_TIMEOUT_MS` defaults to `600000` ms
 (10 minutes); `timeout` values above the max are silently clamped to the
-max. The loop's worst-case wall clock is `6 × (PI_TIMEOUT + PI_KILL_AFTER)`
+max (values were verified against the Claude Code tools-reference at the
+time of writing — re-verify before relying on them if the limits look
+stale). The loop's worst-case wall clock is `6 × (PI_TIMEOUT + PI_KILL_AFTER)`
 — at the defaults, `6 × (1800 + 30) = 10980` s ≈ 183 min (~3 h) — which
 exceeds even the 10-minute foreground ceiling, so a foreground invocation
 will always be killed mid-loop.
@@ -45,8 +47,9 @@ Instead, launch the invocation in the background and poll its output:
 1. Run the `bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"` command
    with the Bash tool's `run_in_background` set to `true`.
 2. Poll by reading the background task's output file with the `Read`
-   tool, at an interval of a few minutes, until the file stops growing or
-   shows the JSON summary on its last line.
+   tool, at an interval of a few minutes, until the last non-empty line
+   parses as the six-field JSON summary — stop polling as soon as it
+   does; do not keep polling after the summary appears.
 3. When the process exits, parse the last line of the output as the JSON
    summary and report per the "Interpreting the JSON summary" and
    "Reporting the verdict" sections below.

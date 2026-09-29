@@ -1033,3 +1033,114 @@ F
   [ -f "$readme" ]
   grep -q 'run_in_background' "$readme"
 }
+
+# --- Doc drift: long-run guidance (issue #39) ---------------------------------
+
+oneshot_skill_md() {
+  cat "$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+}
+
+loop_skill_md() {
+  cat "$REPO_ROOT/skills/pi-review-loop/SKILL.md"
+}
+
+oneshot_block() {
+  # Extract the Invocation-section ```bash block (the timeout wrapper).
+  # It is the second ```bash block in the file — the first is the pi-binary
+  #  discovery loop under "Locating the pi binary".
+  awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==2); next}
+       /^```$/{if (f) exit; f=0}
+       f {print}' \
+    "$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+}
+
+model_block() {
+  # Extract the Model-section ```bash block (the wrapped --model variant).
+  # It is the third ```bash block in the file.
+  awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==3); next}
+       /^```$/{if (f) exit; f=0}
+       f {print}' \
+    "$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+}
+
+@test "doc: pi-oneshot invocation block wraps pi in timeout with PI_TIMEOUT/PI_KILL_AFTER, gtimeout fallback, and unbounded warning" {
+  oneshot_block | grep -qF 'TIMEOUT_CMD='
+  oneshot_block | grep -qF 'command -v timeout'
+  oneshot_block | grep -qF 'command -v gtimeout'
+  oneshot_block | grep -qF -- '--kill-after="${PI_KILL_AFTER:-30}"'
+  oneshot_block | grep -qF -- '"${PI_TIMEOUT:-1800}"'
+  oneshot_block | grep -qF -- '"$TIMEOUT_CMD" --kill-after'
+  oneshot_block | grep -qF -- '"$PI_BIN" -p --no-session'
+  # timeout wraps pi only (wrapper precedes $PI_BIN)
+  oneshot_block | grep -qF -- '"$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}"'
+  oneshot_block | grep -qF 'unbounded'
+  # gtimeout fallback: neither binary → unbounded call + stderr warning
+  oneshot_block | grep -qF 'gtimeout'
+  oneshot_block | grep -qF 'warning:'
+  oneshot_block | grep -qF -- '>&2'
+  # Unwrapped fallback still present on the unbounded path
+  oneshot_block | grep -qF -- '"$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"'
+  # pi-oneshot SKILL.md documents the unbounded path (124/137 don't apply there)
+  oneshot_skill_md | grep -q 'unbounded path'
+}
+
+@test "doc: pi-oneshot SKILL.md documents exit 124 and 137 as timed out" {
+  oneshot_skill_md | grep -q "124"
+  oneshot_skill_md | grep -q "137"
+  oneshot_skill_md | grep -qi "timed out"
+}
+
+@test "doc: pi-oneshot Model variant keeps the timeout wrapper" {
+  # The Model subsection's bash block must also carry the wrapper.
+  model_block | grep -qF -- '"$TIMEOUT_CMD" --kill-after'
+  model_block | grep -qF -- '"${PI_TIMEOUT:-1800}"'
+  model_block | grep -qF -- '"$PI_BIN"'
+  model_block | grep -qF -- '--model'
+}
+
+@test "doc: both SKILL.md files instruct run_in_background + poll-by-Read for long runs" {
+  oneshot_skill_md | grep -q "run_in_background"
+  oneshot_skill_md | grep -q "Read"
+  loop_skill_md | grep -q "run_in_background"
+  loop_skill_md | grep -q "Read"
+}
+
+@test "doc: both SKILL.md files cite the Bash tool limits (120000 ms default, 600000 ms max, silent clamp)" {
+  local f
+  for f in "skills/pi-oneshot/SKILL.md" "skills/pi-review-loop/SKILL.md"; do
+    grep -q "BASH_DEFAULT_TIMEOUT_MS" "$REPO_ROOT/$f"
+    grep -q "120000" "$REPO_ROOT/$f"
+    grep -q "BASH_MAX_TIMEOUT_MS" "$REPO_ROOT/$f"
+    grep -q "600000" "$REPO_ROOT/$f"
+    grep -qi "clamped" "$REPO_ROOT/$f"
+  done
+}
+
+@test "doc: README reflects pi-oneshot wrapper (PI_TIMEOUT/PI_KILL_AFTER, gtimeout, unbounded warning, 124/137) and both long-run sections" {
+  local readme="$REPO_ROOT/README.md"
+  grep -q "PI_TIMEOUT" "$readme"
+  grep -q "PI_KILL_AFTER" "$readme"
+  grep -q "gtimeout" "$readme"
+  grep -q "unbounded" "$readme"
+  grep -q "124" "$readme"
+  grep -q "137" "$readme"
+  grep -qi "timed out" "$readme"
+  # pi-oneshot long-run section
+  awk '/^## Usage — pi-oneshot/,/^## Usage — pi-review-loop/' "$readme" \
+    | grep -q "run_in_background"
+  # pi-review-loop long-run section (between the ## heading and the ## Model selection guide section)
+  awk '/^## Usage — pi-review-loop/,/^## Model selection guide/' "$readme" \
+    | grep -q "run_in_background"
+}
+
+@test "doc: README 124/137 = timed out agrees with pi-oneshot SKILL.md semantics" {
+  # Both files must state 124 is SIGTERM at PI_TIMEOUT and 137 is SIGKILL
+  # escalation, i.e. the same semantics as orchestrate.sh.
+  local f
+  for f in "$REPO_ROOT/README.md" "$REPO_ROOT/skills/pi-oneshot/SKILL.md"; do
+    grep -q "124" "$f"
+    grep -q "137" "$f"
+    grep -qi "SIGTERM" "$f"
+    grep -qi "SIGKILL" "$f"
+  done
+}
