@@ -1,0 +1,6 @@
+{"type":"session_start","session":{"id":"test-session"}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"do the task"}],"stopReason":null,"usage":null}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"working on it"}],"stopReason":"tool_use","usage":{"input":200,"output":50,"cacheRead":1000,"cacheWrite":5000,"totalTokens":7250},"provider":"openrouter","model":"qwen3.5"}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"tool_result","text":"ok"}],"stopReason":null,"usage":null}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"VERDICT: APPROVED"}],"stopReason":"stop","usage":{"input":250,"output":100,"cacheRead":2000,"cacheWrite":1000,"totalTokens":8350},"provider":"openrouter","model":"qwen3.5"}}
+{"type":"agent_settled","reason":"stop"}

@@ -1,0 +1,2 @@
+# Malformed claude output — not valid JSON (used for negative test).
+this is not json at all
