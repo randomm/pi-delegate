@@ -37,13 +37,33 @@ setup() {
   FIXTURES_DIR="$(mktemp -d)"
   BIN_DIR="$(mktemp -d)"
   ln -s "$FIXTURES/mock-pi" "$BIN_DIR/pi"
-  # Test isolation: a fake HOME so pi's well-known fallback locations
-  # (~/.bun/bin, ~/.local/bin) are unreachable and the mock pi is the ONLY
-  # pi on PATH. If a real pi were ever invoked, it would spend tokens and
-  # the call log would be empty — tests that expect pi calls assert on the
-  # log for this reason.
-  export HOME="$(mktemp -d)"
-  export PATH="$BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:/usr/local/sbin"
+  # PATH isolation: `pi` must resolve ONLY to the mock (a fake HOME blocks
+  # the well-known fallback locations, BIN_DIR leads PATH, and the tools
+  # dir below contains no `pi`). Resolve the host's real tool paths BEFORE
+  # narrowing PATH — on macOS `timeout` (brew coreutils) and other tools
+  # may live only in a dir we are about to drop — and symlink them into a
+  # dedicated tools dir so the controlled PATH still has a working
+  # timeout/gtimeout, jq, git, and bash (without timeout the driver runs
+  # pi unbounded, which hangs tests when a fixture goes missing).
+  TOOLS_DIR="$(mktemp -d)"
+  if command -v timeout > /dev/null 2>&1; then
+    ln -s "$(command -v timeout)" "$TOOLS_DIR/timeout"
+  fi
+  if command -v gtimeout > /dev/null 2>&1; then
+    ln -s "$(command -v gtimeout)" "$TOOLS_DIR/gtimeout"
+  fi
+  if command -v jq > /dev/null 2>&1; then
+    ln -s "$(command -v jq)" "$TOOLS_DIR/jq"
+  fi
+  if command -v git > /dev/null 2>&1; then
+    ln -s "$(command -v git)" "$TOOLS_DIR/git"
+  fi
+  if command -v bash > /dev/null 2>&1; then
+    ln -s "$(command -v bash)" "$TOOLS_DIR/bash"
+  fi
+  FAKE_HOME="$(mktemp -d)"
+  export HOME="$FAKE_HOME"
+  export PATH="$BIN_DIR:$TOOLS_DIR:/usr/bin:/bin:/usr/sbin:/sbin"
   export MOCK_PI_CALL_LOG="$CALL_LOG"
   export MOCK_PI_ARGV_LOG="$ARGV_LOG"
   export MOCK_PI_FIXTURES_DIR="$FIXTURES_DIR"
@@ -51,13 +71,14 @@ setup() {
 
 teardown() {
   cd "$REPO" 2>/dev/null || true
-  rm -rf "$REPO" "$CALL_LOG" "$ARGV_LOG" "$FIXTURES_DIR" "$BIN_DIR"
+  rm -rf "$REPO" "$CALL_LOG" "$ARGV_LOG" "$FIXTURES_DIR" "$BIN_DIR" "$TOOLS_DIR" "$FAKE_HOME"
 }
 
 run_driver() {
   local tmp
   tmp="$(mktemp)"
   local rc=0
+  if [ -f "$MOCK_PI_ARGV_LOG" ]; then : > "$MOCK_PI_ARGV_LOG"; fi
   bash "$SCRIPT" "$@" >"$tmp" 2>&1 || rc=$?
   lines=()
   while IFS= read -r l; do lines+=("$l"); done < "$tmp"
@@ -91,6 +112,7 @@ fixture() {
   echo brand-new > orphan.txt
   local out rc=0
   out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 124 ]
   # Develop ran (call 1), review ran (call 2), and the driver did not
   # exit with EMPTY_DIFF.
   [ "$(pi_calls)" -ge 2 ]
@@ -119,8 +141,43 @@ fixture() {
   fixture 2 'Reviewing the new module.' 'VERDICT: APPROVED'
   run_driver "do it"
   [ "$status" -eq 0 ]
-  grep -q "new-module" "$ARGV_LOG"
+  # The new file must appear as an ADDITION in the review prompt:
+  # `git diff --no-index -- /dev/null <f>` renders it with a
+  # `new file mode` header and `+` content lines (the old reversed
+  # argument order rendered it as a deletion).
+  grep -q "new file mode" "$ARGV_LOG"
+  grep -q "^+new-module$" "$ARGV_LOG"
   grep -q "newfile.txt" "$ARGV_LOG"
+  ! grep -q "^-new-module$" "$ARGV_LOG"
+}
+
+@test "untracked file whose name contains a space is enumerated safely" {
+  # `git ls-files --others --exclude-standard -z` + NUL-delimited read
+  # must enumerate a path with a space verbatim (porcelain C-quoting
+  # would have mangled it).
+  echo spaced > "new spaced file.txt"
+  fixture 2 'Reviewing the spaced file.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  grep -q "new spaced file.txt" "$ARGV_LOG"
+  grep -q "^+spaced$" "$ARGV_LOG"
+  # The untracked part is not the only content (a.txt is modified too),
+  # so the diff-vs-start-ref part is present as well.
+  grep -q "diff --git a/a.txt b/a.txt" "$ARGV_LOG"
+}
+
+@test "untracked file inside a new directory is enumerated as a file, not a dir" {
+  # `git status --porcelain` lists a new directory as `?? dir/` and cannot
+  # be split safely; `git ls-files --others --exclude-standard -z` must
+  # enumerate the file inside it individually.
+  mkdir -p new-dir
+  echo in-new-dir > new-dir/inner.txt
+  fixture 2 'Reviewing the new directory.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  grep -q "new-dir/inner.txt" "$ARGV_LOG"
+  grep -q "^+in-new-dir$" "$ARGV_LOG"
+  ! grep -q "^new-dir/$" "$ARGV_LOG"
 }
 
 @test "developer commits its change -> change is reviewed and PASS" {
@@ -159,16 +216,19 @@ F
   fixture 2 'Reviewing the new repo.' 'VERDICT: APPROVED'
   run_driver "do it"
   [ "$status" -eq 0 ]
-  grep -q "fresh" "$ARGV_LOG"
   grep -q "unborn.txt" "$ARGV_LOG"
+  # The untracked file shows as an addition (not the empty tree vs HEAD
+  # diff, which has no per-file content lines for a new blob).
+  grep -q "new file mode" "$ARGV_LOG"
+  grep -q "^+fresh$" "$ARGV_LOG"
 }
 
 @test "ignored files do NOT appear in the review diff" {
-  # Ignored files must be excluded: `git status --porcelain` omits them by
-  # default, and the driver must not surface them to the reviewer. The
-  # a.txt modification is a real tracked change (so the test doesn't
-  # conflate the a.txt baseline with the ignored file), and the ignored
-  # file's content must not leak into any pi call.
+  # Ignored files must be excluded: `git ls-files --others
+  # --exclude-standard` honors .gitignore, so the driver must not surface
+  # them to the reviewer. The a.txt modification is a real tracked change
+  # (so the test does not conflate the a.txt baseline with the ignored
+  # file), and the ignored file's content must not leak into any pi call.
   echo ignored-secret > ignored.txt
   printf '%s\n' 'ignored.txt' > .gitignore
   fixture 2 'Reviewing without the ignored file.' 'VERDICT: APPROVED'
@@ -177,6 +237,10 @@ F
   # The tracked change is present (sanity check: the test is exercising
   # the right scenario).
   grep -q "diff --git a/a.txt b/a.txt" "$ARGV_LOG"
+  # The index must be untouched by the diff snapshot: `git diff` and
+  # `git diff --no-index` never stage, so the staged tree still matches
+  # HEAD.
+  git diff --cached --quiet
   # The ignored file's content must not leak into any pi call.
   ! grep -q "ignored-secret" "$ARGV_LOG"
 }
@@ -306,53 +370,31 @@ WRAP
   [[ "$out" == *"fatal: revparse boom"* ]]
 }
 
-@test "git status failure mid-loop -> PI_ERROR, exit 3" {
-  # Wrapper git: `git status --porcelain` fails on the second call (the
-  # round-1 review snapshot) but succeeds on the first (entry) — via a
-  # marker file. This exercises the untracked-enumeration path's failure
-  # arm inside the review loop.
+@test "untracked-enumeration failure mid-loop -> PI_ERROR, exit 3" {
+  # Wrapper git: `git ls-files --others --exclude-standard` fails on the
+  # second call (the round-1 review snapshot) but succeeds on the first
+  # (entry) — via a marker file. This exercises the untracked-enumeration
+  # path's failure arm inside the review loop.
   local wrap_dir out rc=0
   wrap_dir="$(mktemp -d)"
   cat > "$wrap_dir/git" <<'WRAP'
 #!/bin/bash
-if [ -n "${GITSTATUS_FAIL_MARKER:-}" ] && [ "$1" = "status" ]; then
-  if [ -f "$GITSTATUS_FAIL_MARKER" ]; then
-    echo "fatal: status boom" >&2
+if [ -n "${LSFILES_FAIL_MARKER:-}" ] && [ "$1" = "ls-files" ]; then
+  if [ -f "$LSFILES_FAIL_MARKER" ]; then
+    echo "fatal: lsfiles boom" >&2
     exit 129
   fi
-  touch "$GITSTATUS_FAIL_MARKER"
+  touch "$LSFILES_FAIL_MARKER"
 fi
 exec /usr/bin/git "$@"
 WRAP
   chmod +x "$wrap_dir/git"
   local marker out rc=0
   marker="$(mktemp)"
-  out="$(GITSTATUS_FAIL_MARKER="$marker" PATH="$wrap_dir:$PATH" bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  out="$(LSFILES_FAIL_MARKER="$marker" PATH="$wrap_dir:$PATH" bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
   rm -f "$marker" "$wrap_dir/git"; rmdir "$wrap_dir"
   [ "$rc" -eq 3 ]
-  [[ "$out" == *"fatal: status boom"* ]]
-  [[ "$out" == *"git status"* ]]
-}
-
-@test "git status failure at entry -> PI_ERROR, exit 3" {
-  # Wrapper git: fail the very first `git status --porcelain` (the new
-  # untracked-enumeration step at entry). The driver must surface it as
-  # PI_ERROR.
-  local wrap_dir out rc=0
-  wrap_dir="$(mktemp -d)"
-  cat > "$wrap_dir/git" <<'WRAP'
-#!/bin/bash
-if [ "$1" = "status" ]; then
-  echo "fatal: status entry boom" >&2
-  exit 129
-fi
-exec /usr/bin/git "$@"
-WRAP
-  chmod +x "$wrap_dir/git"
-  out="$(PATH="$wrap_dir:$PATH" bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
-  rm -f "$wrap_dir/git"; rmdir "$wrap_dir"
-  [ "$rc" -eq 3 ]
-  [[ "$out" == *"fatal: status entry boom"* ]]
+  [[ "$out" == *"fatal: lsfiles boom"* ]]
 }
 
 @test "pi timeout (SLEEP fixture, PI_TIMEOUT=1) -> PI_ERROR, exit 3, timeout message" {

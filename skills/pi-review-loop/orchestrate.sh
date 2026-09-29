@@ -196,11 +196,13 @@ fail_pi_error() {
 #     committed during the develop/fix rounds, since START_REF is the
 #     pre-develop commit, not HEAD), and
 #   - `git diff --no-index /dev/null <f>` per untracked, non-ignored file
-#     from `git status --porcelain` (the `??` arm), which shows new
-#     files to the reviewer. `--no-index` exits 1 when the files differ
-#     (that IS the diff) and 2 on a real failure; both are captured via
-#     GIT_ERR_FILE so a genuine failure surfaces as PI_ERROR while the
-#     exit-1 "differences found" code is swallowed.
+#     from `git ls-files --others --exclude-standard -z` (NUL-delimited, so
+#     paths with spaces, newlines, or other special characters are safe, and
+#     files inside a new directory are listed individually rather than as a
+#     `?? dir/` entry), which shows new files to the reviewer. `--no-index`
+#     exits 0/1 when the files are alike/differ (both are the diff, captured
+#     on stdout) and 2 on a real failure, captured via GIT_ERR_FILE so a
+#     genuine failure surfaces as PI_ERROR.
 # Git's stderr is redirected straight into $GIT_ERR_FILE (a writable path
 # created once at startup; the function runs in a subshell when its stdout
 # is captured, so a variable could not be used) and truncated first so a
@@ -211,51 +213,50 @@ get_diff() {
   local label="$1"
   local rc
   local head_part=""
-  local line state f
+  local f
   local untracked_part=""
   : >"${GIT_ERR_FILE:?GIT_ERR_FILE not set}"
 
   # Tracked changes since the start ref (a commit recorded at entry, or the
   # empty-tree hash on an unborn repo; both are valid `git diff` refs).
+  rc=0
   head_part="$(git diff "$START_REF" 2>"$GIT_ERR_FILE")" || rc=$?
-  if [ "${rc:-0}" -ne 0 ]; then
+  if [ "$rc" -ne 0 ]; then
     log "ERROR: git diff ${START_REF} failed during ${label}"
     return 2
   fi
 
   # Untracked, non-ignored files (new files the develop/fix round produced).
-  # Renames are excluded from the `??` arm on purpose: the tracked diff above
-  # already reports the rename, and folding `--no-index` output of a renamed
-  # file would double-report the same change.
-  local status_out
-  status_out="$(git status --porcelain 2>"$GIT_ERR_FILE")" || rc=$?
-  if [ "${rc:-0}" -ne 0 ]; then
-    log "ERROR: git status --porcelain failed during ${label}"
+  # The tracked diff above already covers modifications and deletions of
+  # tracked files (including renames), so only genuinely new files are
+  # appended here. `git ls-files --others --exclude-standard -z` emits
+  # NUL-delimited paths (no C-quoting), enumerates files inside a new
+  # directory individually (not as a `dir/` entry), and honors .gitignore
+  # via --exclude-standard. `git diff --no-index -- /dev/null <f>` renders
+  # the file as an addition; --no-index exits 1 when the files differ
+  # (that IS the diff), 0 when alike, and 2 on a real failure.
+  rc=0
+  git ls-files --others --exclude-standard -z >"$LS_FILE" 2>"$GIT_ERR_FILE" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "ERROR: git ls-files failed during ${label}"
     return 2
   fi
-  if [ -n "$status_out" ]; then
-    while IFS= read -r line; do
-      state="${line:0:2}"
-      f="${line:3}"
-      # Only untracked (??) files: the diff-vs-start-ref above already
-      # covers modifications and deletions of tracked files.
-      [ "$state" = "??" ] || continue
-      # --no-index exits 1 when files differ — expected, not an error.
-      local untracked_diff
-      untracked_diff="$(git diff --no-index -- "$f" /dev/null 2>"$GIT_ERR_FILE")" || rc=$?
-      if [ "${rc:-0}" -eq 2 ]; then
-        log "ERROR: git diff --no-index failed during ${label} for ${f}"
-        return 2
+  while IFS= read -r -d '' f; do
+    local untracked_diff
+    rc=0
+    untracked_diff="$(git diff --no-index -- /dev/null "$f" 2>"$GIT_ERR_FILE")" || rc=$?
+    if [ "$rc" -gt 1 ]; then
+      log "ERROR: git diff --no-index failed during ${label} for ${f}"
+      return 2
+    fi
+    if [ -n "$untracked_diff" ]; then
+      if [ -n "$untracked_part" ]; then
+        untracked_part="${untracked_part}"$'\n'"${untracked_diff}"
+      else
+        untracked_part="$untracked_diff"
       fi
-      if [ -n "$untracked_diff" ]; then
-        if [ -n "$untracked_part" ]; then
-          untracked_part="${untracked_part}"$'\n'"${untracked_diff}"
-        else
-          untracked_part="$untracked_diff"
-        fi
-      fi
-    done <<<"$status_out"
-  fi
+    fi
+  done <"$LS_FILE"
 
   local combined="${head_part}"
   if [ -n "$untracked_part" ]; then
@@ -428,28 +429,23 @@ dispatch_fix() {
 # immediately (die_git_error / fail_pi_error / INCOMPLETE), so a single
 # EXIT trap covers every exit route without double-cleanup races.
 GIT_ERR_FILE="$(mktemp)"
-trap 'rm -f "$GIT_ERR_FILE"' EXIT
+LS_FILE="$(mktemp)"
+trap 'rm -f "$GIT_ERR_FILE" "$LS_FILE"' EXIT
 # Record the start ref before the develop round so the review diff covers
 # work the developer commits (a diff against a moving ref would miss it).
 # On an unborn repo (no commits yet) HEAD does not resolve, so fall back
 # to the empty tree: everything present after develop is then "new".
 # If git itself fails (corrupt repo), surface it as PI_ERROR.
 if ! git rev-parse HEAD >/dev/null 2>"$GIT_ERR_FILE"; then
-  # Distinguish unborn repo (expected) from a real git failure (PI_ERROR).
-  # An unborn repo: `git rev-parse --git-dir` succeeds (we're in a repo),
-  # `git rev-parse HEAD` fails with exit 128. A real git failure: any
-  # other non-zero exit.
-  git_rc=0
-  git rev-parse HEAD >/dev/null 2>"$GIT_ERR_FILE" && git_rc=0 || git_rc=$?
-  if [ "$git_rc" -eq 128 ]; then
+  # An unborn repo (no commits yet) makes `git rev-parse --verify -q HEAD`
+  # fail silently; the `--git-dir` preflight above already guarantees we are
+  # inside a repo, so any failure here is the unborn case: fall back to the
+  # empty tree (everything present after develop is then "new").
+  if START_REF="$(git rev-parse --verify -q HEAD 2>"$GIT_ERR_FILE")"; then :; else
     empty_tree="$(git hash-object -t tree /dev/null)"
     [ -n "$empty_tree" ] || die_git_error
     START_REF="$empty_tree"
-  else
-    die_git_error
   fi
-else
-  START_REF="$(git rev-parse HEAD 2>"$GIT_ERR_FILE")"
 fi
 
 # A clean working tree at entry is normal for a develop-first loop: the
