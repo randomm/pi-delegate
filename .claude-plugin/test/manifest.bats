@@ -60,7 +60,7 @@ setup() {
 @test "marketplace.json: every plugin entry has name and source" {
   local count bad
   count=$(jq '.plugins | length' "$MARKETPLACE")
-  bad=$(jq '[.plugins[] | select((.name // "") == "" or (.source // "") == "")] | length' "$MARKETPLACE")
+  bad=$(jq '[.plugins[] | select((.name|type) != "string" or .name == "" or (.source|type) != "string" or .source == "")] | length' "$MARKETPLACE")
   [ "$bad" = "0" ]
   [ "$count" -ge 1 ]
 }
@@ -69,14 +69,17 @@ setup() {
   [ "$(jq -r '.plugins[0].source' "$MARKETPLACE")" = "./" ]
 }
 
-@test "marketplace.json: every plugin source dir exists on disk" {
-  # A relative source must point at a real directory in the repo, and that
-  # directory must contain the plugin's skills (the whole point of the
-  # marketplace entry).
+@test "marketplace.json: every plugin source is a safe relative path and its dir exists" {
+  # A relative source must be plain: no ".." escapes, no absolute paths, no
+  # URL schemes. It must point at a real directory in the repo that contains
+  # the plugin's skills (the whole point of the marketplace entry).
   local n src
   n=$(jq '.plugins | length' "$MARKETPLACE")
   for ((i = 0; i < n; i++)); do
     src=$(jq -r ".plugins[$i].source" "$MARKETPLACE")
+    case "$src" in
+      *".."*|/*|*"://"*) false ;;
+    esac
     # A relative source ("./") resolves from the marketplace root (repo root).
     # cd into it instead of [ -d ] on the joined string: "./" after trailing-/
     # normalization is the one form a bare [ -d ] on the joined path string
@@ -88,20 +91,12 @@ setup() {
 @test "marketplace.json: name is not in the reserved set" {
   # npm, pip, uv, cargo, github, gh are reserved marketplace names in any
   # casing (Claude Code marketplace-reference, "Reserved names").
-  local name
-  name=$(jq -r '.name' "$MARKETPLACE")
-  [ "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" \
-    != "npm" ]
-  [ "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" \
-    != "pip" ]
-  [ "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" \
-    != "uv" ]
-  [ "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" \
-    != "cargo" ]
-  [ "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" \
-    != "github" ]
-  [ "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" \
-    != "gh" ]
+  local lname
+  lname=$(printf '%s' "$(jq -r '.name' "$MARKETPLACE")" | tr '[:upper:]' '[:lower:]')
+  case "$lname" in
+    npm|pip|uv|cargo|github|gh) false ;;
+  esac
+  true
 }
 
 @test "marketplace.json carries no version key anywhere" {
