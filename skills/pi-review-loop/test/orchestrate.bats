@@ -962,3 +962,67 @@ F
   [ "$(printf '%s' "$out" | jq -r '.findings | type')" = "array" ]
   [ "$(printf '%s' "$out" | jq -r '.raw_output | type')" = "string" ]
 }
+
+# --- Doc-drift: SKILL.md and README stay in sync with the timeout wrapper ---
+
+@test "pi-oneshot SKILL.md invocation block contains the timeout wrapper" {
+  local oneshot
+  oneshot="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  [ -f "$oneshot" ]
+  # The invocation block must reference the timeout binary and the env vars.
+  grep -q 'timeout' "$oneshot"
+  grep -q 'gtimeout' "$oneshot"
+  grep -q 'PI_KILL_AFTER' "$oneshot"
+  grep -q 'PI_TIMEOUT' "$oneshot"
+}
+
+@test "pi-oneshot SKILL.md Model variant contains the timeout wrapper" {
+  local oneshot
+  oneshot="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  [ -f "$oneshot" ]
+  # The Model section must state that the timeout wrapper applies to the
+  # --model variant as well.
+  grep -q -- '--model' "$oneshot"
+  grep -q 'same wrapped invocation' "$oneshot"
+}
+
+@test "both SKILL.md files mention run_in_background (long-run guidance)" {
+  local oneshot loop
+  oneshot="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  loop="$REPO_ROOT/skills/pi-review-loop/SKILL.md"
+  [ -f "$oneshot" ]
+  [ -f "$loop" ]
+  grep -q 'run_in_background' "$oneshot"
+  grep -q 'run_in_background' "$loop"
+}
+
+@test "README and pi-oneshot SKILL.md both state 124/137 = timed out" {
+  local readme oneshot
+  readme="$REPO_ROOT/README.md"
+  oneshot="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  [ -f "$readme" ]
+  [ -f "$oneshot" ]
+  grep -q '124' "$readme"
+  grep -q '137' "$readme"
+  grep -q 'timed out' "$readme"
+  grep -q '124' "$oneshot"
+  grep -q '137' "$oneshot"
+  grep -q 'timed out' "$oneshot"
+}
+
+@test "README pi-oneshot section mentions timeout/gtimeout and PI_TIMEOUT" {
+  local readme
+  readme="$REPO_ROOT/README.md"
+  [ -f "$readme" ]
+  grep -q 'timeout' "$readme"
+  grep -q 'gtimeout' "$readme"
+  grep -q 'PI_TIMEOUT' "$readme"
+  grep -q 'PI_KILL_AFTER' "$readme"
+}
+
+@test "README pi-review-loop section mentions run_in_background" {
+  local readme
+  readme="$REPO_ROOT/README.md"
+  [ -f "$readme" ]
+  grep -q 'run_in_background' "$readme"
+}

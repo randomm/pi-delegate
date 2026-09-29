@@ -65,6 +65,15 @@ bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"
   the entire script produces no output for an extended period, check that
   the pi binary and git are available and that a develop round is running (or
   could run); a run with no progress is safe to interrupt and re-run.
+- **Long runs — background + poll:** a full loop (develop + up to 3 reviews
+  + 2 fixes) can easily exceed the Bash tool's foreground ceiling (default
+  **120000 ms** = 2 min, max **600000 ms** = 10 min; values above the max are
+  silently clamped; configurable via `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS`
+  env vars — re-verify current values before relying on them). If the run may
+  exceed 10 minutes, pass `run_in_background: true` to the Bash tool and poll
+  by reading the background task's output file (via `Read`) until the final
+  JSON line (the summary) appears. Do **not** try to pass a larger foreground
+  `timeout` — it will be clamped to the ceiling and the run killed.
 
 ### Model passthrough
 
