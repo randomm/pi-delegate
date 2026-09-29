@@ -16,11 +16,10 @@
 #   - If the fixture starts with "SLEEP:<n>" it sleeps n seconds first
 #     (used to exercise the driver's PI_TIMEOUT path), then emits the
 #     remaining lines on stdout and exits 0.
-#   - If the fixture starts with "SLEEP-IGNORE-TERM:<n>" it traps (ignores)
-#     SIGTERM and then sleeps n seconds. The driver's timeout sends SIGTERM
-#     at the deadline; a process that ignores it must be SIGKILLed by the
-#     timeout's --kill-after escalation (rc 137), which exercises the
-#     escalation path that plain SLEEP cannot.
+#   - If the fixture starts with "SLEEP-IGNORE-TERM:<n>" it ignores
+#     SIGTERM (trap), then spawns `sleep n` in a child process so that
+#     GNU timeout's process-group kill cannot reach the sleep directly.
+#     This exercises the SIGKILL escalation path (--kill-after → rc 137).
 #   - Otherwise the fixture is emitted on stdout and the call exits 0.
 
 log_call() {
@@ -75,7 +74,11 @@ if [ -n "${MOCK_PI_FIXTURES_DIR:-}" ] && [ -f "$MOCK_PI_FIXTURES_DIR/$n" ]; then
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
       ;;
     SLEEP-IGNORE-TERM:*)
-      trap '' TERM
+      # Ignore SIGTERM in the mock shell, then spawn `sleep` as a child.
+      # GNU timeout kills the child's process group on deadline (SIGTERM);
+      # the mock shell traps and ignores it, and the `sleep` child dies.
+      # At kill-after expiry, SIGKILL terminates the whole group → rc 137.
+      trap "" TERM
       sleep "${first#SLEEP-IGNORE-TERM:}"
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
       ;;
