@@ -55,6 +55,33 @@ You need three things: Claude Code, a working `pi` installation, and `jq`.
    delegate to pi: write a bash function that prints today's date in ISO format
    ```
 
+## Safety
+
+**pi has no sandbox.** Its full toolset can read every file in the working tree
+(including git-ignored ones), run arbitrary commands, and push to remotes. The
+skills mitigate — but do not eliminate — this:
+
+- **Branch guard:** `orchestrate.sh` (and the `pi-oneshot` preflight) **refuse
+to run** (exit 3, `REFUSED:` on stderr + `PI_ERROR` JSON) when the current
+  branch is the repo's default branch (or HEAD is detached at its tip). Work on
+  a feature branch.
+- **Secret-file guard:** the same preflight **refuses to run** when secret-looking
+  files are present in the working tree (`.env`, `.env.*` except `*.example` /
+  `*.sample` / `*.template`, `*.pem`, `*.key`) — pi's tools can read them and
+  send them to the model provider.
+- **Push neutralisation:** for every pi process, the driver exports
+  `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` (0-indexed,
+  appended to any pre-existing entries) with `push.default = nothing` and a
+  per-remote `remote.<name>.pushurl = pi-delegate-push-disabled://dead`, so
+  `git push` (with or without a refspec) fails. URL-based pushes
+  (`git push <url>`) are **not** blocked — an inherent git limitation.
+
+**Real isolation is a disposable clone/worktree or a container.** The preflight
+is a last-resort guardrail, not a substitute. If you need to run on the default
+branch, with secret files present, or with push enabled, set
+`PI_DELEGATE_UNSAFE=1` — and understand that you are opting out of all three
+guards.
+
 ## Usage — pi-oneshot
 
 `pi-oneshot` is the lightweight skill: a single `pi -p --no-session` call
