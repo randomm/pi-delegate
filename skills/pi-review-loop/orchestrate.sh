@@ -162,19 +162,37 @@ reviewer_md_content="$(cat "$REVIEWER_MD")"
 # native env mechanism) to append to any existing GIT_CONFIG_* entries rather
 # than clobbering them. The config sets push.default=nothing (so a bare
 # `git push` with no refspec fails) and, for every `git remote`, a pushurl
-# pointing at an invalid URL (so `git push <remote>` fails). URL-based pushes
-# (`git push <url>`) are not blocked — that is an inherent git limitation: a
-# push to an explicit URL bypasses per-remote config entirely, and
-# pushInsteadOf/insteadOf cannot match a local path. The single opt-out is
-# PI_DELEGATE_UNSAFE=1.
+# pointing at an invalid URL (so `git push <remote>` fails). Pushes to an
+# explicit URL (`git push <url>`) bypass per-remote config, so common URL
+# prefixes (https://, http://, ssh://, git://, file://, the scp-like git@
+# form, and absolute local paths /) are additionally rewritten via
+# pushInsteadOf to the same dead helper. pushInsteadOf cannot rewrite bare
+# relative local paths (e.g. ../repo) — see the code comment below. The
+# single opt-out is PI_DELEGATE_UNSAFE=1.
 if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
   # Build the GIT_CONFIG_* entries, appending to any pre-existing ones so we
-  # never clobber a caller's config. GIT_CONFIG entries are 0-indexed.
+  # never clobber a caller's config. GIT_CONFIG entries are 0-indexed; new
+  # entries start at the existing count, so a caller-provided
+  # GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n (e.g. git
+  # re-exports them in a subshell) is preserved. An invalid (non-numeric)
+  # pre-existing GIT_CONFIG_COUNT makes the arithmetic below fail loudly
+  # under set -e; git itself hard-errors on such a value, so either way the
+  # run dies before pi starts — never with silently disabled guards.
   _gc_count="${GIT_CONFIG_COUNT:-0}"
   _gc_key_base="${_gc_count}"
   _gc_count=$(( _gc_count + 1 ))
   export GIT_CONFIG_KEY_${_gc_key_base}=push.default
   export GIT_CONFIG_VALUE_${_gc_key_base}=nothing
+  # pushInsteadOf rewrites matching URL prefixes to the dead helper. Known
+  # limit: git does not rewrite bare relative local paths (e.g.
+  # `git push ../repo`) — they have no prefix for the matching, so that
+  # form cannot be blocked via config (an inherent git limitation).
+  for _p in https:// http:// ssh:// git:// file:// git@ /; do
+    _gc_key_base="$(( _gc_count ))"
+    _gc_count=$(( _gc_count + 1 ))
+    export GIT_CONFIG_KEY_${_gc_key_base}="url.pi-delegate-push-disabled://.pushInsteadOf"
+    export GIT_CONFIG_VALUE_${_gc_key_base}="${_p}"
+  done
   # For every configured remote, set a pushurl to an invalid URL. This makes
   # `git push <remote>` (and `git push <remote> <ref>`) fail with a clear
   # "remote helper ... aborted session" error rather than pushing.
@@ -186,7 +204,7 @@ if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
     export GIT_CONFIG_VALUE_${_gc_key_base}=pi-delegate-push-disabled://dead
   done < <(git remote 2>/dev/null || true)
   export GIT_CONFIG_COUNT="${_gc_count}"
-  unset _gc_count _gc_key_base _remote_name
+  unset _gc_count _gc_key_base _remote_name _p
 fi
 
 # pi discovery: PATH first (`command -v pi` + executable check), then

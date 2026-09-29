@@ -73,8 +73,13 @@ to run** (exit 3, `REFUSED:` on stderr + `PI_ERROR` JSON) when the current
   `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` (0-indexed,
   appended to any pre-existing entries) with `push.default = nothing` and a
   per-remote `remote.<name>.pushurl = pi-delegate-push-disabled://dead`, so
-  `git push` (with or without a refspec) fails. URL-based pushes
-  (`git push <url>`) are **not** blocked — an inherent git limitation.
+  `git push` (with or without a refspec) fails. Pushes to an explicit URL
+  (`git push <url>`) are covered for the common prefixes — `https://`,
+  `http://`, `ssh://`, `git://`, `file://`, the scp-like `git@` form, and
+  absolute local paths — via `pushInsteadOf` rewriting them to the same dead
+  helper. **Known residual gap:** a bare relative local path
+  (`git push ../repo`) has no URL prefix for git to match, so that single
+  form cannot be blocked via config — an inherent git limitation.
 
 **Real isolation is a disposable clone/worktree or a container.** The preflight
 is a last-resort guardrail, not a substitute. If you need to run on the default

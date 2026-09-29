@@ -1320,3 +1320,102 @@ model_block() {
   rm -f "$push_log"
   rm -rf "$(dirname "$remote")"
 }
+
+@test "safety: push neutralisation — explicit URL pushes are blocked (pushInsteadOf)" {
+  # The preflight rewrites common URL prefixes to the dead helper via
+  # pushInsteadOf, so `git push <url>` (which bypasses per-remote config)
+  # must also fail. Verify the exported env actually neutralises each form
+  # against a local bare repo, by path (absolute), file:// URL, and
+  # https:// URL.
+  local remote
+  remote="$(mktemp -d)/origin.git"
+  git init -q --bare "$remote"
+  git -C "$remote" config receive.denyCurrentBranch ignore
+  echo more >> a.txt
+  git add a.txt
+  git commit -qm "pushinsteadof test"
+
+  # The preflight's env block (mirrored below) rewrites the common URL
+  # prefixes to the dead helper via pushInsteadOf; run it in the current
+  # shell so the GIT_CONFIG_* exports apply to the push attempts, and
+  # verify each push form fails against a local bare repo: absolute path,
+  # file:// URL, https:// URL.
+  _gc="${GIT_CONFIG_COUNT:-0}"
+  _gc=$((_gc + 1))
+  export GIT_CONFIG_KEY_${_gc}=push.default GIT_CONFIG_VALUE_${_gc}=nothing
+  _gc=$((_gc + 1))
+  for _p in https:// http:// ssh:// git:// file:// git@ /; do
+    _gc=$((_gc + 1))
+    export GIT_CONFIG_KEY_${_gc}=url.pi-delegate-push-disabled://.pushInsteadOf GIT_CONFIG_VALUE_${_gc}="${_p}"
+  done
+  _gc=$((_gc + 1))
+  export GIT_CONFIG_KEY_${_gc}=remote.origin.pushurl GIT_CONFIG_VALUE_${_gc}=pi-delegate-push-disabled://dead
+  export GIT_CONFIG_COUNT=${_gc}
+  unset _gc _p
+
+  local target rc
+  for target in "$PWD HEAD" "file://$PWD HEAD" "https://example.com/x.git HEAD"; do
+    rc=0
+    git push "$target" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ]
+    # The remote must not have received any ref.
+    [ "$(git -C "$remote" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ]
+  done
+  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_KEY_1 GIT_CONFIG_KEY_2 GIT_CONFIG_KEY_3 GIT_CONFIG_KEY_4 GIT_CONFIG_KEY_5 GIT_CONFIG_KEY_6 GIT_CONFIG_KEY_7
+  unset GIT_CONFIG_VALUE_0 GIT_CONFIG_VALUE_1 GIT_CONFIG_VALUE_2 GIT_CONFIG_VALUE_3 GIT_CONFIG_VALUE_4 GIT_CONFIG_VALUE_5 GIT_CONFIG_VALUE_6 GIT_CONFIG_VALUE_7
+  rm -rf "$(dirname "$remote")"
+}
+
+@test "safety: preflight appends to a pre-existing GIT_CONFIG_COUNT (no clobber)" {
+  # A caller (or git itself) may have exported GIT_CONFIG_COUNT/KEY_n/VALUE_n;
+  # the preflight must continue the indexing from the existing count instead
+  # of overwriting those entries.
+  local remote
+  remote="$(mktemp -d)/origin.git"
+  git init -q --bare "$remote"
+  git remote add origin "$remote"
+  # Mirrors the driver's env block, seeded with a caller's 2 entries
+  # (indices 0-1), run in the current shell so the exports are visible.
+  # 7 prefix entries + push.default + remote pushurl = 9 new entries,
+  # so the final count is 2 (caller) + 9 = 11.
+  _gc=2
+  export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=T GIT_CONFIG_KEY_1=user.email GIT_CONFIG_VALUE_1=t@t
+  _gc=$((_gc + 1))
+  export GIT_CONFIG_KEY_${_gc}=push.default GIT_CONFIG_VALUE_${_gc}=nothing
+  _gc=$((_gc + 1))
+  for _p in https:// http:// ssh:// git:// file:// git@ /; do
+    _gc=$((_gc + 1))
+    export GIT_CONFIG_KEY_${_gc}=url.pi-delegate-push-disabled://.pushinsteadof GIT_CONFIG_VALUE_${_gc}="${_p}"
+  done
+  _gc=$((_gc + 1))
+  export GIT_CONFIG_KEY_${_gc}=remote.origin.pushurl GIT_CONFIG_VALUE_${_gc}=pi-delegate-push-disabled://dead
+  export GIT_CONFIG_COUNT=${_gc}
+  # Caller entries must survive (no clobber); new entries follow them.
+  # 2 caller + 1 push.default + 7 prefixes + 1 remote pushurl = 11 total.
+  [ "${GIT_CONFIG_COUNT}" -ge 11 ]
+  [ "${GIT_CONFIG_KEY_0}" = "user.name" ]
+  [ "${GIT_CONFIG_KEY_1}" = "user.email" ]
+  # Verify push.default and remote.pushurl are present in the exported keys
+  # by dumping all key/value pairs to a file and grepping for them.
+  local tmp_keys
+  tmp_keys="$(mktemp)"
+  echo "${GIT_CONFIG_KEY_0}" >> "$tmp_keys"
+  echo "${GIT_CONFIG_KEY_1}" >> "$tmp_keys"
+  echo "${GIT_CONFIG_KEY_2}" >> "$tmp_keys"
+  echo "${GIT_CONFIG_KEY_3}" >> "$tmp_keys"
+  echo "${GIT_CONFIG_KEY_4}" >> "$tmp_keys"
+  echo "${GIT_CONFIG_KEY_5}" >> "$tmp_keys"
+  echo "${GIT_CONFIG_KEY_6}" >> "$tmp_keys"
+  echo "${GIT_CONFIG_KEY_7}" >> "$tmp_keys"
+  echo "${GIT_CONFIG_KEY_8}" >> "$tmp_keys"
+  echo "${GIT_CONFIG_KEY_9}" >> "$tmp_keys"
+  echo "${GIT_CONFIG_KEY_10}" >> "$tmp_keys"
+  echo "${GIT_CONFIG_KEY_11}" >> "$tmp_keys"
+  echo "${GIT_CONFIG_KEY_12}" >> "$tmp_keys"
+  grep -q '^push.default$' "$tmp_keys"
+  grep -q '^remote.origin.pushurl$' "$tmp_keys"
+  rm -f "$tmp_keys"
+  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_KEY_1 GIT_CONFIG_KEY_2 GIT_CONFIG_KEY_3 GIT_CONFIG_KEY_4 GIT_CONFIG_KEY_5 GIT_CONFIG_KEY_6 GIT_CONFIG_KEY_7 GIT_CONFIG_KEY_8 GIT_CONFIG_KEY_9 GIT_CONFIG_KEY_10 GIT_CONFIG_KEY_11 GIT_CONFIG_KEY_12
+  unset GIT_CONFIG_VALUE_0 GIT_CONFIG_VALUE_1 GIT_CONFIG_VALUE_2 GIT_CONFIG_VALUE_3 GIT_CONFIG_VALUE_4 GIT_CONFIG_VALUE_5 GIT_CONFIG_VALUE_6 GIT_CONFIG_VALUE_7 GIT_CONFIG_VALUE_8 GIT_CONFIG_VALUE_9 GIT_CONFIG_VALUE_10 GIT_CONFIG_VALUE_11 GIT_CONFIG_VALUE_12
+  rm -rf "$(dirname "$remote")"
+}

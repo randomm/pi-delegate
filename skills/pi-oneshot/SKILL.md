@@ -83,16 +83,26 @@ if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
     exit 3
   fi
   # 3. Neutralise git push for the pi process via GIT_CONFIG_* env.
+  #    Indices continue from any pre-existing GIT_CONFIG_COUNT so caller
+  #    entries are preserved; a non-numeric pre-existing count makes the
+  #    arithmetic fail loudly under set -e (git itself hard-errors on it).
   _gc="${GIT_CONFIG_COUNT:-0}"
   export GIT_CONFIG_KEY_${_gc}=push.default GIT_CONFIG_VALUE_${_gc}=nothing
   _gc=$((_gc + 1))
+  # pushInsteadOf rewrites common URL prefixes to the dead helper. Known
+  # limit: bare relative local paths (e.g. `git push ../repo`) have no
+  # prefix for the matching and cannot be blocked via config.
+  for _p in https:// http:// ssh:// git:// file:// git@ /; do
+    export GIT_CONFIG_KEY_${_gc}="url.pi-delegate-push-disabled://.pushInsteadOf" GIT_CONFIG_VALUE_${_gc}="${_p}"
+    _gc=$((_gc + 1))
+  done
   while IFS= read -r _r; do
     [ -n "$_r" ] || continue
     export GIT_CONFIG_KEY_${_gc}="remote.${_r}.pushurl" GIT_CONFIG_VALUE_${_gc}=pi-delegate-push-disabled://dead
     _gc=$((_gc + 1))
   done < <(git remote 2>/dev/null)
   export GIT_CONFIG_COUNT="${_gc}"
-  unset _gc _r
+  unset _gc _r _p
 fi
 # --- End safety preflight ---------------------------------------------------
 ```
