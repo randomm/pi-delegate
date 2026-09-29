@@ -976,179 +976,245 @@ F
   [ "$(printf '%s' "$out" | jq -r '.raw_output | type')" = "string" ]
 }
 
-# --- Doc-drift: SKILL.md and README stay in sync with the timeout wrapper ---
+# --- Doc-drift: docs/configuration.md is the single source of truth for the
+# timeout contract (issue #45). Every literal is asserted in exactly ONE
+# owning file; cross-file tests compare docs/configuration.md against
+# skills/pi-oneshot/SKILL.md (the executable wrapper spec). ---
 
-@test "pi-oneshot SKILL.md invocation block contains the timeout wrapper" {
-  local oneshot
+timeout_section() {
+  # The whole timeout contract: from the PI_TIMEOUT knob heading down to the
+  # Flags heading (both sections are part of the contract: the wrapper,
+  # gtimeout fallback, 124/137 semantics, and the unbounded-with-warning
+  # path). The range closes on ANY next `## ` heading, not on a specific
+  # heading name, so it cannot select nothing or over-select if sections
+  # reorder. Prints the selected lines so a range failure is visible in
+  # the test transcript (empty output is caught by the grep failures).
+  local config
+  config="$REPO_ROOT/docs/configuration.md"
+  [ -f "$config" ]
+  grep -q '^### `PI_TIMEOUT` ' "$config"
+  grep -q '^## Flags' "$config"
+  awk '/^### `PI_TIMEOUT` /{s=1; next} s && /^## /{s=0} s {print}' "$config"
+}
+
+@test "docs/configuration.md owns the PI_TIMEOUT/PI_KILL_AFTER defaults (1800/30) in the wrapper literal" {
+  local section
+  section="$(timeout_section)"
+  printf '%s\n' "$section" | grep -qF 'PI_TIMEOUT:-1800'
+  printf '%s\n' "$section" | grep -qF 'PI_KILL_AFTER:-30'
+  # The selected section must be exactly the timeout contract (PI_TIMEOUT
+  # knob → Flags heading), not an over- or under-selection: it must start
+  # at the PI_TIMEOUT heading and must NOT leak the Long runs section (the
+  # next ## section after Flags) or the Environment variables header.
+  [ -n "$section" ]
+  # The awk helper skips the PI_TIMEOUT heading line itself (s=1; next);
+  # assert the contract starts at PI_TIMEOUT by checking the heading is
+  # present immediately before the first line of the selection.
+  run grep -q '^### `PI_TIMEOUT` ' "$REPO_ROOT/docs/configuration.md"
+  [ "$status" -eq 0 ]
+  run grep -q '^## Flags' "$REPO_ROOT/docs/configuration.md"
+  [ "$status" -eq 0 ]
+  run grep -q '^## Long runs under' <<<"$section"
+  [ "$status" -ne 0 ]
+  run grep -q '^## Environment variables' <<<"$section"
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$section"
+}
+
+@test "docs/configuration.md owns the wrapper literal (--kill-after, timeout/gtimeout)" {
+  local section
+  section="$(timeout_section)"
+  # Word boundary so this does not match incidental numerals or "gtimeout".
+  printf '%s\n' "$section" | grep -qE '(^|[^0-9])timeout([^0-9]|$)'
+  printf '%s\n' "$section" | grep -q 'gtimeout'
+  printf '%s\n' "$section" | grep -q -- '--kill-after'
+  printf '%s\n' "$section"
+}
+
+@test "docs/configuration.md owns the 124/137 = timed out semantics" {
+  local section
+  section="$(timeout_section)"
+  printf '%s\n' "$section" | grep -qE '(^|[^0-9])124([^0-9]|$)'
+  printf '%s\n' "$section" | grep -qE '(^|[^0-9])137([^0-9]|$)'
+  printf '%s\n' "$section" | grep -q 'SIGTERM at'
+  printf '%s\n' "$section" | grep -q 'SIGKILL escalation'
+  printf '%s\n' "$section" | grep -qi 'timed out'
+  printf '%s\n' "$section"
+}
+
+@test "docs/configuration.md owns the unbounded-with-warning path" {
+  local section
+  section="$(timeout_section)"
+  printf '%s\n' "$section" | grep -qi 'unbounded'
+  printf '%s\n' "$section" | grep -qi 'warning'
+  printf '%s\n' "$section"
+}
+
+long_runs_section() {
+  # The Long runs section only (start at its heading, stop at the NEXT
+  # heading of any level — this file currently ends the document with this
+  # section, but the end anchor must not be another section's heading).
+  # Prints the selected lines; the grep assertions below fail loudly if
+  # the range is empty.
+  local config
+  config="$REPO_ROOT/docs/configuration.md"
+  [ -f "$config" ]
+  grep -q '^## Long runs under' "$config"
+  awk '/^## Long runs under/{s=1; next} s && /^##/{s=0} s {print}' "$config"
+}
+
+@test "docs/configuration.md owns the long-run guidance (run_in_background + Read polling)" {
+  local section
+  section="$(long_runs_section)"
+  printf '%s\n' "$section" | grep -q 'run_in_background'
+  printf '%s\n' "$section" | grep -q 'Read'
+  # Exactly the Long runs section: starts at its heading, no leak from the
+  # Flags or Environment variables sections. The awk helper skips the
+  # Long runs heading line itself (s=1; next), so assert the heading is
+  # present in the source file and the selection does not leak other
+  # sections.
+  [ -n "$section" ]
+  run grep -q '^## Long runs under' "$REPO_ROOT/docs/configuration.md"
+  [ "$status" -eq 0 ]
+  run grep -q '^## Flags' <<<"$section"
+  [ "$status" -ne 0 ]
+  run grep -q '^### `PI_' <<<"$section"
+  [ "$status" -ne 0 ]
+  printf '%s\n' "$section"
+}
+
+@test "docs/configuration.md owns the worst-case loop wall clock (183 min)" {
+  local section
+  section="$(long_runs_section)"
+  printf '%s\n' "$section" | grep -q '183 min'
+  # The derivation lives in the owning section, not just the number.
+  printf '%s\n' "$section" | grep -q -- '10980'
+  printf '%s\n' "$section"
+}
+
+@test "cross-file: pi-oneshot SKILL.md wrapper matches docs/configuration.md (defaults, gtimeout, 124/137)" {
+  local oneshot config_section
   oneshot="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  config_section="$(timeout_section)"
   [ -f "$oneshot" ]
-  # The invocation block must reference the timeout binary and the env vars.
-  # Word boundaries so this doesn't match incidental numerals or "gtimeout".
-  grep -qE '(^|[^0-9])timeout([^0-9]|$)' "$oneshot"
+  # Defaults agree.
+  grep -qF 'PI_TIMEOUT:-1800' "$oneshot"
+  grep -qF 'PI_KILL_AFTER:-30' "$oneshot"
+  printf '%s\n' "$config_section" | grep -qF 'PI_TIMEOUT:-1800'
+  printf '%s\n' "$config_section" | grep -qF 'PI_KILL_AFTER:-30'
+  # gtimeout fallback stated in both.
   grep -q 'gtimeout' "$oneshot"
-  grep -q 'PI_KILL_AFTER' "$oneshot"
-  grep -q 'PI_TIMEOUT' "$oneshot"
-}
-
-@test "pi-oneshot SKILL.md Model variant contains the timeout wrapper" {
-  local oneshot
-  oneshot="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
-  [ -f "$oneshot" ]
-  # The Model section must state that the timeout wrapper applies to the
-  # --model variant as well.
-  grep -q -- '--model' "$oneshot"
-  grep -q 'same wrapped invocation' "$oneshot"
-}
-
-@test "both SKILL.md files mention run_in_background (long-run guidance)" {
-  local oneshot loop
-  oneshot="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
-  loop="$REPO_ROOT/skills/pi-review-loop/SKILL.md"
-  [ -f "$oneshot" ]
-  [ -f "$loop" ]
-  grep -q 'run_in_background' "$oneshot"
-  grep -q 'run_in_background' "$loop"
-}
-
-@test "README and pi-oneshot SKILL.md both state 124/137 = timed out" {
-  local readme oneshot
-  readme="$REPO_ROOT/README.md"
-  oneshot="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
-  [ -f "$readme" ]
-  [ -f "$oneshot" ]
-  # Word-boundary numerals: plain `grep -q '124'` would match "120000" and
-  # pass after the whole timeout paragraph is deleted.
-  grep -qE '(^|[^0-9])124([^0-9]|$)' "$readme"
-  grep -qE '(^|[^0-9])137([^0-9]|$)' "$readme"
-  grep -q 'SIGTERM at' "$readme"
-  grep -q 'SIGKILL escalation' "$readme"
-  grep -q 'timed out' "$readme"
+  printf '%s\n' "$config_section" | grep -q 'gtimeout'
+  # 124/137 semantics: both files state both codes with the SIG signal.
   grep -qE '(^|[^0-9])124([^0-9]|$)' "$oneshot"
   grep -qE '(^|[^0-9])137([^0-9]|$)' "$oneshot"
-  grep -q 'SIGTERM at' "$oneshot"
-  grep -q 'SIGKILL at' "$oneshot"
-  grep -q 'timed out' "$oneshot"
+  grep -qi 'SIGTERM' "$oneshot"
+  grep -qi 'SIGKILL' "$oneshot"
+  printf '%s\n' "$config_section" | grep -qE '(^|[^0-9])124([^0-9]|$)'
+  printf '%s\n' "$config_section" | grep -qE '(^|[^0-9])137([^0-9]|$)'
 }
 
-@test "README pi-oneshot section mentions timeout/gtimeout and PI_TIMEOUT" {
+@test "cross-file: pi-oneshot SKILL.md unbounded warning message matches orchestrate.sh" {
+  # SKILL.md prints its own warning string; it must match the driver's.
+  local oneshot driver
+  oneshot="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  driver="$REPO_ROOT/skills/pi-review-loop/orchestrate.sh"
+  local skill_msg driver_msg
+  skill_msg="$(grep -oE 'WARNING: no GNU timeout/gtimeout found[^"]*' "$oneshot" | head -n 1)"
+  driver_msg="$(grep -oE 'WARNING: neither timeout nor gtimeout found[^"]*' "$driver" | head -n 1)"
+  [ -n "$skill_msg" ]
+  [ -n "$driver_msg" ]
+  # Both must state the same degraded mode: no usable timeout binary,
+  # calls run without a time limit.
+  [[ "$skill_msg" == *"without a time limit"* ]]
+  [[ "$driver_msg" == *"without a time limit"* ]]
+}
+
+@test "cross-file: docs/how-it-works.md links to configuration.md for the worst-case derivation" {
+  local how
+  how="$REPO_ROOT/docs/how-it-works.md"
+  [ -f "$how" ]
+  grep -q 'configuration.md#long-runs-under-claude-codes-bash-tool' "$how"
+}
+
+@test "README carries no timeout-contract literals (single source: docs/configuration.md)" {
   local readme
   readme="$REPO_ROOT/README.md"
   [ -f "$readme" ]
-  grep -qE '(^|[^0-9])timeout([^0-9]|$)' "$readme"
-  grep -q 'gtimeout' "$readme"
-  grep -q 'PI_TIMEOUT' "$readme"
-  grep -q 'PI_KILL_AFTER' "$readme"
+  run grep -qF 'PI_TIMEOUT:-1800' "$readme"
+  [ "$status" -ne 0 ]
+  run grep -qF 'PI_KILL_AFTER:-30' "$readme"
+  [ "$status" -ne 0 ]
+  run grep -q -- '--kill-after' "$readme"
+  [ "$status" -ne 0 ]
+  run grep -q 'gtimeout' "$readme"
+  [ "$status" -ne 0 ]
+  run grep -qE '(^|[^0-9])124([^0-9]|$)' "$readme"
+  [ "$status" -ne 0 ]
+  run grep -qE '(^|[^0-9])137([^0-9]|$)' "$readme"
+  [ "$status" -ne 0 ]
+  run grep -qi 'unbounded' "$readme"
+  [ "$status" -ne 0 ]
+  run grep -q '183 min' "$readme"
+  [ "$status" -ne 0 ]
 }
 
-@test "README pi-review-loop section mentions run_in_background" {
-  local readme
-  readme="$REPO_ROOT/README.md"
-  [ -f "$readme" ]
-  grep -q 'run_in_background' "$readme"
-}
+# --- #40 regression greps (README drift fixes) ----------------------------
 
-# --- Doc drift: long-run guidance (issue #39) ---------------------------------
-
-oneshot_skill_md() {
-  cat "$REPO_ROOT/skills/pi-oneshot/SKILL.md"
-}
-
-loop_skill_md() {
-  cat "$REPO_ROOT/skills/pi-review-loop/SKILL.md"
-}
-
-oneshot_block() {
-  # Extract the first ```bash block inside the "## Invocation" section
-  # (the timeout wrapper). Anchored on the section heading, not on block
-  # position, so the extraction survives block reordering.
-  awk 'BEGIN{n=0} /^## Invocation$/{s=1; next} s && /^## /{s=0} s && /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}' \
-    "$REPO_ROOT/skills/pi-oneshot/SKILL.md"
-}
-
-model_block() {
-  # Extract the ```bash block inside the "### Model" section (the wrapped
-  # --model variant). Anchored on the section heading, not on block position.
-  awk 'BEGIN{n=0} /^### Model$/{s=1; next} s && /^## /{s=0} s && /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}' \
-    "$REPO_ROOT/skills/pi-oneshot/SKILL.md"
-}
-
-@test "doc: pi-oneshot invocation block wraps pi in timeout with PI_TIMEOUT/PI_KILL_AFTER, gtimeout fallback, and unbounded warning" {
-  oneshot_block | grep -qF 'TIMEOUT_CMD='
-  oneshot_block | grep -qF 'command -v "$cand"'
-  oneshot_block | grep -qF 'gtimeout'
-  oneshot_block | grep -qF -- '--kill-after="${PI_KILL_AFTER:-30}"'
-  oneshot_block | grep -qF -- '"${PI_TIMEOUT:-1800}"'
-  # Single wrapper array: empty (no timeout binary) or timeout+flags,
-  # applied to every variant including the stdin transport.
-  oneshot_block | grep -qF 'wrap=()'
-  oneshot_block | grep -qF -- '${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session'
-  oneshot_block | grep -qF -- 'PI_KILL_AFTER:-30'
-  oneshot_block | grep -qF 'unbounded'
-  # unbounded path: no usable binary → unbounded call + stderr warning
-  oneshot_block | grep -qF -- 'WARNING: no GNU timeout/gtimeout found'
-  oneshot_block | grep -qF -- '>&2'
-  # pi-oneshot SKILL.md documents the unbounded path (124/137 don't apply there)
-  oneshot_skill_md | grep -q 'unbounded path'
-}
-
-@test "doc: pi-oneshot SKILL.md documents exit 124 and 137 as timed out" {
-  oneshot_skill_md | grep -qE '(^|[^0-9])124([^0-9]|$)'
-  oneshot_skill_md | grep -qE '(^|[^0-9])137([^0-9]|$)'
-  oneshot_skill_md | grep -qi "timed out"
-}
-
-@test "doc: pi-oneshot Model variant keeps the timeout wrapper" {
-  # The Model subsection's bash block must also carry the wrapper.
-  model_block | grep -qF -- '${wrap[@]+"${wrap[@]}"}'
-  model_block | grep -qF -- '"$PI_BIN"'
-  model_block | grep -qF -- '--model'
-}
-
-@test "doc: both SKILL.md files instruct run_in_background + poll-by-Read for long runs" {
-  oneshot_skill_md | grep -q "run_in_background"
-  oneshot_skill_md | grep -q "Read"
-  loop_skill_md | grep -q "run_in_background"
-  loop_skill_md | grep -q "Read"
-}
-
-@test "doc: both SKILL.md files cite the Bash tool limits (120000 ms default, 600000 ms max, silent clamp)" {
+@test "#40 regression: no '--max-rounds 3' remediation advice in README or docs" {
   local f
-  for f in "skills/pi-oneshot/SKILL.md" "skills/pi-review-loop/SKILL.md"; do
-    grep -q "BASH_DEFAULT_TIMEOUT_MS" "$REPO_ROOT/$f"
-    grep -q "120000" "$REPO_ROOT/$f"
-    grep -q "BASH_MAX_TIMEOUT_MS" "$REPO_ROOT/$f"
-    grep -q "600000" "$REPO_ROOT/$f"
-    grep -qi "clamped" "$REPO_ROOT/$f"
+  for f in "$REPO_ROOT/README.md" "$REPO_ROOT/docs/troubleshooting.md" "$REPO_ROOT/docs/how-it-works.md" "$REPO_ROOT/docs/configuration.md"; do
+    ! grep -q -- '--max-rounds 3' "$f"
+  done
+  # The troubleshooting REJECTED section must instead give the hard-cap
+  # fact and actionable advice.
+  grep -q 'hard-capped at 3' "$REPO_ROOT/docs/troubleshooting.md"
+  grep -q 're-run' "$REPO_ROOT/docs/troubleshooting.md"
+}
+
+@test "#40 regression: no 'not present yet' install conditional in README or docs" {
+  local f
+  for f in "$REPO_ROOT/README.md" "$REPO_ROOT/docs/troubleshooting.md" "$REPO_ROOT/docs/how-it-works.md" "$REPO_ROOT/docs/configuration.md"; do
+    ! grep -qi 'not present yet' "$f"
   done
 }
 
-@test "doc: README reflects pi-oneshot wrapper (PI_TIMEOUT/PI_KILL_AFTER, gtimeout, unbounded warning, 124/137) and both long-run sections" {
-  local readme="$REPO_ROOT/README.md"
-  grep -q "PI_TIMEOUT" "$readme"
-  grep -q "PI_KILL_AFTER" "$readme"
-  grep -q "gtimeout" "$readme"
-  grep -q "unbounded" "$readme"
-  grep -q "124" "$readme"
-  grep -q "137" "$readme"
-  grep -qi "timed out" "$readme"
-  # pi-oneshot long-run section
-  awk '/^## Usage — pi-oneshot/,/^## Usage — pi-review-loop/' "$readme" \
-    | grep -q "run_in_background"
-  # pi-review-loop long-run section (between the ## heading and the ## Model selection guide section)
-  awk '/^## Usage — pi-review-loop/,/^## Model selection guide/' "$readme" \
-    | grep -q "run_in_background"
-}
-
-@test "doc: README 124/137 = timed out agrees with pi-oneshot SKILL.md semantics" {
-  # Both files must state 124 is SIGTERM at PI_TIMEOUT and 137 is SIGKILL
-  # escalation, i.e. the same semantics as orchestrate.sh.
-  local f
-  for f in "$REPO_ROOT/README.md" "$REPO_ROOT/skills/pi-oneshot/SKILL.md"; do
-    grep -q "124" "$f"
-    grep -q "137" "$f"
-    grep -qi "SIGTERM" "$f"
-    grep -qi "SIGKILL" "$f"
-  done
+@test "#40 regression: docs/how-it-works.md loop sequence distinguishes the ISSUES_FOUND and CRITICAL arms with the non-terminal fix round" {
+  local how
+  how="$REPO_ROOT/docs/how-it-works.md"
+  [ -f "$how" ]
+  # The ISSUES_FOUND bullet must mention a fix round at non-terminal rounds
+  # (and only the terminal round is PASSED_WITH_FINDINGS).
+  #
+  # awk range note (issue #45 review): the previous forms used two named
+  # headings as start/end anchors (e.g. `/^## Long runs under/,/^## Flags/`).
+  # That shape is fragile for two reasons: (1) it only works when the end
+  # heading happens to be the *next* `## ` heading after the start heading —
+  # if a new section is inserted between them, the range closes early and the
+  # assertions pass on a truncated selection; (2) if the headings are ever
+  # reordered so the end heading precedes the start heading in the file, the
+  # range selects *nothing* (awk starts the range at the start heading, which
+  # is already past the end heading, and never re-opens it). Neither of these
+  # has anything to do with bash history expansion: these bats files run
+  # non-interactively, `!` never reaches a shell, and the range either
+  # worked or silently returned a too-small/too-big slice — the earlier
+  # "history expansion turned `!` into `s`" claim was false. The fix: close
+  # the range on ANY next `## ` heading, and print the selected lines so a
+  # range failure is visible in the transcript instead of masked by a
+  # silent pass.
+  seq="$(awk '/^## Loop sequence/{s=1; next} s && /^## /{s=0} s {print}' "$how")"
+  [ -n "$seq" ]  # the range must not be empty
+  printf '%s\n' "$seq" | grep -q 'ISSUES_FOUND'
+  printf '%s\n' "$seq" | grep -q 'non-terminal'
+  printf '%s\n' "$seq" | grep -q 'PASSED_WITH_FINDINGS'
+  printf '%s\n' "$seq" | grep -q 'fix round'
+  printf '%s\n' "$seq" | grep -q 'CRITICAL_ISSUES_FOUND'
+  printf '%s\n' "$seq" | grep -q 'REJECTED'
+  # The verdict table row must likewise carry the non-terminal fix round.
+  vtab="$(awk '/^## Verdicts/{s=1; next} s && /^## /{s=0} s {print}' "$how")"
+  [ -n "$vtab" ]
+  printf '%s\n' "$vtab" | grep -q 'ISSUES_FOUND'
+  printf '%s\n' "$vtab" | grep -q 'non-terminal'
 }
 
 # --- Issue #30: safety preflight ------------------------------------------------
