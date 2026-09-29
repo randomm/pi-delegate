@@ -322,16 +322,20 @@ WRAP
   [[ "$out" == *"fatal: entry boom"* ]]
 }
 
-@test "git rev-parse failure at entry -> PI_ERROR, exit 3" {
-  # Wrapper git: fail the very first `git rev-parse HEAD` (start-ref
-  # recording), but let `git rev-parse --git-dir` (preflight) succeed. The
-  # driver must not proceed with an empty start ref.
+@test "git rev-parse + hash-object failure at entry -> PI_ERROR, exit 3" {
+  # Wrapper git: fail both `git rev-parse --verify -q HEAD` (start-ref
+  # recording) and `git hash-object` (unborn-repo fallback), but let
+  # `git rev-parse --git-dir` (preflight) succeed. The driver must not
+  # proceed with an empty start ref.
   local wrap_dir out rc=0
   wrap_dir="$(mktemp -d)"
   cat > "$wrap_dir/git" <<'WRAP'
 #!/bin/bash
-if [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then
+if [ "$1" = "rev-parse" ] && [ "$2" != "--git-dir" ]; then
   echo "fatal: revparse boom" >&2
+  exit 129
+elif [ "$1" = "hash-object" ]; then
+  echo "fatal: hash-object boom" >&2
   exit 129
 fi
 exec /usr/bin/git "$@"
@@ -340,7 +344,7 @@ WRAP
   out="$(PATH="$wrap_dir:$PATH" bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
   rm -f "$wrap_dir/git"; rmdir "$wrap_dir"
   [ "$rc" -eq 3 ]
-  [[ "$out" == *"fatal: revparse boom"* ]]
+  [[ "$out" == *"fatal: hash-object boom"* ]]
 }
 
 @test "untracked-enumeration failure mid-loop -> PI_ERROR, exit 3" {

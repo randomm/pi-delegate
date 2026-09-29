@@ -436,16 +436,11 @@ trap 'rm -f "$GIT_ERR_FILE" "$LS_FILE"' EXIT
 # On an unborn repo (no commits yet) HEAD does not resolve, so fall back
 # to the empty tree: everything present after develop is then "new".
 # If git itself fails (corrupt repo), surface it as PI_ERROR.
-if ! git rev-parse HEAD >/dev/null 2>"$GIT_ERR_FILE"; then
-  # An unborn repo (no commits yet) makes `git rev-parse --verify -q HEAD`
-  # fail silently; the `--git-dir` preflight above already guarantees we are
-  # inside a repo, so any failure here is the unborn case: fall back to the
-  # empty tree (everything present after develop is then "new").
-  if START_REF="$(git rev-parse --verify -q HEAD 2>"$GIT_ERR_FILE")"; then :; else
-    empty_tree="$(git hash-object -t tree /dev/null)"
-    [ -n "$empty_tree" ] || die_git_error
-    START_REF="$empty_tree"
-  fi
+if START_REF="$(git rev-parse --verify -q HEAD 2>"$GIT_ERR_FILE")"; then
+  :
+else
+  # Unborn repo (no commits yet): diff against the empty tree.
+  START_REF="$(git hash-object -t tree /dev/null 2>"$GIT_ERR_FILE")" || die_git_error
 fi
 
 # A clean working tree at entry is normal for a develop-first loop: the
