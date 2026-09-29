@@ -96,10 +96,21 @@ if [ -f "$meta_json" ]; then
 fi
 
 # Load grade.json — optional but expected after grading.
+# If it is missing, the run was never graded (crashed, or grade.sh was not
+# run). We synthesise a failed grade so the collect line is marked failed
+# with a diagnostic error rather than emitting grade:null — a null grade
+# previously passed the "grade.pass is a boolean" validation (null has no
+# .pass), so a crashed run would look un-graded but not failed. (review item 6)
 grade_json="$run_dir/grade.json"
 grade_obj='null'
 if [ -f "$grade_json" ]; then
   grade_obj="$(jq -c '{pass, test_cmd, error}' "$grade_json" 2>/dev/null || echo 'null')"
+  if [ "$grade_obj" = "null" ]; then
+    # grade.json exists but is unreadable/malformed — treat as failed.
+    grade_obj='{"pass":false,"test_cmd":null,"error":"grade.json exists but is unreadable"}'
+  fi
+else
+  grade_obj='{"pass":false,"test_cmd":null,"error":"not graded: grade.json missing (run crashed or grade.sh was not run)"}'
 fi
 
 # Parse claude metrics.
@@ -133,8 +144,12 @@ claude_metrics="$(jq -c '
 # exit, mode, call_id).
 # pi-<N>.jsonl: per-call transcript for --mode json invocations.
 # For each call, if mode is "json" and a corresponding pi-<call_id>.jsonl
-# exists, extract usage from the last message_end event.
-# For "text" mode calls, tokens is null (documented gap).
+# exists, extract usage from the transcript. Tokens are SUMMED over every
+# assistant message_end in the call (a review-loop pi call has multiple
+# turns; taking only the last message_end under-counted by an order of
+# magnitude — review item 3). Per-model breakdowns are included so the
+# per-model token requirement holds for pi too. For "text" mode calls,
+# tokens is null (documented gap).
 
 
 # Build the pi array. If no pi-calls.jsonl, the array is empty.
@@ -166,8 +181,33 @@ if [ -f "$run_dir/pi-calls.jsonl" ]; then
       [ "$mode" = "json" ] || continue
       transcript="$run_dir/pi-${call_id}.jsonl"
       [ -f "$transcript" ] || continue
-      # Extract usage from the last assistant message_end in the transcript.
-      tok="$(jq -s -c '[.[] | select(.type == "message_end") | select(.message.role == "assistant") | (.message.usage // {})] | last | {input:(.input//0),output:(.output//0),cache_read:(.cacheRead//0),cache_write:(.cacheWrite//0),total:(.totalTokens//0)}' "$transcript" 2>/dev/null)" || tok="null"
+      # Extract usage from EVERY assistant message_end in the transcript and
+      # sum, rather than taking only the last one. A review-loop pi call has
+      # multiple assistant turns (develop, review, fix); summing gives the
+      # true per-call token cost (review item 3). Per-model totals are
+      # included so the per-model token requirement holds for pi too.
+      tok="$(jq -s -c '
+        [.[] | select(.type == "message_end") | select(.message.role == "assistant")] as $msgs
+        | ([$msgs[].message.usage // {}]) as $usages
+        | ([$msgs[].message.model // "unknown"]) as $models
+        | (reduce range(0; $usages | length) as $i ({};
+            .[$models[$i]] = (
+              .[$models[$i]] // {input:0,output:0,cache_read:0,cache_write:0,total:0}
+              | .input += ($usages[$i].input // 0)
+              | .output += ($usages[$i].output // 0)
+              | .cache_read += ($usages[$i].cacheRead // 0)
+              | .cache_write += ($usages[$i].cacheWrite // 0)
+              | .total += ($usages[$i].totalTokens // 0)
+            ))
+          ) as $per_model
+        | {
+            input:      ([ $usages[].input // 0 ] | add // 0),
+            output:     ([ $usages[].output // 0 ] | add // 0),
+            cache_read: ([ $usages[].cacheRead // 0 ] | add // 0),
+            cache_write:([ $usages[].cacheWrite // 0 ] | add // 0),
+            total:      ([ $usages[].totalTokens // 0 ] | add // 0),
+            per_model:  $per_model
+          }' "$transcript" 2>/dev/null)" || tok="null"
       # Normalise: ensure tok is a valid JSON value.
       tok="$(printf '%s' "$tok" | jq -c . 2>/dev/null)" || tok="null"
       jq -cn --arg id "$call_id" --argjson tok "$tok" '{id:$id, tokens:$tok}' \
@@ -192,27 +232,44 @@ if [ -f "$run_dir/pi-calls.jsonl" ]; then
   rm -f "$tokens_map"
 fi
 
-# Wall clock: from setup_at to graded_at (both ISO-8601 UTC).
+# Wall clock: the run's own duration, from run-meta.json started_at to
+# ended_at (both ISO-8601 UTC, recorded by run-arm.sh around the claude
+# invocation). This is the run's wall time, excluding setup (review item 9:
+# the old code used setup_at → graded_at, which included setup and graded
+# after the fact, and started_at was written after claude exited — effectively
+# "ended_at"). Falls back to setup_at → graded_at if run-meta.json lacks
+# the new fields (e.g. a run produced by an older harness).
 wall_clock_ms="null"
-if [ -f "$setup_json" ] && [ -f "$grade_json" ]; then
+start_epoch=""
+end_epoch=""
+if [ -f "$meta_json" ]; then
+  start_at="$(jq -r '.started_at // empty' "$meta_json")"
+  end_at="$(jq -r '.ended_at // empty' "$meta_json")"
+  if [ -n "$start_at" ] && [ -n "$end_at" ]; then
+    if date -j -f "%Y-%m-%dT%H:%M:%SZ" "$start_at" >/dev/null 2>&1; then
+      start_epoch="$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$start_at" +%s)"
+      end_epoch="$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$end_at" +%s)"
+    elif date -d "$start_at" +%s >/dev/null 2>&1; then
+      start_epoch="$(date -d "$start_at" +%s)"
+      end_epoch="$(date -d "$end_at" +%s)"
+    fi
+  fi
+fi
+if [ -z "$start_epoch" ] && [ -f "$setup_json" ] && [ -f "$grade_json" ]; then
   setup_at="$(jq -r '.setup_at // empty' "$setup_json")"
   graded_at="$(jq -r '.graded_at // empty' "$grade_json")"
   if [ -n "$setup_at" ] && [ -n "$graded_at" ]; then
-    # Convert ISO-8601 to epoch seconds and compute the difference.
-    # date -j -f is BSD (macOS); date -d is GNU (Linux).
-    setup_epoch=""
-    graded_epoch=""
     if date -j -f "%Y-%m-%dT%H:%M:%SZ" "$setup_at" >/dev/null 2>&1; then
-      setup_epoch="$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$setup_at" +%s)"
-      graded_epoch="$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$graded_at" +%s)"
+      start_epoch="$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$setup_at" +%s)"
+      end_epoch="$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$graded_at" +%s)"
     elif date -d "$setup_at" +%s >/dev/null 2>&1; then
-      setup_epoch="$(date -d "$setup_at" +%s)"
-      graded_epoch="$(date -d "$graded_at" +%s)"
-    fi
-    if [ -n "$setup_epoch" ] && [ -n "$graded_epoch" ]; then
-      wall_clock_ms=$(( (graded_epoch - setup_epoch) * 1000 ))
+      start_epoch="$(date -d "$setup_at" +%s)"
+      end_epoch="$(date -d "$graded_at" +%s)"
     fi
   fi
+fi
+if [ -n "$start_epoch" ] && [ -n "$end_epoch" ]; then
+  wall_clock_ms=$(( (end_epoch - start_epoch) * 1000 ))
 fi
 
 # Build the final JSON line.

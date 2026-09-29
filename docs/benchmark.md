@@ -73,6 +73,15 @@ touches, `git apply` fails and the run is scored as a failure with
 `error: "git apply failed"` (documented edge case: test-editing is not
 verifiable).
 
+**Contamination note:** `grading.patch` is the *sole* location of the issue
+URLs and fix details for a task. It lives in the task dir (`bench/tasks/<id>/`),
+NOT in the run repo, and is only read by `grade.sh` at grading time — after
+the run has ended. The agent runs in the run repo (`<run-dir>/repo/`), which
+contains only the BASE commit and no reference to the task dir, so the
+grading patch is unreachable during the run. (The agent *can* list
+`$TASKS_DIR` in theory, but it has no reason to do so, and the task dir is
+outside the run repo's filesystem scope for the run.)
+
 ### Deselection note
 
 `tests/test_utils/test__expand_args.py::test_expand_args` is deselected

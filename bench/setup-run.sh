@@ -86,9 +86,17 @@ run_dir="$(arm_run_dir "$task_id" "$arm" "$run_num")"
 repo_dir="$run_dir/repo"
 
 # --- Remove any prior run directory (idempotent re-run) ---------------------
-if [ -e "$repo_dir" ]; then
-  echo "setup-run: $repo_dir exists — removing for a fresh fetch" >&2
-  rm -rf "$repo_dir"
+# A re-run must start with a CLEAN run dir: pi-calls.jsonl, the per-call
+# pi-*.jsonl transcripts, the claude/ output, run-meta.json, grade.json,
+# setup.json, and any apply-err/test-output logs all live in the run dir
+# (not in repo/, which is removed above). If we only removed repo/, the
+# second run's collect.sh would read the FIRST run's pi-calls.jsonl and
+# double-count tokens (review item 12). The run dir is disposable — it is
+# created by arm_run_dir above and every other file in it is a run artifact.
+if [ -d "$run_dir" ]; then
+  echo "setup-run: $run_dir exists — removing for a fresh run" >&2
+  rm -rf "$run_dir"
+  mkdir -p "$run_dir"
 fi
 
 # --- Fetch ONLY BASE_SHA (contamination guard) -------------------------------
@@ -157,6 +165,11 @@ secrets_found=""
 shown=0
 while IFS= read -r sf; do
   sf="${sf#"$repo_dir"/}"
+  # .env.example / .env.sample / .env.template are NOT secrets — they are
+  # template files with placeholder values, not real credential files.
+  # Skip them BEFORE appending to secrets_found (review item 8: the old
+  # code set secrets_found first, then checked the extension, so a repo
+  # with only .env.example was wrongly refused).
   case "$sf" in *.example|*.sample|*.template) continue ;; esac
   if [ -z "$secrets_found" ]; then secrets_found="$sf"; else secrets_found="$secrets_found, $sf"; fi
   shown=$((shown + 1))

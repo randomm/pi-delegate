@@ -65,6 +65,9 @@ patch_path="$task_dir/$GRADING_PATCH"
   echo "grade: grading patch not found at $patch_path" >&2
   exit 2
 }
+# Convert to an absolute path before cd-ing into the repo dir (the relative
+# path would no longer resolve after the cd). 
+patch_path="$(cd "$(dirname "$patch_path")" && pwd)/$(basename "$patch_path")"
 
 cd "$repo_dir"
 
@@ -76,6 +79,9 @@ apply_err="$run_dir/apply-err.log"
 if ! timeout 120 git apply --whitespace=nowarn "$patch_path" 2> "$apply_err"; then
   echo "grade: git apply failed (see $apply_err):" >&2
   cat "$apply_err" >&2
+  # The failure path must still record a grade.json (docs/benchmark.md
+  # §grading): a crashed grade that drops the record would let collect.sh
+  # emit a collect line with grade:null that passes validation.
   jq -cn \
     --arg task "$task_id" \
     --arg arm "$arm" \
@@ -86,7 +92,10 @@ if ! timeout 120 git apply --whitespace=nowarn "$patch_path" 2> "$apply_err"; th
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
       pass:false, error:$error, graded_at:$graded_at}' \
-    > "$run_dir/grade.json"
+    > "$run_dir/grade.json" || {
+      echo "grade: FATAL — could not write $run_dir/grade.json" >&2
+      exit 2
+    }
   exit 3
 fi
 
@@ -99,9 +108,6 @@ fi
 test_log="$run_dir/test-output.log"
 test_rc=0
 timeout 600 bash -c "$TEST_CMD" > "$test_log" 2>&1 || test_rc=$?
-if [ "$test_rc" -ne 0 ]; then
-  : # test failed — fall through to the FAIL branch
-fi
 
 # --- Record result -------------------------------------------------------------
 if [ "$test_rc" -eq 0 ]; then
@@ -116,7 +122,10 @@ if [ "$test_rc" -eq 0 ]; then
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
       test_log:$test_log, pass:true, error:null, graded_at:$graded_at}' \
-    > "$run_dir/grade.json"
+    > "$run_dir/grade.json" || {
+      echo "grade: FATAL — could not write $run_dir/grade.json" >&2
+      exit 2
+    }
   exit 0
 else
   echo "grade: FAIL  task=$task_id arm=$arm run=$run_num (exit $test_rc)" >&2
@@ -130,8 +139,11 @@ else
     --argjson test_rc "$test_rc" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
-      test_log:$test_log, pass:false, error:"test command exited $test_rc",
+      test_log:$test_log, test_rc:$test_rc, pass:false, error:"test command exited '"$test_rc"'",
       graded_at:$graded_at}' \
-    > "$run_dir/grade.json"
+    > "$run_dir/grade.json" || {
+      echo "grade: FATAL — could not write $run_dir/grade.json" >&2
+      exit 2
+    }
   exit 1
 fi

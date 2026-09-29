@@ -173,6 +173,10 @@ if [ -n "$TIMEOUT_CMD" ]; then
   wrap=("$TIMEOUT_CMD" --kill-after="$CLAUDE_KILL_AFTER" "$CLAUDE_TIMEOUT")
 fi
 
+# Wall clock: record run start just before invoking claude (the run's own
+# duration, excluding setup). run-meta.json gets started_at + ended_at.
+run_start_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 # --- Run claude ----------------------------------------------------------------
 # PATH is prefixed with the shim's bin dir so that Claude's Bash tool
 # resolves `pi` to the shim (the shim then execs the real pi).
@@ -207,10 +211,12 @@ jq -cn \
   --arg config_dir "$config_dir" \
   --arg prompt_file "$prompt_file" \
   --argjson claude_exit "$rc" \
-  --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg started_at "$run_start_at" \
+  --arg ended_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{task:$task, arm:$arm, run:$run, model:$model, perm_mode:$perm_mode,
     pi_delegate_sha:$pi_delegate_sha, config_dir:$config_dir,
-    prompt_file:$prompt_file, claude_exit:$claude_exit, started_at:$started_at}' \
+    prompt_file:$prompt_file, claude_exit:$claude_exit,
+    started_at:$started_at, ended_at:$ended_at}' \
   > "$run_dir/run-meta.json"
 
 if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then

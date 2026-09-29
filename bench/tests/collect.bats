@@ -110,7 +110,8 @@ teardown() {
   # pi array: one json-mode call with tokens, one text-mode call with null tokens.
   echo "$output" | jq -e '(.pi | length) == 2'            >/dev/null
   echo "$output" | jq -e '.pi[0].mode == "json"'          >/dev/null
-  echo "$output" | jq -e '.pi[0].tokens.total == 8350'    >/dev/null
+  # Tokens are SUMMED over all assistant turns (7250 + 8350 = 15600).
+  echo "$output" | jq -e '.pi[0].tokens.total == 15600'   >/dev/null
   echo "$output" | jq -e '.pi[1].mode == "text"'          >/dev/null
   echo "$output" | jq -e '.pi[1].tokens == null'          >/dev/null
 }
@@ -247,4 +248,292 @@ EOF
 @test "setup-run.sh: missing task → exit 1" {
   run bash "$BENCH_DIR/setup-run.sh" nonexistent-task A 1
   [ "$status" -ne 0 ]
+}
+
+# --- collect.sh: null-grade → failed line (review item 6) ----------------------
+
+@test "collect.sh: no grade.json → collect line marked failed" {
+  # A crashed run that was never graded must emit a collect line with
+  # grade.pass == false and a diagnostic error — NOT grade:null.
+  run_dir="$BENCH_OUT/issue-41-mech/A/10"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  # No grade.json — the run was never graded.
+  local task_dir="$TASKS_DIR/issue-41-mech"
+  mkdir -p "$task_dir"
+  cat > "$task_dir/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  [ -f "$task_dir/grading.patch" ] || cp /dev/null "$task_dir/grading.patch"
+
+  run bash "$BENCH_DIR/collect.sh" issue-41-mech A 10
+  [ "$status" -eq 0 ]
+  # grade must NOT be null; it must be an object with pass=false.
+  echo "$output" | jq -e '.grade != null' >/dev/null
+  echo "$output" | jq -e '.grade.pass == false' >/dev/null
+  echo "$output" | jq -e '.grade.error != null' >/dev/null
+}
+
+# --- collect.sh: token SUM over multiple message_end (review item 3) ------------
+
+@test "collect.sh: sums tokens over multiple assistant turns" {
+  run_dir="$BENCH_OUT/issue-41-mech/A/11"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # Two json-mode calls with multi-turn transcripts.
+  cat > "$run_dir/pi-calls.jsonl" <<'EOF'
+{"argv":["--mode","json"],"duration_ms":1000,"exit":0,"mode":"json","call_id":"100_1"}
+{"argv":["--mode","json"],"duration_ms":2000,"exit":0,"mode":"json","call_id":"100_2"}
+EOF
+  # Call 1: two assistant turns (develop + review), different models.
+  cat > "$run_dir/pi-100_1.jsonl" <<'EOF'
+{"type":"message_end","message":{"role":"assistant","usage":{"input":100,"output":50,"cacheRead":200,"cacheWrite":1000,"totalTokens":1350},"model":"model-a"}}
+{"type":"message_end","message":{"role":"assistant","usage":{"input":200,"output":100,"cacheRead":500,"cacheWrite":500,"totalTokens":1300},"model":"model-b"}}
+EOF
+  # Call 2: single assistant turn.
+  cat > "$run_dir/pi-100_2.jsonl" <<'EOF'
+{"type":"message_end","message":{"role":"assistant","usage":{"input":50,"output":25,"cacheRead":100,"cacheWrite":200,"totalTokens":375},"model":"model-a"}}
+EOF
+  local task_dir="$TASKS_DIR/issue-41-mech"
+  mkdir -p "$task_dir"
+  cat > "$task_dir/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  [ -f "$task_dir/grading.patch" ] || cp /dev/null "$task_dir/grading.patch"
+
+  run bash "$BENCH_DIR/collect.sh" issue-41-mech A 11
+  [ "$status" -eq 0 ]
+  # Call 1: tokens summed over both turns.
+  echo "$output" | jq -e '.pi[0].tokens.input == 300'   >/dev/null  # 100+200
+  echo "$output" | jq -e '.pi[0].tokens.output == 150'  >/dev/null  # 50+100
+  echo "$output" | jq -e '.pi[0].tokens.total == 2650'  >/dev/null  # 1350+1300
+  # Per-model breakdown present and correct (jq 1.5 needs bracket syntax for
+  # string keys with hyphens; use .["model-a"] form).
+  echo "$output" | jq -e '.pi[0].tokens.per_model["model-a"].input == 100' >/dev/null
+  echo "$output" | jq -e '.pi[0].tokens.per_model["model-b"].input == 200' >/dev/null
+  # Call 2: single turn, no summing needed.
+  echo "$output" | jq -e '.pi[1].tokens.input == 50'     >/dev/null
+  echo "$output" | jq -e '.pi[1].tokens.total == 375'    >/dev/null
+}
+
+# --- collect.sh: wall clock from run-meta started_at/ended_at (review item 9) ----
+
+@test "collect.sh: wall clock uses run-meta started_at/ended_at when present" {
+  run_dir="$BENCH_OUT/issue-41-mech/A/12"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # run-meta with started_at/ended_at 10 seconds apart.
+  cat > "$run_dir/run-meta.json" <<'EOF'
+{"task":"issue-41-mech","arm":"A","run":12,"model":"claude-sonnet-5-5",
+ "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
+ "claude_exit":0,"started_at":"2026-09-29T12:00:00Z","ended_at":"2026-09-29T12:00:10Z"}
+EOF
+  local task_dir="$TASKS_DIR/issue-41-mech"
+  mkdir -p "$task_dir"
+  cat > "$task_dir/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  [ -f "$task_dir/grading.patch" ] || cp /dev/null "$task_dir/grading.patch"
+
+  run bash "$BENCH_DIR/collect.sh" issue-41-mech A 12
+  [ "$status" -eq 0 ]
+  # 10 seconds = 10000 ms.
+  echo "$output" | jq -e '.wall_clock_ms == 10000' >/dev/null
+}
+
+# --- setup-run.sh: re-run clears prior run dir (review item 12) -------------------
+
+@test "setup-run.sh: re-run clears pi-calls.jsonl from prior run" {
+  local repo="$BENCH_OUT/$TASK_ID/A/2/repo"
+  # First run.
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 2
+  [ "$status" -eq 0 ]
+  # Simulate a pi call leftover in the run dir.
+  local run_dir="$BENCH_OUT/$TASK_ID/A/2"
+  echo '{"argv":["--mode","json"],"duration_ms":1,"exit":0,"mode":"json","call_id":"stale_1"}' > "$run_dir/pi-calls.jsonl"
+  echo 'stale' > "$run_dir/pi-stale_1.jsonl"
+  # Second run (re-run).
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 2
+  [ "$status" -eq 0 ]
+  # The stale pi-calls.jsonl must be gone (the run dir was cleared).
+  [ ! -f "$run_dir/pi-calls.jsonl" ]
+  [ ! -f "$run_dir/pi-stale_1.jsonl" ]
+}
+
+# --- setup-run.sh: .env.example does NOT trigger secret refusal (review item 8) ---
+
+@test "setup-run.sh: .env.example does not refuse" {
+  local secret_repo="$BENCH_OUT/env-example-repo"
+  git init -q -b main "$secret_repo"
+  cd "$secret_repo"
+  git config user.email t@t.t
+  git config user.name t
+  echo "SECRET=123" > .env.example
+  git add .env.example
+  git commit -qm "add env example"
+  local sha
+  sha="$(git rev-parse HEAD)"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$secret_repo
+BASE_SHA=$sha
+FIX_SHA=$sha
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 3
+  # .env.example is a template, not a secret — setup should succeed.
+  [ "$status" -eq 0 ]
+  cd /
+}
+
+# --- grade.sh: FAIL path writes grade.json with correct test_rc (review item 5) --
+
+@test "grade.sh: FAIL path writes grade.json with test_rc" {
+  local repo="$BENCH_OUT/$TASK_ID/A/4"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 4
+  [ "$status" -eq 0 ]
+  # Use a TEST_CMD that definitely fails (nonexistent binary → rc 127).
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD='/nonexistent_binary_xyz'
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 4
+  [ "$status" -eq 1 ]
+  # grade.json must exist and have pass=false with test_rc (127 for
+  # "command not found").
+  local grade_file="$BENCH_OUT/$TASK_ID/A/4/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == false' "$grade_file" >/dev/null
+  jq -e '.test_rc == 127' "$grade_file" >/dev/null
+}
+
+# --- grade.sh: PASS path writes grade.json (review item 5) ------------------------
+
+@test "grade.sh: PASS path writes grade.json with pass=true" {
+  local repo="$BENCH_OUT/$TASK_ID/A/5"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 5
+  [ "$status" -eq 0 ]
+  # Use a TEST_CMD that passes.
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 5
+  [ "$status" -eq 0 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/5/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == true' "$grade_file" >/dev/null
+}
+
+# --- grade.sh: git apply failure writes grade.json (review item 5) ----------------
+
+@test "grade.sh: git apply failure writes grade.json with error" {
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 6
+  [ "$status" -eq 0 ]
+  # Point GRADING_PATCH at a nonexistent file.
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=nonexistent.patch
+EOF
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 6
+  # Missing patch → exit 2 (setup error), not exit 3.
+  [ "$status" -eq 2 ]
+}
+
+# --- run-arm.sh: arm A does NOT get a pi shim (review item 7) -------------------
+
+@test "run-arm.sh: arm A does not install pi shim" {
+  # Set up a run dir for arm A.
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 7
+  [ "$status" -eq 0 ]
+  local run_dir="$BENCH_OUT/$TASK_ID/A/7"
+  # The bin dir should NOT exist (no shim installed for arm A).
+  [ ! -d "$run_dir/bin" ]
+}
+
+# --- run-arm.sh: arm B installs pi shim (review item 7) -------------------------
+
+@test "run-arm.sh: arm B installs pi shim" {
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" B 1
+  [ "$status" -eq 0 ]
+  local run_dir="$BENCH_OUT/$TASK_ID/B/1"
+  # Create a stub pi on PATH so the shim install succeeds.
+  local stub_dir="$BENCH_OUT/stub-bin"
+  mkdir -p "$stub_dir"
+  cat > "$stub_dir/pi" <<'EOF'
+#!/usr/bin/env bash
+echo "stub pi"
+exit 0
+EOF
+  chmod +x "$stub_dir/pi"
+  # Install the shim (arm B only).
+  PATH="$stub_dir:$PATH" bash -c "
+    source $BENCH_DIR/lib.sh
+    install_pi_shim '$run_dir'
+  "
+  [ $? -eq 0 ]
+  # The shim must exist.
+  [ -f "$run_dir/bin/pi" ]
+}
+
+# --- lib.sh: install_pi_shim generates a valid shim (review items 2, 11) -----------
+
+@test "lib.sh: install_pi_shim generates a valid shim with no baked-in literals" {
+  local run_dir="$BENCH_OUT/shim-test"
+  mkdir -p "$run_dir"
+  # Create a stub pi on PATH.
+  local stub_dir="$BENCH_OUT/stub-bin2"
+  mkdir -p "$stub_dir"
+  cat > "$stub_dir/pi" <<'EOF'
+#!/usr/bin/env bash
+echo "stub pi output"
+exit 0
+EOF
+  chmod +x "$stub_dir/pi"
+  # Install the shim.
+  PATH="$stub_dir:$PATH" bash -c "
+    source $BENCH_DIR/lib.sh
+    install_pi_shim '$run_dir'
+  "
+  [ $? -eq 0 ]
+  # The shim must exist and be executable.
+  [ -x "$run_dir/bin/pi" ]
+  # The shim must NOT contain the literal RUN_DIR from install time.
+  # (It should compute RUN_DIR at call time, not bake in the install-time value.)
+  local shim_content
+  shim_content="$(cat "$run_dir/bin/pi")"
+  # The shim should reference BASH_SOURCE, not a hardcoded path.
+  echo "$shim_content" | grep -q 'BASH_SOURCE' 
+  # The shim should NOT contain the install-time run_dir as a literal.
+  ! echo "$shim_content" | grep -q "RUN_DIR=\"$run_dir" 
+  # The shim should use $$ for the call tag (not a baked-in PID).
+  echo "$shim_content" | grep -q '\$\$' 
 }
