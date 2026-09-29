@@ -86,8 +86,12 @@ The pi invocation is wrapped in `timeout` the same way `orchestrate.sh`
 wraps its pi calls:
 
 ```bash
-timeout --kill-after="$PI_KILL_AFTER" "$PI_TIMEOUT" pi -p --no-session ...
+printf '%s' "$ARGUMENTS" | timeout --kill-after="$PI_KILL_AFTER" "$PI_TIMEOUT" pi -p --no-session --no-extensions --no-skills --no-prompt-templates
 ```
+
+(The prompt goes on stdin, the same transport `orchestrate.sh` uses — no
+argv size limit — and the timeout wrapper wraps pi only; the pipe feeds
+pi's stdin.)
 
 - `PI_TIMEOUT` — seconds allowed per pi invocation (default 1800).
 - `PI_KILL_AFTER` — seconds to wait after the `PI_TIMEOUT` SIGTERM before

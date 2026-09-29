@@ -89,8 +89,19 @@ skill_section() {
   grep -qF '${wrap[@]+"${wrap[@]}"}' "$SKILL_FILE"
 }
 
-@test "pi-oneshot SKILL.md documents the stdin transport via the same wrapper" {
-  grep -qF -- 'printf '"'"'%s'"'"' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p' "$SKILL_FILE"
+@test "pi-oneshot SKILL.md uses the single stdin transport (no positional variant)" {
+  local block
+  block=$(skill_section "## Invocation" | awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}')
+  printf '%s' "$block" | grep -qF -- 'printf '"'"'%s'"'"' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates'
+  # The old positional variant must not remain as live code.
+  ! printf '%s' "$block" | grep -qE '^\$\{wrap\[@\]\+.*"\$ARGUMENTS"$'
+}
+
+@test "pi-oneshot SKILL.md prints the missing-timeout warning as live code" {
+  local block
+  block=$(skill_section "## Invocation" | awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}')
+  printf '%s' "$block" | grep -qE '^if \[ -z "\$TIMEOUT_CMD" \]'
+  printf '%s' "$block" | grep -q 'WARNING: no GNU timeout/gtimeout found'
 }
 
 @test "pi-oneshot SKILL.md explains exit 124 (SIGTERM at PI_TIMEOUT) as timed out" {
@@ -119,13 +130,9 @@ skill_section() {
   local model_section
   model_section=$(skill_section "### Model")
   [[ -n "$model_section" ]]
-  {
-    printf '%s' "$model_section" | grep -qF '${wrap[@]+"${wrap[@]}"}'
-  } || {
-    # Fallback: the section explicitly states the wrapper applies to all
-    # variants.
-    grep -qEi 'wrapper applies|wrapped command|same wrapper' "$SKILL_FILE"
-  }
+  printf '%s' "$model_section" | grep -qF '${wrap[@]+"${wrap[@]}"}'
+  # Same single stdin transport in the Model variant.
+  printf '%s' "$model_section" | grep -qF -- 'printf '"'"'%s'"'"' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates --model'
 }
 
 @test "pi-oneshot SKILL.md invocation block passes bash -n and shellcheck" {

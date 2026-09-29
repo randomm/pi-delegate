@@ -1072,7 +1072,7 @@ model_block() {
   oneshot_block | grep -qF -- 'PI_KILL_AFTER:-30'
   oneshot_block | grep -qF 'unbounded'
   # unbounded path: no usable binary → unbounded call + stderr warning
-  oneshot_block | grep -qF -- 'warning: no usable timeout binary'
+  oneshot_block | grep -qF -- 'WARNING: no GNU timeout/gtimeout found'
   oneshot_block | grep -qF -- '>&2'
   # pi-oneshot SKILL.md documents the unbounded path (124/137 don't apply there)
   oneshot_skill_md | grep -q 'unbounded path'

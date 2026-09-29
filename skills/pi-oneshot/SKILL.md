@@ -44,8 +44,7 @@ wrapped in `timeout` exactly the way `orchestrate.sh` wraps its pi calls
 (`PI_TIMEOUT` default 1800 s, `PI_KILL_AFTER` default 30 s, `timeout`
 preferred with a `gtimeout` fallback, and a probe that treats a missing
 `--kill-after` flag as "no timeout binary at all"). Run this single block —
-it covers both prompt transports (positional argument and stdin) and both
-wrapper states (wrapped and unbounded) safely:
+it is complete and covers both wrapper states (wrapped and unbounded):
 
 ```bash
 # NOTE: the `--kill-after=1 1 true` probe is GNU-timeout-specific by design —
@@ -61,33 +60,30 @@ for cand in timeout gtimeout; do
   fi
 done
 
-# One wrapper array for every variant: empty when no usable timeout binary
-# exists, so "${wrap[@]+...}" expands to nothing (never to a bare --kill-after)
-# and is safe under `set -u` on bash 3.2 (where empty arrays trip -u).
+if [ -z "$TIMEOUT_CMD" ]; then
+  echo "WARNING: no GNU timeout/gtimeout found — pi runs without a time limit" >&2
+fi
+
+# One wrapper array for every invocation: empty when no usable timeout
+# binary exists. The "${wrap[@]+...}" guard keeps empty-array expansion safe
+# under `set -u` on old bash (where an unset/empty array trips -u), so the
+# call runs unbounded rather than failing or emitting a bare --kill-after.
 wrap=()
 if [ -n "$TIMEOUT_CMD" ]; then
   wrap=("$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}")
 fi
 
-# Short prompts (a sentence or two): positional argument.
-${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
-
-# Long prompts (more than a few hundred words): stdin transport, same wrapper.
-# printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates
-
-# Neither binary (or the probe failed): the wrapper is empty, so the call
-# runs unbounded at the script level — bounded only by Claude Code's Bash
-# tool timeout (below). Print a warning to stderr before the call:
-# echo "warning: no usable timeout binary found; pi call is unbounded at the script level" >&2
+# The prompt goes on stdin, exactly as orchestrate.sh passes its prompts to
+# pi: the wrapper wraps pi only (the pipe feeds pi's stdin, the timeout
+# command is never piped), and stdin has no argv size limit, so long task
+# descriptions cannot hit E2BIG (a single argv element is capped at 128 KiB
+# on Linux).
+printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates
 ```
 
 (`PI_TIMEOUT` and `PI_KILL_AFTER` must be positive integers when set —
 non-positive or non-numeric values make the wrapper fail or behave
 unpredictably.)
-
-The stdin variant keeps the wrapper around pi only (the pipe feeds pi's
-stdin; the timeout command is never piped) and avoids `E2BIG` on Linux
-where a single argv element is capped at 128 KiB (`MAX_ARG_STRLEN`).
 
 ### Timeout wrapper
 
@@ -148,13 +144,12 @@ The same wrapper wraps the **whole** command, model flag included — never
 append `--model` to an un-wrapped call:
 
 ```bash
-${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS" --model "MODEL"
+printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates --model "MODEL"
 ```
 
 - If the user explicitly named a model, append `--model <model>` to the
   **same wrapped invocation** shown above — the wrapper wraps the whole
-  command (… `"$PI_BIN" … "$ARGUMENTS" [--model X]`), so the
-  model-passthrough variant is bounded identically.
+  command, so the model-passthrough variant is bounded identically.
 - Otherwise omit `--model` entirely — pi falls back to its configured
   default.
 
