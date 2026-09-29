@@ -48,6 +48,8 @@ it covers both prompt transports (positional argument and stdin) and both
 wrapper states (wrapped and unbounded) safely:
 
 ```bash
+# NOTE: the `--kill-after=1 1 true` probe is GNU-timeout-specific by design —
+# non-GNU shims fail it and fall back to the unbounded path on purpose.
 # Discover the timeout binary and probe --kill-after support; if the probe
 # fails (e.g. an old macOS `timeout` without the flag) treat it as absent —
 # unbounded call + warning — mirroring orchestrate.sh.
@@ -60,17 +62,18 @@ for cand in timeout gtimeout; do
 done
 
 # One wrapper array for every variant: empty when no usable timeout binary
-# exists, so "${wrap[@]}" expands to nothing (never to a bare --kill-after).
+# exists, so "${wrap[@]+...}" expands to nothing (never to a bare --kill-after)
+# and is safe under `set -u` on bash 3.2 (where empty arrays trip -u).
 wrap=()
 if [ -n "$TIMEOUT_CMD" ]; then
   wrap=("$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}")
 fi
 
 # Short prompts (a sentence or two): positional argument.
-"${wrap[@]}" "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
+${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
 
 # Long prompts (more than a few hundred words): stdin transport, same wrapper.
-# printf '%s' "$ARGUMENTS" | "${wrap[@]}" "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates
+# printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates
 
 # Neither binary (or the probe failed): the wrapper is empty, so the call
 # runs unbounded at the script level — bounded only by Claude Code's Bash
@@ -145,7 +148,7 @@ The same wrapper wraps the **whole** command, model flag included — never
 append `--model` to an un-wrapped call:
 
 ```bash
-"${wrap[@]}" "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS" --model "MODEL"
+${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS" --model "MODEL"
 ```
 
 - If the user explicitly named a model, append `--model <model>` to the

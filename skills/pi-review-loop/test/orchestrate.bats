@@ -1068,8 +1068,7 @@ model_block() {
   # Single wrapper array: empty (no timeout binary) or timeout+flags,
   # applied to every variant including the stdin transport.
   oneshot_block | grep -qF 'wrap=()'
-  oneshot_block | grep -qF '"${wrap[@]}"'
-  oneshot_block | grep -qF -- '"${wrap[@]}" "$PI_BIN" -p --no-session'
+  oneshot_block | grep -qF -- '${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session'
   oneshot_block | grep -qF -- 'PI_KILL_AFTER:-30'
   oneshot_block | grep -qF 'unbounded'
   # unbounded path: no usable binary → unbounded call + stderr warning
@@ -1087,7 +1086,7 @@ model_block() {
 
 @test "doc: pi-oneshot Model variant keeps the timeout wrapper" {
   # The Model subsection's bash block must also carry the wrapper.
-  model_block | grep -qF -- '"${wrap[@]}"'
+  model_block | grep -qF -- '${wrap[@]+"${wrap[@]}"}'
   model_block | grep -qF -- '"$PI_BIN"'
   model_block | grep -qF -- '--model'
 }

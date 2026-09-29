@@ -86,11 +86,11 @@ skill_section() {
 
 @test "pi-oneshot SKILL.md uses a single wrap array for every invocation variant" {
   grep -qF 'wrap=()' "$SKILL_FILE"
-  grep -qF '"${wrap[@]}"' "$SKILL_FILE"
+  grep -qF '${wrap[@]+"${wrap[@]}"}' "$SKILL_FILE"
 }
 
 @test "pi-oneshot SKILL.md documents the stdin transport via the same wrapper" {
-  grep -qF -- 'printf '"'"'%s'"'"' "$ARGUMENTS" | "${wrap[@]}" "$PI_BIN" -p' "$SKILL_FILE"
+  grep -qF -- 'printf '"'"'%s'"'"' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p' "$SKILL_FILE"
 }
 
 @test "pi-oneshot SKILL.md explains exit 124 (SIGTERM at PI_TIMEOUT) as timed out" {
@@ -120,7 +120,7 @@ skill_section() {
   model_section=$(skill_section "### Model")
   [[ -n "$model_section" ]]
   {
-    printf '%s' "$model_section" | grep -qF '"${wrap[@]}"'
+    printf '%s' "$model_section" | grep -qF '${wrap[@]+"${wrap[@]}"}'
   } || {
     # Fallback: the section explicitly states the wrapper applies to all
     # variants.
