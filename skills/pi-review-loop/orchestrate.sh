@@ -190,11 +190,12 @@ if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
   fi
   export GIT_CONFIG_KEY_${_gc}=push.default GIT_CONFIG_VALUE_${_gc}=nothing
   _gc=$((_gc + 1))
-  # pushInsteadOf rewrites matching URL prefixes to the dead helper. Known
-  # limit: git does not rewrite bare relative local paths (e.g.
-  # `git push ../repo`) — they have no prefix for the matching, so that
-  # form cannot be blocked via config (an inherent git limitation).
-  for _p in https:// http:// ssh:// git:// file:// git@ /; do
+  # pushInsteadOf rewrites matching URL prefixes to the dead helper. The
+  # final entry has an EMPTY value, which matches every remaining URL
+  # (including bare relative local paths like `git push ../repo`, which
+  # have no prefix for the per-prefix entries above) — closing the last
+  # form a caller could use to bypass the dead helper.
+  for _p in https:// http:// ssh:// git:// file:// git@ / ""; do
     export GIT_CONFIG_KEY_${_gc}="url.pi-delegate-push-disabled://.pushInsteadOf" GIT_CONFIG_VALUE_${_gc}="${_p}"
     _gc=$((_gc + 1))
   done

@@ -1432,6 +1432,57 @@ model_block() {
   rm -rf "$(dirname "$remote")"
 }
 
+@test "safety: push neutralisation — bare relative local paths are blocked (empty pushInsteadOf)" {
+  # A bare relative local path (e.g. `git push ../origin.git HEAD`) has no
+  # prefix for the per-prefix pushInsteadOf entries, so the driver appends
+  # one empty-valued pushInsteadOf that matches every remaining URL. This
+  # regression test exercises the REAL driver: the mock pi's PUSH: directive
+  # runs inside an actual orchestrate.sh invocation and pushes to the bare
+  # remote via its RELATIVE path, which the empty rewrite must block.
+  local remote
+  remote="$(mktemp -d)/origin.git"
+  git init -q --bare "$remote"
+  git -C "$remote" config receive.denyCurrentBranch ignore
+  git remote add origin "$remote"
+  echo more >> a.txt
+  git add a.txt
+  git commit -qm "relative push test"
+  # The relative path to the bare remote from the repo root (the driver and
+  # mock pi both run with cwd at the repo root).
+  local rel
+  rel="$(python3 -c 'import os,sys;print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$remote" "$(git rev-parse --show-toplevel)")"
+  local push_log env_log
+  push_log="$(mktemp)"
+  env_log="$(mktemp)"
+  export MOCK_PI_PUSH_LOG="$push_log"
+  export MOCK_PI_ENV_LOG="$env_log"
+  # Fixture 1 (develop call): the PUSH: directive is whitespace-split by the
+  # mock pi, so the relative target (no spaces in this relpath) is passed
+  # verbatim as the push URL. The mock pi also dumps the driver's env so we
+  # can verify the empty catch-all entry is present. Fixture 2 (review):
+  # APPROVED to end the loop.
+  printf '%s\n' "PUSH:${rel} HEAD" > "$FIXTURES_DIR/1"
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+
+  # The driver's env must contain the pushInsteadOf entries (the empty
+  # catch-all entry appears in the env dump as a bare GIT_CONFIG_VALUE_n
+  # line, which is what the blocked push below proves end-to-end).
+  [ -s "$env_log" ]
+  grep -q 'pushInsteadOf' "$env_log"
+
+  # The relative-path push must have failed (non-zero exit code), and the
+  # bare remote must never have received a ref.
+  [ -s "$push_log" ]
+  local p_rc
+  p_rc="$(head -n 1 "$push_log" | tr -d ' ')"
+  [ -n "$p_rc" ] && [ "$p_rc" -ne 0 ]
+  [ "$(git -C "$remote" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ]
+  rm -f "$push_log" "$env_log"
+  rm -rf "$(dirname "$remote")"
+}
+
 @test "safety: preflight appends to a pre-existing GIT_CONFIG_COUNT (no clobber)" {
   # A caller (or git itself) may have exported GIT_CONFIG_COUNT/KEY_n/VALUE_n;
   # the preflight must continue the indexing from the existing count instead
@@ -1469,10 +1520,12 @@ model_block() {
   grep -q '^GIT_CONFIG_KEY_1=user.email$' "$env_log"
   grep -q '^GIT_CONFIG_VALUE_1=t@t$' "$env_log"
   # The driver's entries start at index 2 and the count reflects the append
-  # (>= 11: 2 caller + 1 push.default + 7 prefixes + 1 remote pushurl = 11).
+  # (>= 12: 2 caller + 1 push.default + 8 pushInsteadOf entries (7 prefixes
+  # + 1 empty catch-all for bare relative local paths) + 1 remote pushurl
+  # = 12).
   grep -q '^GIT_CONFIG_KEY_2=push.default$' "$env_log"
   grep -q '^GIT_CONFIG_VALUE_2=nothing$' "$env_log"
-  grep -q '^GIT_CONFIG_COUNT=11$' "$env_log"
+  grep -q '^GIT_CONFIG_COUNT=12$' "$env_log"
   grep -q 'remote.origin.pushurl' "$env_log"
   # The push must have failed.
   [ -s "$push_log" ]
