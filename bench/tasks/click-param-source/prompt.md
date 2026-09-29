@@ -42,7 +42,6 @@ and Linux).
 
 Fix this issue.
 
-Work in the current repository (checked out at the parent of the
-historical fix). Make the change the fix made, in the same spirit and
-scope. Do not add new dependencies, do not reformat unrelated code. Do
-not commit — leave your changes in the working tree.
+Work in the current repository. Implement the change the issue describes,
+in the same spirit and scope. Do not add new dependencies, do not reformat
+unrelated code. Do not commit — leave your changes in the working tree.

@@ -11,10 +11,14 @@
 #   - Claude CLI and pi CLI on PATH (pi is found by the shim)
 #
 # Environment:
-#   BENCH_OUT        Output root (default /tmp/pi-bench)
-#   CLAUDE_MODEL     Claude model id (default: sonnet alias → claude-sonnet-5-5)
+#   BENCH_OUT        Output root (default /tmp/pi-bench; must be absolute)
+#   CLAUDE_MODEL     Claude model id (default: the literal id claude-sonnet-5-5)
 #   CLAUDE_PERM_MODE Permission mode (default: auto)
-#   PI_DELEGATE_SHA  Pinned pi-delegate commit to measure (default: be98114)
+#   PI_DELEGATE_REPO pi-delegate source for the arm-B pin (default:
+#                    https://github.com/randomm/pi-delegate.git; a local
+#                    repo path also works). NEVER the task REPO.
+#   PI_DELEGATE_SHA  Pinned pi-delegate commit to measure (default: the
+#                    remote's default-branch HEAD at the first pin)
 #   CLAUDE_TIMEOUT   Claude wall-clock seconds (default: 10800)
 #   CLAUDE_KILL_AFTER  Kill-after grace (default: 60)
 #   BENCH_CLAUDE_TIMEOUT  Same as CLAUDE_TIMEOUT (alias)
@@ -25,30 +29,43 @@
 # whether the pi-delegate plugin is installed into the per-run config dir):
 #   1. Load task.env, resolve the run directory.
 #   2. Create a per-run CLAUDE_CONFIG_DIR (isolation: no shared plugin state).
-#   3. (Arm B only) Clone the pinned pi-delegate commit into $BENCH_OUT/pin/
-#      and seed the marketplace catalog + install the plugin.
-#   4. Install the pi shim into <run-dir>/bin (arm B only; arm A does not
-#      delegate, but the shim is installed anyway so that an accidental pi
-#      call by arm A is still logged — it will fail preflight and exit 3,
-#      which is the expected and correct behaviour).
+#   3. (Arm B only) Clone the pinned pi-delegate commit into
+#      $BENCH_OUT/pin/pi-delegate-<sha> (keyed by SHA only, shared by all
+#      runs and all arms) and seed the marketplace catalog + install the
+#      plugin. A plugin install failure ABORTS the run (exit 2): a run
+#      without the plugin while the prompt asserts it is installed is
+#      unmeasurable.
+#   4. Install the pi shim into <run-dir>/bin (both arms: the shim logs any
+#      accidental pi call in arm A as well).
 #   5. Build the prompt: prompt.md + (arm B) delegation suffix.
 #   6. Run: claude -p <prompt> --output-format json --model <model>
 #          --permission-mode <mode>
 #      with the run's CLAUDE_CONFIG_DIR and PATH prefixed with the shim.
+#      agent_ms (ms-resolution, run-arm start → claude exit) is recorded in
+#      run-meta.json alongside claude's own duration_ms.
 #   7. Save claude's raw JSON output to <run-dir>/claude/output.json.
 #
 # Exit codes:
 #   0  claude exited 0 (the run may still be a fail — grade.sh decides)
 #   1  claude exited non-zero (see <run-dir>/claude/output.json)
-#   2  setup/precondition error (missing task, missing clone, missing claude)
+#   2  setup/precondition error (missing task, missing clone, missing claude,
+#      pi-delegate pin or plugin install failure)
 #   3  claude timed out (exit 124 or 137 from the timeout wrapper)
 #
 # The script does NOT grade the run; use bench/grade.sh after.
+#
+# NOTE: a non-zero claude exit still records run-meta.json before exiting —
+# failed runs are always recorded (docs/benchmark.md §failed-runs).
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+
+bench_out_guard || exit 2
+
+# Safe-execution env (docs/benchmark.md §safe-execution).
+export GIT_TERMINAL_PROMPT=0 EDITOR=true VISUAL=true PAGER=cat GIT_PAGER=cat
 
 usage() {
   echo "Usage: $0 <task-id> <arm> <run#>" >&2
@@ -77,35 +94,67 @@ command -v claude >/dev/null 2>&1 || {
 }
 
 # --- Resolve config and model ------------------------------------------------
-CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}"
+# The model is pinned to the literal id (not the "sonnet" alias) so runs are
+# reproducible and claude's JSON reports usage against the exact id.
+CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-5-5}"
 CLAUDE_PERM_MODE="${CLAUDE_PERM_MODE:-auto}"
-PI_DELEGATE_SHA="${PI_DELEGATE_SHA:-be98114}"
+# The pi-delegate pin comes from the pi-delegate repo itself (PI_DELEGATE_REPO),
+# never from the task REPO.
+PI_DELEGATE_REPO="${PI_DELEGATE_REPO:-https://github.com/randomm/pi-delegate.git}"
+PI_DELEGATE_SHA="${PI_DELEGATE_SHA:-}"
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-${BENCH_CLAUDE_TIMEOUT:-10800}}"
 CLAUDE_KILL_AFTER="${CLAUDE_KILL_AFTER:-60}"
 
 config_dir="$(claude_config_dir "$run_dir")"
 
 # --- Arm B: pin pi-delegate and install the plugin -----------------------------
-# The pinned commit is cloned once per run into $BENCH_OUT/pin/ (shared across
-# runs of the same pin, but not shared across arms to avoid cross-contamination
-# — each arm has its own config dir and its own plugin install).
+# The pinned commit is cloned once per SHA into
+# $BENCH_OUT/pin/pi-delegate-<sha> — keyed by SHA only and shared by all
+# runs and all arms (same source commit → same tree). If PI_DELEGATE_SHA is
+# unset, it is resolved once to the source's default-branch HEAD at the
+# first pin and recorded in run-meta.json.
 if [ "$arm" = "B" ]; then
-  pin_dir="$BENCH_OUT/pin/pi-delegate-${PI_DELEGATE_SHA:0:8}-${arm}"
+  pin_dir="$BENCH_OUT/pin/pi-delegate-$PI_DELEGATE_SHA"
+  if [ -z "$PI_DELEGATE_SHA" ]; then
+    # Resolve the SHA once from the source (default branch HEAD).
+    PI_DELEGATE_SHA="$(timeout 60 git ls-remote "$PI_DELEGATE_REPO" HEAD 2>/dev/null | awk '{print $1}')" || PI_DELEGATE_SHA=""
+    [ -n "$PI_DELEGATE_SHA" ] || {
+      echo "run-arm: cannot resolve PI_DELEGATE_SHA from $PI_DELEGATE_REPO (set PI_DELEGATE_SHA explicitly)" >&2
+      exit 2
+    }
+    pin_dir="$BENCH_OUT/pin/pi-delegate-$PI_DELEGATE_SHA"
+  fi
   if [ ! -d "$pin_dir" ]; then
     echo "run-arm: cloning pi-delegate at $PI_DELEGATE_SHA → $pin_dir" >&2
-    mkdir -p "$(dirname "$pin_dir")"
-    if ! git clone -q "$REPO" "$pin_dir" 2>"$run_dir/pin-clone-err.log"; then
+    mkdir -p "$BENCH_OUT/pin"
+    if ! timeout 300 git clone -q "$PI_DELEGATE_REPO" "$pin_dir" 2>"$run_dir/pin-clone-err.log"; then
       echo "run-arm: pi-delegate pin clone failed; see $run_dir/pin-clone-err.log" >&2
       exit 2
     fi
   fi
-  if ! git -C "$pin_dir" checkout -q "$PI_DELEGATE_SHA"; then
-    echo "run-arm: failed to checkout pinned pi-delegate commit $PI_DELEGATE_SHA" >&2
+  # Verify the pin: HEAD must equal PI_DELEGATE_SHA and the plugin
+  # marketplace manifest must exist (a bare commit without the skill is
+  # not a usable pin). For local sources the clone already shares objects;
+  # for remote sources fetch the pinned commit first.
+  if [ ! -d "$pin_dir/.git" ] || [ -z "$(timeout 30 git -C "$pin_dir" rev-parse --verify -q "^{commit}" 2>/dev/null)" ] || [ "$(timeout 30 git -C "$pin_dir" rev-parse HEAD 2>/dev/null)" != "$PI_DELEGATE_SHA" ]; then
+    if timeout 300 git -C "$pin_dir" fetch -q "$PI_DELEGATE_REPO" "$PI_DELEGATE_SHA" 2>>"$run_dir/pin-clone-err.log" \
+      && timeout 30 git -C "$pin_dir" checkout -q "$PI_DELEGATE_SHA"; then
+      : # fetched + checked out
+    fi
+  fi
+  if [ "$(timeout 30 git -C "$pin_dir" rev-parse HEAD)" != "$PI_DELEGATE_SHA" ]; then
+    echo "run-arm: pi-delegate pin verification failed: HEAD != $PI_DELEGATE_SHA" >&2
     exit 2
   fi
+  if [ ! -f "$pin_dir/.claude-plugin/marketplace.json" ]; then
+    echo "run-arm: pi-delegate pin is missing .claude-plugin/marketplace.json at $PI_DELEGATE_SHA" >&2
+    exit 2
+  fi
+  # Install the plugin; a failure ABORTS arm B (the prompt asserts the
+  # plugin is installed; a run without it is unmeasurable).
   if ! install_pi_delegate_plugin "$config_dir" "$pin_dir"; then
-    echo "run-arm: WARNING — pi-delegate plugin install failed; arm B will run" >&2
-    echo "run-arm:          without the plugin (delegation prompt still applies)." >&2
+    echo "run-arm: ABORT — pi-delegate plugin install failed (arm B is unmeasurable without the plugin)" >&2
+    exit 2
   fi
 fi
 
@@ -136,25 +185,17 @@ if [ "$arm" = "B" ]; then
 
 **Delegation instruction (benchmark arm B):**
 
-You have the `pi-delegate` plugin installed, which provides two skills:
-- `pi-review-loop` — a deterministic bash review loop that delegates a
-  code-change task to the `pi` CLI (cheaper model), then reviews the diff
-  and iterates (develop → review → fix, with hard caps).
-- `pi-oneshot` — a single `pi -p` invocation for a self-contained task.
+You have the `pi-delegate` plugin installed, which provides the
+`pi-review-loop` skill: a deterministic bash review loop that delegates a
+code-change task to the `pi` CLI, then reviews the diff and iterates
+(develop → review → fix, with hard caps).
 
-For this task, you MUST delegate the implementation work to pi using the
-`pi-review-loop` skill (the prompt above is the task description). You
-( Claude Code) are responsible for:
-  1. Verifying the task is a code change suitable for the review loop.
-  2. Invoking the `pi-review-loop` skill with the task description.
-  3. After the loop completes, verifying the result by running the test
-     command from the task (if present) and confirming the working tree
-     has the expected changes.
-  4. Reporting the final state (tests pass/fail, what changed).
-
-Do NOT implement the code change yourself. Delegate it to pi via
-`pi-review-loop`. You may read files to understand the task, but the
-actual edit work must go through the skill.
+You MUST delegate the implementation work to pi via the `pi-review-loop`
+skill, passing the task description above as the task. Do NOT implement
+the code change yourself — the actual edit work must go through the skill.
+After the loop completes, verify the result by running the task's test
+command (if any) and report the final state (tests pass/fail, what
+changed).
 DELEGSUFFIX
 fi
 
@@ -173,19 +214,26 @@ if [ -n "$TIMEOUT_CMD" ]; then
   wrap=("$TIMEOUT_CMD" --kill-after="$CLAUDE_KILL_AFTER" "$CLAUDE_TIMEOUT")
 fi
 
-# Wall clock: record run start just before invoking claude (the run's own
-# duration, excluding setup). run-meta.json gets started_at + ended_at.
-run_start_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
 # --- Run claude ----------------------------------------------------------------
+# agent_ms: millisecond-resolution wall time from just before the claude
+# invocation to just after it exits (run-arm start → claude exit). It is
+# recorded alongside claude's own duration_ms in run-meta.json; docs say
+# the COMPARISON METRIC is claude.duration_ms (agent_ms is the harness
+# side's figure and includes prompt/stdin setup and wrapper overhead).
+agent_start_ms="$(now_ms)"
+
 # PATH is prefixed with the shim's bin dir so that Claude's Bash tool
 # resolves `pi` to the shim (the shim then execs the real pi).
 # CLAUDE_CONFIG_DIR isolates this run's plugin/config state.
 #
 # The prompt is passed on stdin to avoid argv size limits (E2BIG) for
 # long prompts.
+#
+# A non-zero claude exit must NOT abort the script before run-meta.json is
+# written: failed runs are always recorded (docs/benchmark.md §failed-runs).
 claude_out="$run_dir/claude"
 mkdir -p "$claude_out"
+rc=0
 PATH="$run_dir/bin:$PATH" \
 CLAUDE_CONFIG_DIR="$config_dir" \
 PI_SHIM_LOG="$run_dir/pi-calls.jsonl" \
@@ -195,12 +243,19 @@ PI_SHIM_LOG="$run_dir/pi-calls.jsonl" \
     --model "$CLAUDE_MODEL" \
     --permission-mode "$CLAUDE_PERM_MODE" \
     < "$prompt_file" \
-  > "$claude_out/output.json" 2> "$claude_out/stderr.log"
-rc=$?
+  > "$claude_out/output.json" 2> "$claude_out/stderr.log" || rc=$?
+agent_end_ms="$(now_ms)"
+if [ -n "${agent_start_ms:-}" ] && [ -n "${agent_end_ms:-}" ]; then
+  agent_ms=$(( agent_end_ms - agent_start_ms ))
+else
+  agent_ms=0
+fi
 
 # --- Record run metadata --------------------------------------------------------
 # (claude's own JSON is in claude/output.json; this is the harness-side
-#  record of how the run was invoked.)
+#  record of how the run was invoked.) Written on every path — including
+#  non-zero claude exit (a null grade must never pass validation, so a
+#  failed run must still exist to be collected with grade.pass=false).
 jq -cn \
   --arg task "$task_id" \
   --arg arm "$arm" \
@@ -211,11 +266,12 @@ jq -cn \
   --arg config_dir "$config_dir" \
   --arg prompt_file "$prompt_file" \
   --argjson claude_exit "$rc" \
-  --arg started_at "$run_start_at" \
+  --argjson agent_ms "$agent_ms" \
+  --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg ended_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{task:$task, arm:$arm, run:$run, model:$model, perm_mode:$perm_mode,
     pi_delegate_sha:$pi_delegate_sha, config_dir:$config_dir,
-    prompt_file:$prompt_file, claude_exit:$claude_exit,
+    prompt_file:$prompt_file, claude_exit:$claude_exit, agent_ms:$agent_ms,
     started_at:$started_at, ended_at:$ended_at}' \
   > "$run_dir/run-meta.json"
 

@@ -45,6 +45,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
+bench_out_guard || exit 1
+
 usage() {
   echo "Usage: $0 <task-id> <arm> <run#> [output.jsonl]" >&2
   exit 1
@@ -139,6 +141,11 @@ claude_metrics="$(jq -c '
   }
 ' "$claude_json")"
 
+# Claude's resolved model(s) from modelUsage (claude may fall back to a
+# different model than the --model id; model_usage keys are the resolved
+# ids; the first entry is the primary).
+claude_models_json="$(jq -c '[(.modelUsage // {}) | keys[]]' "$claude_json")"
+
 # Parse pi calls.
 # pi-calls.jsonl: one JSON object per pi invocation (argv, duration_ms,
 # exit, mode, call_id).
@@ -155,6 +162,16 @@ claude_metrics="$(jq -c '
 # Build the pi array. If no pi-calls.jsonl, the array is empty.
 pi_calls_json="[]"
 if [ -f "$run_dir/pi-calls.jsonl" ]; then
+  # Refuse malformed / duplicate lines in pi-calls.jsonl (a duplicate
+  # task/arm/run line would double-count tokens in the report).
+  if ! jq -e -s 'length == (unique_by([.call_id // null, .mode // null]) | length)' "$run_dir/pi-calls.jsonl" >/dev/null 2>&1; then
+    echo "collect: pi-calls.jsonl contains duplicate call entries (call_id + mode); refusing" >&2
+    exit 2
+  fi
+  if ! jq -e -s 'all(.[]; (.call_id | type) == "string" and (.mode | type) == "string" and (.exit | type) == "number")' "$run_dir/pi-calls.jsonl" >/dev/null 2>&1; then
+    echo "collect: pi-calls.jsonl contains a malformed line (bad call_id/mode/exit); refusing" >&2
+    exit 2
+  fi
   # Process each line of pi-calls.jsonl. Accumulate a jq array by parsing
   # the whole file at once (one JSON array input) instead of concatenating
   # per-line strings (which breaks when a call spans multiple lines after
@@ -282,6 +299,7 @@ final_json="$(jq -cn \
   --arg pi_delegate_commit "$pi_delegate_sha" \
   --arg target_commit "$target_commit" \
   --argjson claude "$claude_metrics" \
+  --argjson claude_models "$claude_models_json" \
   --argjson pi "$pi_calls_json" \
   --argjson grade "$grade_obj" \
   --argjson wall_clock_ms "$wall_clock_ms" \
@@ -293,47 +311,52 @@ final_json="$(jq -cn \
     permission_mode: (if $permission_mode == "null" then null else $permission_mode end),
     pi_delegate_commit: (if $pi_delegate_commit == "null" then null else $pi_delegate_commit end),
     target_commit: (if $target_commit == "null" then null else $target_commit end),
-    claude: $claude,
+    claude: ($claude + {resolved_models: $claude_models}),
     pi: $pi,
     grade: $grade,
     wall_clock_ms: $wall_clock_ms
   }')"
 
-# --- Validation ----------------------------------------------------------------
+# --- Validation (a single jq program) -----------------------------------------
+# One jq program checks the whole line and prints "ok" or a violation
+# message (exit 0 either way); a non-"ok" result (or a jq failure) means
+# the line must not be emitted. (docs: §metrics — null grade must never
+# pass validation; numeric types for pi[].duration_ms and tokens.* when
+# non-null.)
+validation_out="$(printf '%s' "$final_json" | jq -r '
+  def check:
+    if .task == null or .arm == null or .run == null
+       or ((.task | type) != "string") or ((.arm | type) != "string")
+       or ((.run | type) != "number")
+    then "missing required field (task/arm/run)"
+    elif .grade == null
+    then "grade is null (a null grade must never pass validation)"
+    elif (.grade.pass | type) != "boolean"
+    then "grade.pass is not a boolean"
+    elif .claude.duration_ms != null and (.claude.duration_ms | type) != "number"
+    then "claude.duration_ms is not numeric or null"
+    elif .claude.cost_usd != null and (.claude.cost_usd | type) != "number"
+    then "claude.cost_usd is not numeric or null"
+    elif (.pi | map(select(. != null and .duration_ms != null))
+             | map(.duration_ms | type) | any(. != "number"))
+    then "pi[].duration_ms is not numeric or null"
+    elif (.pi | map(.tokens) | map(select(. != null))
+             | any( (.input | type) != "number"
+                 or (.output | type) != "number"
+                 or (.cache_read | type) != "number"
+                 or (.cache_write | type) != "number"
+                 or (.total | type) != "number" ))
+    then "pi[].tokens.* is not numeric"
+    else null
+    end;
+  check | if . == null then "ok" else . end
+' 2>/dev/null)" || validation_out=""
+
 validate_err=""
-
-# Required fields must be present (model and target_commit are nullable —
-# they may be missing when run-meta.json / setup.json were not written).
-for field in task arm run grade; do
-  val="$(printf '%s' "$final_json" | jq -r --arg f "$field" '.[$f] // empty' 2>/dev/null || true)"
-  if [ -z "$val" ]; then
-    validate_err="missing required field: $field"
-    break
-  fi
-done
-
-if [ -z "$validate_err" ]; then
-  # grade.pass must be a boolean (or null if grade is null).
-  grade_pass_type="$(printf '%s' "$final_json" | jq -r '(.grade // null) | if . == null then "null" elif (.pass | type) == "boolean" then "ok" else "bad" end' 2>/dev/null || echo "bad")"
-  if [ "$grade_pass_type" = "bad" ]; then
-    validate_err="grade.pass is not a boolean"
-  fi
-fi
-
-# claude.duration_ms must be numeric or null.
-if [ -z "$validate_err" ]; then
-  dur_type="$(printf '%s' "$final_json" | jq -r '.claude.duration_ms | if . == null then "null" elif (type == "number") then "num" else "bad" end' 2>/dev/null || echo "bad")"
-  if [ "$dur_type" = "bad" ]; then
-    validate_err="claude.duration_ms is not numeric or null"
-  fi
-fi
-
-# claude.cost_usd must be numeric or null.
-if [ -z "$validate_err" ]; then
-  cost_type="$(printf '%s' "$final_json" | jq -r '.claude.cost_usd | if . == null then "null" elif (type == "number") then "num" else "bad" end' 2>/dev/null || echo "bad")"
-  if [ "$cost_type" = "bad" ]; then
-    validate_err="claude.cost_usd is not numeric or null"
-  fi
+if [ -z "$validation_out" ]; then
+  validate_err="collect line failed jq validation (unparseable)"
+elif [ "$validation_out" != "ok" ]; then
+  validate_err="$validation_out"
 fi
 
 if [ -n "$validate_err" ]; then

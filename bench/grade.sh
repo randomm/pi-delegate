@@ -31,6 +31,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
+bench_out_guard || exit 2
+
 # Safe-execution env (docs/benchmark.md §safe-execution).
 export GIT_TERMINAL_PROMPT=0 EDITOR=true VISUAL=true PAGER=cat GIT_PAGER=cat
 
@@ -58,6 +60,12 @@ task_dir="$(task_dir "$task_id")"
 }
 [ -n "${GRADING_PATCH:-}" ] || {
   echo "grade: task '$task_id' has no GRADING_PATCH in task.env" >&2
+  exit 2
+}
+# The grading patch path must stay inside the task dir: no leading '/'
+# (absolute) and no '..' components (path traversal out of the task dir).
+validate_grading_patch "$GRADING_PATCH" || {
+  echo "grade: task '$task_id' has an unsafe GRADING_PATCH: $GRADING_PATCH" >&2
   exit 2
 }
 patch_path="$task_dir/$GRADING_PATCH"

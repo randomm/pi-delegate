@@ -9,8 +9,10 @@
 #
 # Environment:
 #   BENCH_OUT   Output root (default: /tmp/pi-bench). Must be OUTSIDE any
-#               git repo — the fetched tree is disposable and all run
-#               captures (pi logs, claude json, etc.) land here.
+#               git repo, and must be a non-empty ABSOLUTE path (the BENCH_OUT
+#               guard refuses anything else; guard_rm_rf refuses any rm -rf
+#               target outside $BENCH_OUT). The fetched tree is disposable
+#               and all run captures (pi logs, claude json, etc.) land here.
 #
 # Output layout:
 #   $BENCH_OUT/<task>/<arm>/<run>/
@@ -51,6 +53,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
+bench_out_guard || exit 1
+
 # Safe-execution env (docs/benchmark.md §safe-execution): no credential
 # prompts, no editor (would hang with no TTY), no pager.
 export GIT_TERMINAL_PROMPT=0 EDITOR=true VISUAL=true PAGER=cat GIT_PAGER=cat
@@ -81,6 +85,9 @@ fi
 require_task_fields "$task_id" || exit 1
 # After require_task_fields, REPO, BASE_SHA, FIX_COMMIT (or FIX_SHA),
 # TEST_CMD are set. SETUP_CMD is optional (not required for the harness).
+# GRADING_PATCH, when present, must be a safe relative path (grade.sh also
+# validates it; validate early here for symmetry).
+validate_grading_patch "${GRADING_PATCH:-}" || exit 1
 
 run_dir="$(arm_run_dir "$task_id" "$arm" "$run_num")"
 repo_dir="$run_dir/repo"
@@ -95,7 +102,7 @@ repo_dir="$run_dir/repo"
 # created by arm_run_dir above and every other file in it is a run artifact.
 if [ -d "$run_dir" ]; then
   echo "setup-run: $run_dir exists — removing for a fresh run" >&2
-  rm -rf "$run_dir"
+  guard_rm_rf "$run_dir" || exit 2
   mkdir -p "$run_dir"
 fi
 
@@ -144,9 +151,6 @@ fi
 # push.default=nothing: `git push` with no args pushes nothing. No remote
 # is configured, so `git push <remote>` has nothing to reach anyway.
 git -C "$repo_dir" config push.default nothing
-# Belt and braces: explicit dead pushurl (no remote exists, but the config
-# key is harmless and satisfies any push-URL inspection).
-git -C "$repo_dir" config remote.origin.pushurl pi-delegate-push-disabled://dead
 
 # --- Secret-file scan ---------------------------------------------------------
 # Mirrors the safety preflight: refuse if .env, .env.*, *.pem, or *.key

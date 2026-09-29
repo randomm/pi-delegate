@@ -52,10 +52,13 @@ bench/tasks/<id>/
 
 ### task.env fields
 
+`task.env` is **sourced** by the harness (KEY=VALUE shell file) and must be
+**operator-authored** — anything in it executes in the harness's shell.
+
 | Field | Purpose |
 |---|---|
 | `REPO` | `https://github.com/randomm/click.git` (all tasks) |
-| `BASE_SHA` | Full 40-char SHA of the base commit (parent of the historical fix) |
+| `BASE_SHA` | Full 40-char SHA of the base commit (the commit the agent starts from) |
 | `FIX_SHA` | Full 40-char SHA of the historical fix (used only for grading patch extraction, not exposed to the agent) |
 | `SETUP_CMD` | Shell command run in the repo dir to create the venv and install deps |
 | `TEST_CMD` | Shell command run in the repo dir to execute the grading tests + full suite |
@@ -139,9 +142,8 @@ fetch, the script:
    reachable). Fails with exit 2 if more leaked in.
 2. Removes any remaining remote (`git remote remove origin`) so the agent
    cannot re-fetch.
-3. Sets `push.default=nothing` so `git push` with no args pushes nothing.
-4. Sets `remote.origin.pushurl=pi-delegate-push-disabled://dead` as
-   belt-and-braces (no remote exists, but the config key is harmless).
+3. Sets `push.default=nothing` so `git push` with no args pushes nothing
+   (no remote exists, so there is nothing to push to in any case).
 
 ### BATS verification
 
@@ -176,7 +178,8 @@ bench/collect.sh    <task> <arm> <run>  # one JSON line per run, jq-validated
   (**outside any repo**, **contamination guard** — no refs, no tags, no
   other commits).
 - Creates branch `bench/<arm>/<run>`.
-- Disables push: `push.default=nothing` + dead pushurl.
+- Disables push: `push.default=nothing` (no remote is configured, so
+  there is nothing to push to).
 - Runs `SETUP_CMD` (creates venv, installs deps) in the repo dir.
 - Secret-file scan (`.env`, `.env.*`, `*.pem`, `*.key`) — refuses (exit 3)
   if any are present (mirrors the pi-oneshot safety preflight).
@@ -185,9 +188,14 @@ bench/collect.sh    <task> <arm> <run>  # one JSON line per run, jq-validated
 ### run-arm.sh
 
 - Creates a per-run `CLAUDE_CONFIG_DIR` (isolation).
-- Arm B only: clones the pinned pi-delegate commit (`PI_DELEGATE_SHA`, default
-  `be98114`) and seeds the marketplace catalog + installs the plugin into the
-  config dir.
+- Arm B only: clones the pinned pi-delegate commit (`PI_DELEGATE_SHA`,
+  resolved from `PI_DELEGATE_REPO`, default
+  `https://github.com/randomm/pi-delegate.git`) into
+  `$BENCH_OUT/pin/pi-delegate-<sha>` (keyed by SHA only, shared by all runs
+  and arms), verifies `git rev-parse HEAD == PI_DELEGATE_SHA` and the
+  presence of `.claude-plugin/marketplace.json`, then seeds the marketplace
+  catalog + installs the plugin into the config dir. A plugin install
+  failure ABORTS arm B (exit 2).
 - Installs the **pi shim** (`<run-dir>/bin/pi`) and prepends `<run-dir>/bin`
   to `PATH` for the claude invocation.
 - Builds the prompt (task body + arm-B delegation suffix).
@@ -243,13 +251,14 @@ A `pi` wrapper at `<run-dir>/bin/pi`, prepended to `PATH`, that:
   "task": "click-sentinel-pickle", "arm": "B", "run": 1,
   "model": "claude-sonnet-5-5",
   "permission_mode": "auto",
-  "pi_delegate_commit": "be98114…",
+  "pi_delegate_commit": "<pinned sha>",
   "target_commit": "3cbcf9b…",
   "claude": {
     "cost_usd": 0.42, "duration_ms": 42000,
     "permission_denials": [ … ], "is_error": false,
     "model_usage": { "<model>": { "input_tokens": …, "output_tokens": …,
-      "cache_read": …, "cache_creation": …, "cost_usd": … } }
+      "cache_read": …, "cache_creation": …, "cost_usd": … } },
+    "resolved_models": [ "…" ]
   },
   "pi": [
     { "argv": [ … ], "duration_ms": 5000, "exit": 0, "mode": "json",
@@ -263,10 +272,13 @@ A `pi` wrapper at `<run-dir>/bin/pi`, prepended to `PATH`, that:
 }
 ```
 
-`collect.sh` **validates with jq** before emitting: required fields present
-(`task`, `arm`, `run`, `grade`), `grade.pass` boolean, `claude.duration_ms` /
-`claude.cost_usd` numeric-or-null. A malformed run fails loudly (exit 2)
-instead of polluting the report.
+`collect.sh` **validates with a single jq program** before emitting:
+required fields present (`task`, `arm`, `run`, `grade`), a **null grade
+never passes validation**, `grade.pass` boolean, `claude.duration_ms` /
+`claude.cost_usd` numeric-or-null, and `pi[].duration_ms` and `pi[].tokens.*`
+numeric when non-null. A malformed run fails loudly (exit 2) instead of
+polluting the report. Duplicate `task`/`arm`/`run` lines (i.e. duplicate
+pi-call entries in `pi-calls.jsonl`) are refused.
 
 ### Cost basis
 
@@ -307,7 +319,9 @@ bench/collect.sh    click-sentinel-pickle A 1
 # Full matrix: loop task × arm × run over the task list above.
 ```
 
-Environment overrides: `BENCH_OUT`, `CLAUDE_MODEL`, `CLAUDE_PERM_MODE`,
+Environment overrides: `BENCH_OUT`, `CLAUDE_MODEL` (default: the literal
+id `claude-sonnet-5-5`), `CLAUDE_PERM_MODE`, `PI_DELEGATE_REPO` (default:
+`https://github.com/randomm/pi-delegate.git`; a local repo path also works),
 `PI_DELEGATE_SHA`, `CLAUDE_TIMEOUT`, `PI_TIMEOUT`, `PI_KILL_AFTER`.
 
 ## How to read results
@@ -317,8 +331,12 @@ Environment overrides: `BENCH_OUT`, `CLAUDE_MODEL`, `CLAUDE_PERM_MODE`,
 - **Claude cost**: `claude.cost_usd` + `claude.model_usage` (tokens per model).
 - **pi cost**: `pi[].tokens` per call; sum per arm and apply the stated cost
   basis before comparing to arm A.
-- **Wall clock**: `claude.duration_ms` (claude API time) and `wall_clock_ms`
-  (setup→grade, whole run).
+- **Wall clock**: `claude.duration_ms` (claude API time — the **comparison
+  metric** between arms) and `wall_clock_ms` (harness-side run time).
+  `run-meta.json` also records `agent_ms` (harness-side start→claude-exit,
+  ms resolution), `setup_ms` and `grade_ms` are recorded separately by the
+  setup/grade scripts, and `claude.duration_ms` is claude's own figure.
+  Use `claude.duration_ms` for the arm-to-arm comparison.
 - **Intervention proxy**: `claude.permission_denials` under the fixed
   `auto` permission mode.
 - **Arm B internals**: `pi[]` call list (loop verdict/rounds are in the

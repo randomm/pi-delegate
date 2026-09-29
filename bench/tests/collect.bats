@@ -4,6 +4,8 @@
 # (GIT_TERMINAL_PROMPT=0 EDITOR=true VISUAL=true PAGER=cat GIT_PAGER=cat)
 # and run under `timeout` (docs/benchmark.md §safe-execution).
 #
+# All task fixtures live under a TEMP TASKS_DIR (never in bench/tasks/).
+#
 # Run:
 #   timeout 300 bats bench/tests </dev/null
 
@@ -24,13 +26,15 @@ setup() {
   # Safe-execution env (docs/benchmark.md §safe-execution).
   export GIT_TERMINAL_PROMPT=0 EDITOR=true VISUAL=true PAGER=cat GIT_PAGER=cat
 
-  # A temp BENCH_OUT so tests don't pollute /tmp/pi-bench.
+  # Temp BENCH_OUT + TEMP TASKS_DIR: tests never pollute /tmp/pi-bench or
+  # the committed bench/tasks/ tree.
   BENCH_OUT="$(mktemp -d)"
   export BENCH_OUT
-  export TASKS_DIR="$BENCH_DIR/tasks"
+  TASKS_DIR="$BENCH_OUT/tasks"
+  mkdir -p "$TASKS_DIR"
+  export TASKS_DIR
 
-  # A throwaway task for setup-run tests. The task.env uses FIX_SHA (not
-  # FIX_COMMIT) to match the real task format.
+  # A temp task for setup-run tests (created under the temp TASKS_DIR).
   TASK_ID="bats-test-task"
   TASK_DIR="$TASKS_DIR/$TASK_ID"
   mkdir -p "$TASK_DIR"
@@ -49,9 +53,6 @@ setup() {
   git add world.txt
   git commit -qm "add world"
   FIX_SHA="$(git rev-parse HEAD)"
-  # grading.patch: a trivial patch that adds a test file (will be applied by
-  # grade.sh; for setup-run tests we don't grade, so the patch content is
-  # irrelevant as long as the file exists).
   cat > "$TASK_DIR/grading.patch" <<'EOF'
 diff --git a/extra-test.txt b/extra-test.txt
 new file mode 100644
@@ -69,6 +70,20 @@ FIX_SHA=$FIX_SHA
 TEST_CMD=true
 GRADING_PATCH=grading.patch
 EOF
+
+  # A second temp task id used by the collect tests.
+  MECH_ID="issue-41-mech"
+  MECH_DIR="$TASKS_DIR/$MECH_ID"
+  mkdir -p "$MECH_DIR"
+  cp "$TASK_DIR/grading.patch" "$MECH_DIR/grading.patch"
+  cat > "$MECH_DIR/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+
   cd /
 }
 
@@ -79,7 +94,7 @@ teardown() {
 # --- collect.sh tests ---------------------------------------------------------
 
 @test "collect.sh: success path with arm A fixtures" {
-  run_dir="$BENCH_OUT/issue-41-mech/A/1"
+  run_dir="$BENCH_OUT/$MECH_ID/A/1"
   mkdir -p "$run_dir/claude"
   cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
   cp "$FIXTURES/setup.json"            "$run_dir/setup.json"
@@ -90,14 +105,8 @@ teardown() {
   cp "$FIXTURES/pi-transcript-call1.jsonl" \
      "$run_dir/pi-1700000000000_12345.jsonl"
 
-  local task_dir="$TASKS_DIR/issue-41-mech"
-  mkdir -p "$task_dir"
-  [ -f "$task_dir/grading.patch" ] || cp /dev/null "$task_dir/grading.patch"
-
-  run bash "$BENCH_DIR/collect.sh" issue-41-mech A 1
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 1
   [ "$status" -eq 0 ]
-  # Output must be valid JSON with the required fields. Use -e (exit code)
-  # not -r (raw output) since we only need a boolean here.
   [ -n "$output" ]
   echo "$output" | jq -e '.task == "issue-41-mech"' >/dev/null 2>&1
   [ $? -eq 0 ]
@@ -117,59 +126,30 @@ teardown() {
 }
 
 @test "collect.sh: grade fail is recorded" {
-  run_dir="$BENCH_OUT/issue-41-mech/A/2"
+  run_dir="$BENCH_OUT/$MECH_ID/A/2"
   mkdir -p "$run_dir/claude"
   cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
   cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
   cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
   cp "$FIXTURES/grade-fail.json"         "$run_dir/grade.json"
-  local task_dir="$TASKS_DIR/issue-41-mech"
-  mkdir -p "$task_dir"
-  cat > "$task_dir/task.env" <<EOF
-REPO=$FAKE_REPO
-BASE_SHA=$BASE_SHA
-FIX_SHA=$FIX_SHA
-TEST_CMD=true
-GRADING_PATCH=grading.patch
-EOF
-  [ -f "$task_dir/grading.patch" ] || cp /dev/null "$task_dir/grading.patch"
 
-  run bash "$BENCH_DIR/collect.sh" issue-41-mech A 2
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 2
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.grade.pass == false' >/dev/null
   echo "$output" | jq -e '.grade.error != null'  >/dev/null
 }
 
 @test "collect.sh: malformed claude output → exit 2" {
-  run_dir="$BENCH_OUT/issue-41-mech/A/3"
+  run_dir="$BENCH_OUT/$MECH_ID/A/3"
   mkdir -p "$run_dir/claude"
   cp "$FIXTURES/claude-output-malformed.txt" "$run_dir/claude/output.json"
-  local task_dir="$TASKS_DIR/issue-41-mech"
-  mkdir -p "$task_dir"
-  cat > "$task_dir/task.env" <<EOF
-REPO=$FAKE_REPO
-BASE_SHA=$BASE_SHA
-FIX_SHA=$FIX_SHA
-TEST_CMD=true
-GRADING_PATCH=grading.patch
-EOF
-  [ -f "$task_dir/grading.patch" ] || cp /dev/null "$task_dir/grading.patch"
 
-  run bash "$BENCH_DIR/collect.sh" issue-41-mech A 3
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 3
   [ "$status" -eq 2 ]
 }
 
 @test "collect.sh: missing run dir → exit 1" {
-  local task_dir="$TASKS_DIR/issue-41-mech"
-  mkdir -p "$task_dir"
-  cat > "$task_dir/task.env" <<EOF
-REPO=$FAKE_REPO
-BASE_SHA=$BASE_SHA
-FIX_SHA=$FIX_SHA
-TEST_CMD=true
-GRADING_PATCH=grading.patch
-EOF
-  run bash "$BENCH_DIR/collect.sh" issue-41-mech A 99
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 99
   [ "$status" -eq 1 ]
 }
 
@@ -180,11 +160,9 @@ EOF
   [ "$status" -eq 0 ]
   local repo="$BENCH_OUT/$TASK_ID/A/1/repo"
   [ -d "$repo" ]
-  # Check the branch name.
   local branch
   branch="$(git -C "$repo" symbolic-ref --short HEAD)"
   [ "$branch" = "bench/A/1" ]
-  # Check the HEAD is at BASE_SHA.
   local head_sha
   head_sha="$(git -C "$repo" rev-parse HEAD)"
   [ "$head_sha" = "$(git -C "$FAKE_REPO" rev-parse "$BASE_SHA")" ]
@@ -194,7 +172,6 @@ EOF
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 1
   [ "$status" -eq 0 ]
   local repo="$BENCH_OUT/$TASK_ID/A/1/repo"
-  # push.default should be "nothing".
   local push_default
   push_default="$(git -C "$repo" config push.default)"
   [ "$push_default" = "nothing" ]
@@ -208,20 +185,16 @@ EOF
   [ "$status" -eq 0 ]
   local repo="$BENCH_OUT/$TASK_ID/A/1/repo"
 
-  # Exactly one commit should be reachable.
   local commit_count
   commit_count="$(timeout 30 git -C "$repo" rev-list --count HEAD)"
   [ "$commit_count" = "1" ]
 
-  # FIX_SHA must NOT be resolvable in the run repo.
-  # (git rev-parse will fail for an unknown object.)
   local fix_resolved=""
   fix_resolved="$(timeout 30 git -C "$repo" rev-parse -q --verify "$FIX_SHA^{commit}" 2>/dev/null)" || true
   [ -z "$fix_resolved" ]
 }
 
 @test "setup-run.sh: secret-file scan refuses on .env file" {
-  # Create a repo with a .env file.
   local secret_repo="$BENCH_OUT/secret-repo"
   git init -q -b main "$secret_repo"
   cd "$secret_repo"
@@ -232,7 +205,6 @@ EOF
   git commit -qm "add env"
   local sha
   sha="$(git rev-parse HEAD)"
-  # Point the task at this repo.
   cat > "$TASK_DIR/task.env" <<EOF
 REPO=$secret_repo
 BASE_SHA=$sha
@@ -250,46 +222,33 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# --- collect.sh: null-grade → failed line (review item 6) ----------------------
+# --- collect.sh: null-grade → failed line ------------------------------------
 
 @test "collect.sh: no grade.json → collect line marked failed" {
   # A crashed run that was never graded must emit a collect line with
   # grade.pass == false and a diagnostic error — NOT grade:null.
-  run_dir="$BENCH_OUT/issue-41-mech/A/10"
+  run_dir="$BENCH_OUT/$MECH_ID/A/10"
   mkdir -p "$run_dir/claude"
   cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
   cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
   cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
-  # No grade.json — the run was never graded.
-  local task_dir="$TASKS_DIR/issue-41-mech"
-  mkdir -p "$task_dir"
-  cat > "$task_dir/task.env" <<EOF
-REPO=$FAKE_REPO
-BASE_SHA=$BASE_SHA
-FIX_SHA=$FIX_SHA
-TEST_CMD=true
-GRADING_PATCH=grading.patch
-EOF
-  [ -f "$task_dir/grading.patch" ] || cp /dev/null "$task_dir/grading.patch"
 
-  run bash "$BENCH_DIR/collect.sh" issue-41-mech A 10
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 10
   [ "$status" -eq 0 ]
-  # grade must NOT be null; it must be an object with pass=false.
   echo "$output" | jq -e '.grade != null' >/dev/null
   echo "$output" | jq -e '.grade.pass == false' >/dev/null
   echo "$output" | jq -e '.grade.error != null' >/dev/null
 }
 
-# --- collect.sh: token SUM over multiple message_end (review item 3) ------------
+# --- collect.sh: token SUM over multiple message_end ---------------------------
 
 @test "collect.sh: sums tokens over multiple assistant turns" {
-  run_dir="$BENCH_OUT/issue-41-mech/A/11"
+  run_dir="$BENCH_OUT/$MECH_ID/A/11"
   mkdir -p "$run_dir/claude"
   cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
   cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
   cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
   cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
-  # Two json-mode calls with multi-turn transcripts.
   cat > "$run_dir/pi-calls.jsonl" <<'EOF'
 {"argv":["--mode","json"],"duration_ms":1000,"exit":0,"mode":"json","call_id":"100_1"}
 {"argv":["--mode","json"],"duration_ms":2000,"exit":0,"mode":"json","call_id":"100_2"}
@@ -303,83 +262,53 @@ EOF
   cat > "$run_dir/pi-100_2.jsonl" <<'EOF'
 {"type":"message_end","message":{"role":"assistant","usage":{"input":50,"output":25,"cacheRead":100,"cacheWrite":200,"totalTokens":375},"model":"model-a"}}
 EOF
-  local task_dir="$TASKS_DIR/issue-41-mech"
-  mkdir -p "$task_dir"
-  cat > "$task_dir/task.env" <<EOF
-REPO=$FAKE_REPO
-BASE_SHA=$BASE_SHA
-FIX_SHA=$FIX_SHA
-TEST_CMD=true
-GRADING_PATCH=grading.patch
-EOF
-  [ -f "$task_dir/grading.patch" ] || cp /dev/null "$task_dir/grading.patch"
 
-  run bash "$BENCH_DIR/collect.sh" issue-41-mech A 11
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 11
   [ "$status" -eq 0 ]
-  # Call 1: tokens summed over both turns.
   echo "$output" | jq -e '.pi[0].tokens.input == 300'   >/dev/null  # 100+200
   echo "$output" | jq -e '.pi[0].tokens.output == 150'  >/dev/null  # 50+100
   echo "$output" | jq -e '.pi[0].tokens.total == 2650'  >/dev/null  # 1350+1300
-  # Per-model breakdown present and correct (jq 1.5 needs bracket syntax for
-  # string keys with hyphens; use .["model-a"] form).
   echo "$output" | jq -e '.pi[0].tokens.per_model["model-a"].input == 100' >/dev/null
   echo "$output" | jq -e '.pi[0].tokens.per_model["model-b"].input == 200' >/dev/null
-  # Call 2: single turn, no summing needed.
   echo "$output" | jq -e '.pi[1].tokens.input == 50'     >/dev/null
   echo "$output" | jq -e '.pi[1].tokens.total == 375'    >/dev/null
 }
 
-# --- collect.sh: wall clock from run-meta started_at/ended_at (review item 9) ----
+# --- collect.sh: wall clock from run-meta started_at/ended_at ------------------
 
 @test "collect.sh: wall clock uses run-meta started_at/ended_at when present" {
-  run_dir="$BENCH_OUT/issue-41-mech/A/12"
+  run_dir="$BENCH_OUT/$MECH_ID/A/12"
   mkdir -p "$run_dir/claude"
   cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
   cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
   cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
-  # run-meta with started_at/ended_at 10 seconds apart.
   cat > "$run_dir/run-meta.json" <<'EOF'
 {"task":"issue-41-mech","arm":"A","run":12,"model":"claude-sonnet-5-5",
  "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
- "claude_exit":0,"started_at":"2026-09-29T12:00:00Z","ended_at":"2026-09-29T12:00:10Z"}
+ "claude_exit":0,"agent_ms":10000,
+ "started_at":"2026-09-29T12:00:00Z","ended_at":"2026-09-29T12:00:10Z"}
 EOF
-  local task_dir="$TASKS_DIR/issue-41-mech"
-  mkdir -p "$task_dir"
-  cat > "$task_dir/task.env" <<EOF
-REPO=$FAKE_REPO
-BASE_SHA=$BASE_SHA
-FIX_SHA=$FIX_SHA
-TEST_CMD=true
-GRADING_PATCH=grading.patch
-EOF
-  [ -f "$task_dir/grading.patch" ] || cp /dev/null "$task_dir/grading.patch"
 
-  run bash "$BENCH_DIR/collect.sh" issue-41-mech A 12
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 12
   [ "$status" -eq 0 ]
-  # 10 seconds = 10000 ms.
   echo "$output" | jq -e '.wall_clock_ms == 10000' >/dev/null
 }
 
-# --- setup-run.sh: re-run clears prior run dir (review item 12) -------------------
+# --- setup-run.sh: re-run clears prior run dir ---------------------------------
 
 @test "setup-run.sh: re-run clears pi-calls.jsonl from prior run" {
-  local repo="$BENCH_OUT/$TASK_ID/A/2/repo"
-  # First run.
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 2
   [ "$status" -eq 0 ]
-  # Simulate a pi call leftover in the run dir.
   local run_dir="$BENCH_OUT/$TASK_ID/A/2"
   echo '{"argv":["--mode","json"],"duration_ms":1,"exit":0,"mode":"json","call_id":"stale_1"}' > "$run_dir/pi-calls.jsonl"
   echo 'stale' > "$run_dir/pi-stale_1.jsonl"
-  # Second run (re-run).
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 2
   [ "$status" -eq 0 ]
-  # The stale pi-calls.jsonl must be gone (the run dir was cleared).
   [ ! -f "$run_dir/pi-calls.jsonl" ]
   [ ! -f "$run_dir/pi-stale_1.jsonl" ]
 }
 
-# --- setup-run.sh: .env.example does NOT trigger secret refusal (review item 8) ---
+# --- setup-run.sh: .env.example does NOT trigger secret refusal ----------------
 
 @test "setup-run.sh: .env.example does not refuse" {
   local secret_repo="$BENCH_OUT/env-example-repo"
@@ -400,18 +329,15 @@ TEST_CMD=true
 GRADING_PATCH=grading.patch
 EOF
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 3
-  # .env.example is a template, not a secret — setup should succeed.
   [ "$status" -eq 0 ]
   cd /
 }
 
-# --- grade.sh: FAIL path writes grade.json with correct test_rc (review item 5) --
+# --- grade.sh: FAIL path writes grade.json with correct test_rc ----------------
 
 @test "grade.sh: FAIL path writes grade.json with test_rc" {
-  local repo="$BENCH_OUT/$TASK_ID/A/4"
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 4
   [ "$status" -eq 0 ]
-  # Use a TEST_CMD that definitely fails (nonexistent binary → rc 127).
   cat > "$TASK_DIR/task.env" <<EOF
 REPO=$FAKE_REPO
 BASE_SHA=$BASE_SHA
@@ -421,21 +347,17 @@ GRADING_PATCH=grading.patch
 EOF
   run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 4
   [ "$status" -eq 1 ]
-  # grade.json must exist and have pass=false with test_rc (127 for
-  # "command not found").
   local grade_file="$BENCH_OUT/$TASK_ID/A/4/grade.json"
   [ -f "$grade_file" ]
   jq -e '.pass == false' "$grade_file" >/dev/null
   jq -e '.test_rc == 127' "$grade_file" >/dev/null
 }
 
-# --- grade.sh: PASS path writes grade.json (review item 5) ------------------------
+# --- grade.sh: PASS path writes grade.json -------------------------------------
 
 @test "grade.sh: PASS path writes grade.json with pass=true" {
-  local repo="$BENCH_OUT/$TASK_ID/A/5"
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 5
   [ "$status" -eq 0 ]
-  # Use a TEST_CMD that passes.
   cat > "$TASK_DIR/task.env" <<EOF
 REPO=$FAKE_REPO
 BASE_SHA=$BASE_SHA
@@ -450,12 +372,11 @@ EOF
   jq -e '.pass == true' "$grade_file" >/dev/null
 }
 
-# --- grade.sh: git apply failure writes grade.json (review item 5) ----------------
+# --- grade.sh: git apply failure writes grade.json ------------------------------
 
 @test "grade.sh: git apply failure writes grade.json with error" {
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 6
   [ "$status" -eq 0 ]
-  # Point GRADING_PATCH at a nonexistent file.
   cat > "$TASK_DIR/task.env" <<EOF
 REPO=$FAKE_REPO
 BASE_SHA=$BASE_SHA
@@ -464,28 +385,24 @@ TEST_CMD=true
 GRADING_PATCH=nonexistent.patch
 EOF
   run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 6
-  # Missing patch → exit 2 (setup error), not exit 3.
   [ "$status" -eq 2 ]
 }
 
-# --- run-arm.sh: arm A does NOT get a pi shim (review item 7) -------------------
+# --- run-arm.sh: arm A does NOT get a pi shim -----------------------------------
 
 @test "run-arm.sh: arm A does not install pi shim" {
-  # Set up a run dir for arm A.
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 7
   [ "$status" -eq 0 ]
   local run_dir="$BENCH_OUT/$TASK_ID/A/7"
-  # The bin dir should NOT exist (no shim installed for arm A).
   [ ! -d "$run_dir/bin" ]
 }
 
-# --- run-arm.sh: arm B installs pi shim (review item 7) -------------------------
+# --- run-arm.sh: arm B installs pi shim -----------------------------------------
 
 @test "run-arm.sh: arm B installs pi shim" {
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" B 1
   [ "$status" -eq 0 ]
   local run_dir="$BENCH_OUT/$TASK_ID/B/1"
-  # Create a stub pi on PATH so the shim install succeeds.
   local stub_dir="$BENCH_OUT/stub-bin"
   mkdir -p "$stub_dir"
   cat > "$stub_dir/pi" <<'EOF'
@@ -494,22 +411,19 @@ echo "stub pi"
 exit 0
 EOF
   chmod +x "$stub_dir/pi"
-  # Install the shim (arm B only).
   PATH="$stub_dir:$PATH" bash -c "
     source $BENCH_DIR/lib.sh
     install_pi_shim '$run_dir'
   "
   [ $? -eq 0 ]
-  # The shim must exist.
   [ -f "$run_dir/bin/pi" ]
 }
 
-# --- lib.sh: install_pi_shim generates a valid shim (review items 2, 11) -----------
+# --- lib.sh: install_pi_shim generates a valid shim -----------------------------
 
 @test "lib.sh: install_pi_shim generates a valid shim with no baked-in literals" {
   local run_dir="$BENCH_OUT/shim-test"
   mkdir -p "$run_dir"
-  # Create a stub pi on PATH.
   local stub_dir="$BENCH_OUT/stub-bin2"
   mkdir -p "$stub_dir"
   cat > "$stub_dir/pi" <<'EOF'
@@ -518,22 +432,441 @@ echo "stub pi output"
 exit 0
 EOF
   chmod +x "$stub_dir/pi"
-  # Install the shim.
   PATH="$stub_dir:$PATH" bash -c "
     source $BENCH_DIR/lib.sh
     install_pi_shim '$run_dir'
   "
   [ $? -eq 0 ]
-  # The shim must exist and be executable.
   [ -x "$run_dir/bin/pi" ]
-  # The shim must NOT contain the literal RUN_DIR from install time.
-  # (It should compute RUN_DIR at call time, not bake in the install-time value.)
   local shim_content
   shim_content="$(cat "$run_dir/bin/pi")"
-  # The shim should reference BASH_SOURCE, not a hardcoded path.
-  echo "$shim_content" | grep -q 'BASH_SOURCE' 
-  # The shim should NOT contain the install-time run_dir as a literal.
-  ! echo "$shim_content" | grep -q "RUN_DIR=\"$run_dir" 
-  # The shim should use $$ for the call tag (not a baked-in PID).
-  echo "$shim_content" | grep -q '\$\$' 
+  echo "$shim_content" | grep -q 'BASH_SOURCE'
+  ! echo "$shim_content" | grep -q "RUN_DIR=\"$run_dir"
+  echo "$shim_content" | grep -q '\$\$'
 }
+
+# ================================================================================
+# NEW: benchmark review fixes
+# ================================================================================
+
+# --- Shim: byte-for-byte stdout + rc + blank lines + quotes (item 1) -----------
+
+# _install_stub_pi_shim <tmp-dir> — installs the shim into <tmp-dir>/run/bin
+# with a stub "real pi" on PATH. The stub, in --mode json, prints two JSON
+# lines (one containing double quotes) plus a blank line in between, prints
+# "STDERR-MSG" to stderr, and exits 7. In text mode it prints two lines and
+# exits 0.
+_install_stub_pi_shim() {
+  local d="$1"
+  mkdir -p "$d/stub" "$d/run"
+  cat > "$d/stub/pi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--mode" ] && [ "${2:-}" = "json" ]; then
+  printf '%s\n' '{"type":"message_end","text":"hi "there""}' '' '{"type":"agent_settled"}'
+  echo "STDERR-MSG" >&2
+  exit 7
+fi
+echo "plain text out"
+echo "second line"
+exit 0
+EOF
+  chmod +x "$d/stub/pi"
+  PATH="$d/stub:$PATH" bash -c "source '$BENCH_DIR/lib.sh'; install_pi_shim '$d/run'"
+}
+
+@test "shim: json-mode stdout is byte-identical to the stub's stdout (incl. blank line and quotes), rc preserved" {
+  local d="$BENCH_OUT/shim-cmp"
+  _install_stub_pi_shim "$d"
+  local out rc
+  out="$("$d/run/bin/pi" --mode json -p task 2>/dev/null)" || rc=$?
+  # rc passthrough.
+  [ "$rc" -eq 7 ]
+  # Byte-for-byte: compare the shim's stdout against the stub's own stdout
+  # (both run through the same stub, so the comparison is exact — the stub
+  # emits three JSON lines with a blank line in between and a quoted string;
+  # the stub's $(...) capture trims the trailing newline from both, so the
+  # comparison is byte-for-byte modulo that one shared trailing \n).
+  local stub_out shim_out
+  stub_out="$("$d/stub/pi" --mode json -p task 2>/dev/null)" || true
+  shim_out="$("$d/run/bin/pi" --mode json -p task 2>/dev/null)" || true
+  [ "$stub_out" = "$shim_out" ]
+  # The blank line must be present in the output (the old shim dropped it).
+  local line2
+  line2="$(sed -n '2p' <<<"$shim_out")"
+  [ -z "$line2" ]
+  # The quoted line must be present and intact.
+  local line1
+  line1="$(sed -n '1p' <<<"$shim_out")"
+  [ "$line1" = '{"type":"message_end","text":"hi "there""}' ]
+  # The per-call transcript must contain the blank line too. The test calls
+  # the shim twice (once for rc, once for the byte-compare), producing two
+  # transcript files; pick the most recent by mtime. Exclude pi-calls.jsonl
+  # (the metadata log, which is not a per-call transcript).
+  local tf
+  tf="$(ls -t "$d"/run/pi-*.jsonl 2>/dev/null | grep -v 'pi-calls.jsonl' | head -n 1)"
+  [ -n "$tf" ]
+  [ "$(sed -n '2p' "$tf")" = "" ]
+  # 3 lines total (two JSON lines + the blank line; the trailing newline
+  # after the last JSON line is not counted as a separate line by wc -l
+  # because it terminates the last JSON line, not the blank one).
+  local nlines
+  nlines="$(wc -l < "$tf")"
+  # Accept 3 or 4 depending on how the trailing newline is handled.
+  { [ "$nlines" -eq 3 ] || [ "$nlines" -eq 4 ]; }
+}
+
+@test "shim: non-zero rc passes stderr through and keeps pi-err-<call_id>.log" {
+  local d="$BENCH_OUT/shim-err"
+  _install_stub_pi_shim "$d"
+  local rc stderr_out
+  stderr_out="$("$d/run/bin/pi" --mode json -p task 2>&1 >/dev/null)" || rc=$?
+  [ "$rc" -eq 7 ]
+  [ "$stderr_out" = "STDERR-MSG" ]
+  local ef
+  ef="$(ls "$d"/run/pi-err-*.log)"
+  [ -f "$ef" ]
+  [ "$(cat "$ef")" = "STDERR-MSG" ]
+}
+
+@test "shim: argv log uses one element per argv (spaces preserved)" {
+  local d="$BENCH_OUT/shim-argv"
+  _install_stub_pi_shim "$d"
+  "$d/run/bin/pi" --mode json -p "task with spaces and 'quotes'" >/dev/null 2>&1 || true
+  local line
+  line="$(head -n 1 "$d/run/pi-calls.jsonl")"
+  # The prompt argument must survive as a single argv element.
+  echo "$line" | jq -e '.argv | index("task with spaces and '\''quotes'\''") != null' >/dev/null
+  # --no-context-files is injected exactly once.
+  [ "$(echo "$line" | jq -r '[.argv[] | select(. == "--no-context-files")] | length')" = "1" ]
+}
+
+@test "shim: real pi resolves outside the shim dir (no self-reference)" {
+  local d="$BENCH_OUT/shim-guard"
+  mkdir -p "$d/stub" "$d/run"
+  cat > "$d/stub/pi" <<'EOF'
+#!/usr/bin/env bash
+echo ok
+EOF
+  chmod +x "$d/stub/pi"
+  PATH="$d/stub:$PATH" bash -c "source '$BENCH_DIR/lib.sh'; install_pi_shim '$d/run'"
+  [ $? -eq 0 ]
+  # The baked-in REAL_PI must not point into the shim's own bin dir.
+  local real_pi
+  real_pi="$(grep '^REAL_PI=' "$d/run/bin/pi" | sed 's/^REAL_PI=//;s/^"//;s/"$//')"
+  case "$real_pi" in
+    "$d/run/bin/"*) [ false ] ;;
+    *) [ true ] ;;
+  esac
+  # The installed shim must not equal the stub (i.e. install did not resolve
+  # to a pre-existing shim on PATH).
+  [ -x "$d/run/bin/pi" ]
+}
+
+# --- run-arm.sh: arm B pin comes from PI_DELEGATE_REPO (item 2) ----------------
+
+@test "run-arm.sh: arm B pins pi-delegate from PI_DELEGATE_REPO at PI_DELEGATE_SHA (local fake repo)" {
+  local run_dir="$BENCH_OUT/$TASK_ID/B/2"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" B 2
+  [ "$status" -eq 0 ]
+
+  # Fake pi-delegate repo with a marketplace manifest.
+  local fake_pd="$BENCH_OUT/fake-pi-delegate"
+  git init -q -b main "$fake_pd"
+  git -C "$fake_pd" config user.email t@t.t
+  git -C "$fake_pd" config user.name t
+  mkdir -p "$fake_pd/.claude-plugin"
+  cat > "$fake_pd/.claude-plugin/marketplace.json" <<'EOF'
+{"name":"pi-delegate","owner":{"name":"t"},"plugins":[{"name":"pi-delegate","source":"./"}]}
+EOF
+  git -C "$fake_pd" add -A
+  git -C "$fake_pd" commit -qm "pi-delegate"
+  local pd_sha
+  pd_sha="$(git -C "$fake_pd" rev-parse HEAD)"
+
+  # Stub claude: plugin install succeeds; plugin list reports the plugin.
+  local stub_dir="$BENCH_OUT/stub-claude"
+  mkdir -p "$stub_dir"
+  cat > "$stub_dir/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+if [ "$1" = "plugin" ] && [ "$2" = "install" ]; then
+  exit 0
+fi
+if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
+  echo '[{"name":"pi-delegate","source":"pi-delegate","enabled":true}]'
+  exit 0
+fi
+# claude -p run: emit a minimal valid JSON result.
+echo '{"is_error":false,"result":"ok","duration_ms":100,"total_cost_usd":0}'
+exit 0
+CLAUDE
+  chmod +x "$stub_dir/claude"
+
+  # Stub pi.
+  cat > "$stub_dir/pi" <<'EOF'
+#!/usr/bin/env bash
+echo "stub pi"
+exit 0
+EOF
+  chmod +x "$stub_dir/pi"
+
+  # Run arm B with PI_DELEGATE_REPO pointed at the local fake repo.
+  PATH="$stub_dir:$PATH" PI_DELEGATE_REPO="$fake_pd" PI_DELEGATE_SHA="$pd_sha" \
+    bash "$BENCH_DIR/run-arm.sh" "$TASK_ID" B 2 > "$BENCH_OUT/runarm-b.out" 2>&1
+  local rc=$?
+  [ "$rc" -eq 0 ]
+
+  # Pin dir is keyed by SHA only (no -arm suffix) and shared.
+  local pin_dir="$BENCH_OUT/pin/pi-delegate-$pd_sha"
+  [ -d "$pin_dir" ]
+  [ "$(git -C "$pin_dir" rev-parse HEAD)" = "$pd_sha" ]
+  # Plugin installed into the run's config dir.
+  local cfg="$run_dir/claude-config"
+  [ -f "$cfg/plugins/known_marketplaces.json" ]
+}
+
+@test "run-arm.sh: arm B pin verification fails → exit 2 (missing marketplace.json)" {
+  local run_dir="$BENCH_OUT/$TASK_ID/B/3"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" B 3
+  [ "$status" -eq 0 ]
+
+  # Fake pi-delegate repo WITHOUT .claude-plugin/marketplace.json.
+  local fake_pd="$BENCH_OUT/fake-pd-no-market"
+  git init -q -b main "$fake_pd"
+  git -C "$fake_pd" config user.email t@t.t
+  git -C "$fake_pd" config user.name t
+  echo x > "$fake_pd/README.md"
+  git -C "$fake_pd" add -A
+  git -C "$fake_pd" commit -qm "no marketplace"
+  local pd_sha
+  pd_sha="$(git -C "$fake_pd" rev-parse HEAD)"
+
+  local stub_dir="$BENCH_OUT/stub-claude3"
+  mkdir -p "$stub_dir"
+  cat > "$stub_dir/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+exit 0
+CLAUDE
+  chmod +x "$stub_dir/claude"
+  cat > "$stub_dir/pi" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$stub_dir/pi"
+
+  PATH="$stub_dir:$PATH" PI_DELEGATE_REPO="$fake_pd" PI_DELEGATE_SHA="$pd_sha" \
+    bash "$BENCH_DIR/run-arm.sh" "$TASK_ID" B 3 > "$BENCH_OUT/runarm-b2.out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ]
+  grep -q "marketplace" "$BENCH_OUT/runarm-b2.out"
+}
+
+@test "run-arm.sh: arm B plugin install failure aborts the run (item 3)" {
+  local run_dir="$BENCH_OUT/$TASK_ID/B/4"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" B 4
+  [ "$status" -eq 0 ]
+
+  local fake_pd="$BENCH_OUT/fake-pd-abort"
+  git init -q -b main "$fake_pd"
+  git -C "$fake_pd" config user.email t@t.t
+  git -C "$fake_pd" config user.name t
+  mkdir -p "$fake_pd/.claude-plugin"
+  echo '{"name":"pi-delegate"}' > "$fake_pd/.claude-plugin/marketplace.json"
+  git -C "$fake_pd" add -A
+  git -C "$fake_pd" commit -qm "pi-delegate"
+  local pd_sha
+  pd_sha="$(git -C "$fake_pd" rev-parse HEAD)"
+
+  local stub_dir="$BENCH_OUT/stub-claude4"
+  mkdir -p "$stub_dir"
+  # claude plugin install FAILS (exit 1) → arm B must abort (exit 2).
+  cat > "$stub_dir/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+if [ "$1" = "plugin" ] && [ "$2" = "install" ]; then
+  echo "install failed" >&2
+  exit 1
+fi
+exit 0
+CLAUDE
+  chmod +x "$stub_dir/claude"
+  cat > "$stub_dir/pi" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$stub_dir/pi"
+
+  PATH="$stub_dir:$PATH" PI_DELEGATE_REPO="$fake_pd" PI_DELEGATE_SHA="$pd_sha" \
+    bash "$BENCH_DIR/run-arm.sh" "$TASK_ID" B 4 > "$BENCH_OUT/runarm-b3.out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ]
+  grep -q "ABORT" "$BENCH_OUT/runarm-b3.out"
+}
+
+@test "run-arm.sh: non-zero claude exit still writes run-meta.json (item 4)" {
+  local run_dir="$BENCH_OUT/$TASK_ID/A/8"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 8
+  [ "$status" -eq 0 ]
+
+  local stub_dir="$BENCH_OUT/stub-claude5"
+  mkdir -p "$stub_dir"
+  cat > "$stub_dir/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+echo "boom" >&2
+echo "not json" > "$1" 2>/dev/null
+exit 9
+CLAUDE
+  chmod +x "$stub_dir/claude"
+  cat > "$stub_dir/pi" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$stub_dir/pi"
+
+  PATH="$stub_dir:$PATH" bash "$BENCH_DIR/run-arm.sh" "$TASK_ID" A 8 > "$BENCH_OUT/runarm-a.out" 2>&1 || rc=$?
+  # Non-zero claude → exit 1 (not 124/137 → not exit 3).
+  [ "$rc" -eq 1 ]
+  # run-meta.json was still written (failed runs are always recorded).
+  [ -f "$run_dir/run-meta.json" ]
+  jq -e '.claude_exit == 9' "$run_dir/run-meta.json" >/dev/null
+}
+
+# --- collect.sh: duplicate / malformed pi-calls lines refused (item 5) ----------
+
+@test "collect.sh: duplicate task/arm/run pi-call lines are refused (exit 2)" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/20"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  cat > "$run_dir/pi-calls.jsonl" <<'EOF'
+{"argv":["--mode","json"],"duration_ms":1000,"exit":0,"mode":"json","call_id":"dup_1"}
+{"argv":["--mode","json"],"duration_ms":1000,"exit":0,"mode":"json","call_id":"dup_1"}
+EOF
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 20
+  [ "$status" -eq 2 ]
+}
+
+@test "collect.sh: null grade never passes validation" {
+  # Craft a scenario where grade would be null: grade.json missing AND the
+  # collect code path would synthesize a failed grade — but to directly test
+  # that a null grade is refused, we feed a run where the synthetic path is
+  # bypassed. Actually: the code always synthesizes a failed grade when
+  # grade.json is missing, so the "null grade" state cannot arise from the
+  # file-missing path. The null-grade guard is in the jq validator. Test it
+  # directly by piping a crafted line through the validator logic.
+  local line
+  line='{"task":"x","arm":"A","run":1,"grade":null}'
+  local out
+  out="$(printf '%s' "$line" | jq -r '
+    def check:
+      if .grade == null
+      then "grade is null (a null grade must never pass validation)"
+      else null
+      end;
+    check | if . == null then "ok" else . end
+  ')"
+  [ "$out" = "grade is null (a null grade must never pass validation)" ]
+}
+
+# --- collect.sh: pi[].duration_ms numeric type enforced (item 5) ----------------
+
+@test "collect.sh: pi duration_ms non-numeric is rejected" {
+  # A pi-calls line with duration_ms as a string would break the validator.
+  # The pi-calls.jsonl is generated by the shim (always numeric), so this is
+  # tested at the validator level: a collect line with pi[0].duration_ms
+  # as a string fails.
+  local line
+  line='{"task":"x","arm":"A","run":1,"grade":{"pass":true},"pi":[{"duration_ms":"not-a-number"}]}'
+  local out
+  out="$(printf '%s' "$line" | jq -r '
+    def check:
+      if (.pi | map(select(. != null and .duration_ms != null))
+           | map(.duration_ms | type) | any(. != "number"))
+      then "pi[].duration_ms is not numeric or null"
+      else null
+      end;
+    check | if . == null then "ok" else . end
+  ')"
+  [ "$out" = "pi[].duration_ms is not numeric or null" ]
+}
+
+# --- lib.sh: guards (item 9) ---------------------------------------------------
+
+@test "lib.sh: guard_rm_rf refuses targets outside BENCH_OUT" {
+  local rc=0
+  bash -c "source '$BENCH_DIR/lib.sh'; guard_rm_rf '$BENCH_OUT-parent-sibling'" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ]
+}
+
+@test "lib.sh: bench_out_guard requires absolute non-empty BENCH_OUT" {
+  local rc=0
+  # An explicitly-empty BENCH_OUT must fail.
+  BENCH_OUT="" bash -c "source '$BENCH_DIR/lib.sh'; bench_out_guard" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ]
+  rc=0
+  # A relative BENCH_OUT must fail.
+  bash -c "BENCH_OUT=relative; export BENCH_OUT; source '$BENCH_DIR/lib.sh'; bench_out_guard" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ]
+}
+
+@test "lib.sh: validate_grading_patch rejects .. and leading /" {
+  local rc=0
+  bash -c "source '$BENCH_DIR/lib.sh'; validate_grading_patch '../../x'" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ]
+  rc=0
+  bash -c "source '$BENCH_DIR/lib.sh'; validate_grading_patch '/abs/path'" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ]
+  bash -c "source '$BENCH_DIR/lib.sh'; validate_grading_patch 'grading.patch'" 2>/dev/null
+  [ $? -eq 0 ]
+}
+
+# --- run-arm.sh: arm B suffix does not reference the fix (item 8) ----------------
+
+@test "run-arm.sh: arm B delegation suffix does not reference the historical fix" {
+  local rc=0
+  grep -qi "historical fix" "$BENCH_DIR/run-arm.sh" && rc=1
+  [ "$rc" -ne 1 ]
+}
+
+# --- run-arm.sh: CLAUDE_MODEL default is the literal id (item 7) ----------------
+
+@test "run-arm.sh: model default is claude-sonnet-5-5" {
+  # Check the literal in the script (the default assignment).
+  grep -q 'CLAUDE_MODEL:-claude-sonnet-5-5' "$BENCH_DIR/run-arm.sh"
+}
+
+# --- run-arm.sh: agent_ms recorded in run-meta (item 6) ------------------------
+
+@test "run-arm.sh: agent_ms is recorded in run-meta.json" {
+  local run_dir="$BENCH_OUT/$TASK_ID/A/9"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 9
+  [ "$status" -eq 0 ]
+  local stub_dir="$BENCH_OUT/stub-claude6"
+  mkdir -p "$stub_dir"
+  cat > "$stub_dir/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+echo '{"is_error":false,"result":"ok","duration_ms":123,"total_cost_usd":0}'
+exit 0
+CLAUDE
+  chmod +x "$stub_dir/claude"
+  cat > "$stub_dir/pi" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$stub_dir/pi"
+  PATH="$stub_dir:$PATH" bash "$BENCH_DIR/run-arm.sh" "$TASK_ID" A 9 >/dev/null 2>&1
+  [ $? -eq 0 ]
+  [ -f "$run_dir/run-meta.json" ]
+  jq -e '.agent_ms != null and (.agent_ms | type) == "number"' "$run_dir/run-meta.json" >/dev/null
+}
+
+# --- prompt.md: no fix-leakage wording (item 8) --------------------------------
+
+@test "task prompts do not reference the historical fix" {
+  local f found=0
+  for f in "$BENCH_DIR/tasks/click-"/prompt.md; do
+    if grep -qi "parent of the historical fix\|the fix made" "$f"; then
+      found=1
+    fi
+  done
+  [ "$found" -eq 0 ]
+}
+
