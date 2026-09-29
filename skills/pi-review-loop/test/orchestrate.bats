@@ -769,6 +769,52 @@ WRAP
   [ "$xcount" -gt 0 ]
 }
 
+# --- Issue #26: provider/model verification ---------------------------------
+
+@test "assistant message_end with provider/model -> logged to stderr as provider/model pair" {
+  # The mock serves the fixture raw; a real pi --mode json line with the
+  # provider/model fields must be surfaced on stderr. The driver's verdict
+  # parser still extracts the text, so the run stays PASS.
+  cat > "$FIXTURES_DIR/1" <<'F'
+{"type":"message_end","message":{"role":"assistant","stopReason":"stop","provider":"anthropic","model":"claude-test","content":[{"type":"text","text":"Developed it."}]}}
+F
+  cat > "$FIXTURES_DIR/2" <<'F'
+{"type":"message_end","message":{"role":"assistant","stopReason":"stop","provider":"anthropic","model":"claude-test","content":[{"type":"text","text":"Looks fine."},{"type":"text","text":"VERDICT: APPROVED"}]}}
+F
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  local all
+  all="$(printf '%s\n' "${lines[@]}")"
+  [[ "$all" == *"provider/model anthropic/claude-test"* ]]
+}
+
+@test "missing provider/model fields -> 'unknown/unknown' is logged, run unaffected" {
+  # The 6-field JSON contract and the exit code must not change when the
+  # transcript omits provider/model (an older or third-party pi). The mock
+  # fixture builder omits the fields, so both rounds log unknown/unknown
+  # and the run still ends PASS.
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  local all
+  all="$(printf '%s\n' "${lines[@]}")"
+  [[ "$all" == *"provider/model unknown/unknown"* ]]
+}
+
+@test "no assistant message_end (empty transcript) -> 'not reported', run unaffected" {
+  # A pi call that succeeded but emitted nothing (mock with no fixture for
+  # the review call) exercises the no-match arm of the verification.
+  fixture 1 'Developed it.'
+  run_driver "do it"
+  # Develop round parses fine (empty transcript), review round has no
+  # fixture: its empty transcript yields the "not reported" line and the
+  # run ends INCOMPLETE (no verdict) — exit code unchanged from before.
+  [ "$status" -eq 2 ]
+  local all
+  all="$(printf '%s\n' "${lines[@]}")"
+  [[ "$all" == *"provider/model not reported in transcript"* ]]
+}
+
 # --- CLI validation -----------------------------------------------------------
 
 @test "unknown option -> usage error, exit 2" {
