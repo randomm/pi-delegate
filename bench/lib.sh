@@ -49,12 +49,17 @@ task_env() {
 require_task_fields() {
   local id="$1" field
   task_env "$id" || return 1
-  for field in REPO BASE_SHA FIX_COMMIT TEST_CMD; do
+  for field in REPO BASE_SHA TEST_CMD; do
     if [ -z "${!field:-}" ]; then
       echo "task '$id': missing required field $field in task.env" >&2
       return 1
     fi
   done
+  # FIX_COMMIT or FIX_SHA must be set (either name is accepted).
+  if [ -z "${FIX_SHA:-}" ] && [ -z "${FIX_COMMIT:-}" ]; then
+    echo "task '$id': missing required field FIX_SHA (or FIX_COMMIT) in task.env" >&2
+    return 1
+  fi
   return 0
 }
 

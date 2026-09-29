@@ -31,6 +31,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
+# Safe-execution env (docs/benchmark.md §safe-execution).
+export GIT_TERMINAL_PROMPT=0 EDITOR=true VISUAL=true PAGER=cat GIT_PAGER=cat
+
 usage() {
   echo "Usage: $0 <task-id> <arm> <run#>" >&2
   exit 1
@@ -70,7 +73,7 @@ cd "$repo_dir"
 # agent edited the same test files). We record that as a failure (exit 3)
 # because the grading contract cannot be verified in that case.
 apply_err="$run_dir/apply-err.log"
-if ! git apply --whitespace=nowarn "$patch_path" 2> "$apply_err"; then
+if ! timeout 120 git apply --whitespace=nowarn "$patch_path" 2> "$apply_err"; then
   echo "grade: git apply failed (see $apply_err):" >&2
   cat "$apply_err" >&2
   jq -cn \
@@ -88,13 +91,16 @@ if ! git apply --whitespace=nowarn "$patch_path" 2> "$apply_err"; then
 fi
 
 # --- Run the test command --------------------------------------------------------
-# TEST_CMD is a shell command (e.g. "bats skills/pi-review-loop/test/").
-# It is run in the repo directory. We capture stdout/stderr to files and
-# record the exit code.
+# TEST_CMD is a shell command (e.g. `timeout 120 $PWD/venv/bin/python -m
+# pytest ...`). It is run in the repo directory. We capture stdout/stderr
+# to files and record the exit code. The command is already bounded by
+# `timeout` inside the TEST_CMD string (see task.env); we wrap the outer
+# bash invocation in timeout 600 as belt-and-braces.
 test_log="$run_dir/test-output.log"
 test_rc=0
-if ! bash -c "$TEST_CMD" > "$test_log" 2>&1; then
-  test_rc=$?
+timeout 600 bash -c "$TEST_CMD" > "$test_log" 2>&1 || test_rc=$?
+if [ "$test_rc" -ne 0 ]; then
+  : # test failed — fall through to the FAIL branch
 fi
 
 # --- Record result -------------------------------------------------------------

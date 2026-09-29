@@ -1,11 +1,11 @@
 #!/usr/bin/env bats
 # BATS tests for the benchmark harness — pure-bash parts only.
-# No real claude or pi is invoked.
+# No real claude or pi is invoked. All git/uv commands use safe-env
+# (GIT_TERMINAL_PROMPT=0 EDITOR=true VISUAL=true PAGER=cat GIT_PAGER=cat)
+# and run under `timeout` (docs/benchmark.md §safe-execution).
 #
 # Run:
-#   bats bench/tests/collect.bats
-#   bats bench/tests/setup-run.bats
-#   (or: bats bench/tests/)
+#   timeout 300 bats bench/tests </dev/null
 
 setup() {
   # Resolve the bench dir from this file's location.
@@ -21,12 +21,16 @@ setup() {
   command -v jq >/dev/null 2>&1 || { skip "jq is not installed"; }
   command -v git >/dev/null 2>&1 || { skip "git is not installed"; }
 
+  # Safe-execution env (docs/benchmark.md §safe-execution).
+  export GIT_TERMINAL_PROMPT=0 EDITOR=true VISUAL=true PAGER=cat GIT_PAGER=cat
+
   # A temp BENCH_OUT so tests don't pollute /tmp/pi-bench.
   BENCH_OUT="$(mktemp -d)"
   export BENCH_OUT
   export TASKS_DIR="$BENCH_DIR/tasks"
 
-  # A throwaway task for setup-run tests.
+  # A throwaway task for setup-run tests. The task.env uses FIX_SHA (not
+  # FIX_COMMIT) to match the real task format.
   TASK_ID="bats-test-task"
   TASK_DIR="$TASKS_DIR/$TASK_ID"
   mkdir -p "$TASK_DIR"
@@ -40,7 +44,7 @@ setup() {
   git add hello.txt
   git commit -qm "initial"
   BASE_SHA="$(git rev-parse HEAD)"
-  # A second commit to use as FIX_COMMIT.
+  # A second commit to use as FIX_SHA.
   echo "world" > world.txt
   git add world.txt
   git commit -qm "add world"
@@ -61,7 +65,7 @@ EOF
   cat > "$TASK_DIR/task.env" <<EOF
 REPO=$FAKE_REPO
 BASE_SHA=$BASE_SHA
-FIX_COMMIT=$FIX_SHA
+FIX_SHA=$FIX_SHA
 TEST_CMD=true
 GRADING_PATCH=grading.patch
 EOF
@@ -123,7 +127,7 @@ teardown() {
   cat > "$task_dir/task.env" <<EOF
 REPO=$FAKE_REPO
 BASE_SHA=$BASE_SHA
-FIX_COMMIT=$FIX_SHA
+FIX_SHA=$FIX_SHA
 TEST_CMD=true
 GRADING_PATCH=grading.patch
 EOF
@@ -144,7 +148,7 @@ EOF
   cat > "$task_dir/task.env" <<EOF
 REPO=$FAKE_REPO
 BASE_SHA=$BASE_SHA
-FIX_COMMIT=$FIX_SHA
+FIX_SHA=$FIX_SHA
 TEST_CMD=true
 GRADING_PATCH=grading.patch
 EOF
@@ -160,7 +164,7 @@ EOF
   cat > "$task_dir/task.env" <<EOF
 REPO=$FAKE_REPO
 BASE_SHA=$BASE_SHA
-FIX_COMMIT=$FIX_SHA
+FIX_SHA=$FIX_SHA
 TEST_CMD=true
 GRADING_PATCH=grading.patch
 EOF
@@ -170,7 +174,7 @@ EOF
 
 # --- setup-run.sh tests ---------------------------------------------------------
 
-@test "setup-run.sh: creates clone at BASE_SHA on feature branch" {
+@test "setup-run.sh: creates repo at BASE_SHA on feature branch" {
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 1
   [ "$status" -eq 0 ]
   local repo="$BENCH_OUT/$TASK_ID/A/1/repo"
@@ -185,7 +189,7 @@ EOF
   [ "$head_sha" = "$(git -C "$FAKE_REPO" rev-parse "$BASE_SHA")" ]
 }
 
-@test "setup-run.sh: push URL is disabled" {
+@test "setup-run.sh: push.default is nothing" {
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 1
   [ "$status" -eq 0 ]
   local repo="$BENCH_OUT/$TASK_ID/A/1/repo"
@@ -193,10 +197,26 @@ EOF
   local push_default
   push_default="$(git -C "$repo" config push.default)"
   [ "$push_default" = "nothing" ]
-  # The origin pushurl should be the dead helper.
-  local pushurl
-  pushurl="$(git -C "$repo" remote get-url --push origin)"
-  [ "$pushurl" = "pi-delegate-push-disabled://dead" ]
+}
+
+@test "setup-run.sh: contamination guard — later commit is unreachable" {
+  # After setup-run.sh fetches only BASE_SHA, the FIX_SHA commit must NOT be
+  # reachable in the run repo. This proves the contamination guard: the agent
+  # cannot discover the historical fix by inspecting git history.
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 1
+  [ "$status" -eq 0 ]
+  local repo="$BENCH_OUT/$TASK_ID/A/1/repo"
+
+  # Exactly one commit should be reachable.
+  local commit_count
+  commit_count="$(timeout 30 git -C "$repo" rev-list --count HEAD)"
+  [ "$commit_count" = "1" ]
+
+  # FIX_SHA must NOT be resolvable in the run repo.
+  # (git rev-parse will fail for an unknown object.)
+  local fix_resolved=""
+  fix_resolved="$(timeout 30 git -C "$repo" rev-parse -q --verify "$FIX_SHA^{commit}" 2>/dev/null)" || true
+  [ -z "$fix_resolved" ]
 }
 
 @test "setup-run.sh: secret-file scan refuses on .env file" {
@@ -215,13 +235,12 @@ EOF
   cat > "$TASK_DIR/task.env" <<EOF
 REPO=$secret_repo
 BASE_SHA=$sha
-FIX_COMMIT=$sha
+FIX_SHA=$sha
 TEST_CMD=true
 GRADING_PATCH=grading.patch
 EOF
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 1
   [ "$status" -eq 3 ]
-  # Clean up the secret repo (rm -rf of the run dir in teardown handles the rest).
   cd /
 }
 
