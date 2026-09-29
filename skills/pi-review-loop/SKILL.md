@@ -53,10 +53,17 @@ bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"
   tree yourself — a clean tree at entry is normal for a develop-first loop
   and is always handled by the script; interpret the outcome from the JSON
   summary / exit code.
-- Each pi call is bounded by `PI_TIMEOUT` seconds (default 1800). A call
-  that hangs past the limit surfaces as `PI_ERROR` / exit 3. If the entire
-  script produces no output for an extended period, check that the pi
-  binary and git are available and that a develop round is running (or
+- Each pi call is bounded by `PI_TIMEOUT` seconds (default 1800). At the
+  deadline the driver sends SIGTERM; a pi (or its child) that ignores it is
+  SIGKILLed `PI_KILL_AFTER` seconds later (default 30), so the worst case
+  per call is `PI_TIMEOUT + PI_KILL_AFTER`. A call that hangs past the limit
+  surfaces as `PI_ERROR` / exit 3 whether it died on SIGTERM (rc 124) or
+  was SIGKILLed (rc 137). Known limit: a process that detaches into its own
+  session (`setsid`/daemons) escapes the timeout entirely — that escape
+  cannot be fixed in-script, so the worst-case wall clock for the whole loop
+  is `6 × (PI_TIMEOUT + PI_KILL_AFTER)` only for non-detached processes. If
+  the entire script produces no output for an extended period, check that
+  the pi binary and git are available and that a develop round is running (or
   could run); a run with no progress is safe to interrupt and re-run.
 
 ### Model passthrough
@@ -96,8 +103,8 @@ fix-round count in the JSON.
 |---|---|
 | 0 | Success — status is `PASS`, `PASSED_WITH_FINDINGS`, or `EMPTY_DIFF` |
 | 1 | `REJECTED` — the loop budget ran out without a terminal approval (or `CRITICAL_ISSUES_FOUND` at the terminal round) |
-| 2 | `INCOMPLETE` — pi produced no parseable verdict (JSON summary emitted) — **or** a CLI usage error (bad flag / missing task / invalid `--max-rounds` / invalid `PI_TIMEOUT`), which exits with an `ERROR:` message on stderr only, no JSON |
-| 3 | `PI_ERROR` — pi missing, pi crashed, a diff snapshot (against the base) failed, or a pi call timed out after `PI_TIMEOUT` seconds. Missing git/jq/pi exits with stderr only, no JSON; the other causes emit a JSON summary |
+| 2 | `INCOMPLETE` — pi produced no parseable verdict (JSON summary emitted) — **or** a CLI usage error (bad flag / missing task / invalid `--max-rounds` / invalid `PI_TIMEOUT` / invalid `PI_KILL_AFTER`), which exits with an `ERROR:` message on stderr only, no JSON |
+| 3 | `PI_ERROR` — pi missing, pi crashed, a diff snapshot (against the base) failed, or a pi call timed out after `PI_TIMEOUT` seconds (including the SIGKILL escalation at `PI_TIMEOUT + PI_KILL_AFTER` for pi processes that ignore SIGTERM). Missing git/jq/pi exits with stderr only, no JSON; the other causes emit a JSON summary |
 
 ## Verifying pi's claims (colleague, not authority)
 

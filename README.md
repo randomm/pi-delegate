@@ -141,6 +141,15 @@ orchestrate.sh --model <model> --max-rounds <N> "<task description>"
   `timeout` (coreutils) or `gtimeout` (macOS brew coreutils) on `PATH`; if
   neither exists, pi calls run without a time limit and a warning is logged
   once. Must be a positive integer, or the driver exits 2.
+- `PI_KILL_AFTER` — seconds to wait after the `PI_TIMEOUT` SIGTERM before
+  escalating to SIGKILL (default 30; passed to timeout as `--kill-after`). A
+  pi process that ignores SIGTERM is SIGKILLed at `PI_TIMEOUT + PI_KILL_AFTER`
+  and both resulting exit codes (124 SIGTERM / 137 SIGKILL) are classified as
+  a timeout (`PI_ERROR`, exit 3). Must be a positive integer, or the driver
+  exits 2. Ignored when no timeout binary exists (unbounded path). Known
+  limit: processes that detach into their own session (`setsid`/daemons)
+  escape the timeout entirely — worst-case wall clock for the loop is
+  `6 × (PI_TIMEOUT + PI_KILL_AFTER)` for non-detached processes.
 - `PI_DIFF_MAX_BYTES` — max bytes of the diff (or fix-prompt transcript) embedded
   in a review prompt (default 90000); larger content is truncated with a
   notice. The lower default (was 100000) ensures the total prompt stays well
@@ -196,8 +205,8 @@ where you should not skimp on model quality.
 | 0 | `PASS`, `PASSED_WITH_FINDINGS`, or `EMPTY_DIFF` | Report the verdict. For `PASSED_WITH_FINDINGS`, surface the `findings` array as observations. For `EMPTY_DIFF`, the develop round produced no change vs the base — nothing was reviewed. |
 | 1 | `REJECTED` — `CRITICAL_ISSUES_FOUND` with the round budget exhausted | Relay the findings; do **not** claim the change is safe. |
 | 2 | `INCOMPLETE` — no parseable verdict (malformed pi output); JSON summary is emitted | Re-run, or inspect `raw_output` to see what pi actually emitted. |
-| 2 | CLI usage error (unknown flag, missing task, invalid `--max-rounds` or `PI_TIMEOUT`); stderr `ERROR:`, no JSON | Fix the command line, then re-run. |
-| 3 | `PI_ERROR` — pi missing/unresolvable, not a git repo, git/jq missing, pi crashed (auth, etc.), a diff snapshot against the base failed, or pi timed out after `PI_TIMEOUT` seconds | Fix the environment, then re-run. |
+| 2 | CLI usage error (unknown flag, missing task, invalid `--max-rounds`, `PI_TIMEOUT`, or `PI_KILL_AFTER`); stderr `ERROR:`, no JSON | Fix the command line, then re-run. |
+| 3 | `PI_ERROR` — pi missing/unresolvable, not a git repo, git/jq missing, pi crashed (auth, etc.), a diff snapshot against the base failed, or pi timed out after `PI_TIMEOUT` seconds (SIGTERM rc 124, or SIGKILL escalation rc 137 at `PI_TIMEOUT + PI_KILL_AFTER` for pi that ignores SIGTERM) | Fix the environment, then re-run. |
 
 ### Verdicts
 

@@ -384,6 +384,36 @@ WRAP
   [[ "$out" == *"pi timed out after 1s"* ]]
 }
 
+@test "pi timeout (SLEEP-IGNORE-TERM fixture, PI_TIMEOUT=1 PI_KILL_AFTER=1) -> PI_ERROR, exit 3, < 10s" {
+  # A pi that traps/ignores SIGTERM must be killed by the SIGKILL escalation
+  # at kill-after expiry (rc 137). With PI_TIMEOUT=1 and PI_KILL_AFTER=1 the
+  # total wall clock is ~2s; the < 10s bound guards against a regression where
+  # --kill-after is missing and the process runs unbounded.
+  printf 'SLEEP-IGNORE-TERM:30\nnever reached\n' > "$FIXTURES_DIR/1"
+  local t0 t1 elapsed out rc=0
+  t0=$(date +%s)
+  out="$(PI_TIMEOUT=1 PI_KILL_AFTER=1 bash "$SCRIPT" "do it" 2>&1)" || rc=$?
+  t1=$(date +%s)
+  elapsed=$((t1 - t0))
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"pi timed out after 1s"* ]]
+  [ "$elapsed" -lt 10 ]
+}
+
+@test "pi timeout (SLEEP-IGNORE-TERM, PI_KILL_AFTER=2) -> PI_ERROR, exit 3, < 10s" {
+  # A slightly longer kill-after window (2s) still finishes well under the
+  # 10s budget, confirming the escalation works for any positive PI_KILL_AFTER.
+  printf 'SLEEP-IGNORE-TERM:30\nnever reached\n' > "$FIXTURES_DIR/1"
+  local t0 t1 elapsed out rc=0
+  t0=$(date +%s)
+  out="$(PI_TIMEOUT=1 PI_KILL_AFTER=2 bash "$SCRIPT" "do it" 2>&1)" || rc=$?
+  t1=$(date +%s)
+  elapsed=$((t1 - t0))
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"pi timed out after 1s"* ]]
+  [ "$elapsed" -lt 10 ]
+}
+
 @test "oversized diff is truncated with a notice (PI_DIFF_MAX_BYTES=400)" {
   # a.txt is ~5KB; the review prompt's embedded diff must carry the
   # truncation notice (with actual shown/total byte counts) and the head
@@ -754,6 +784,27 @@ WRAP
 @test "missing task -> usage error, exit 2" {
   run_driver
   [ "$status" -eq 2 ]
+}
+
+@test "PI_KILL_AFTER=0 -> usage error, exit 2" {
+  local out rc=0
+  out="$(PI_KILL_AFTER=0 bash "$SCRIPT" "do it" 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ]
+  [[ "$out" == *"PI_KILL_AFTER"* ]]
+}
+
+@test "PI_KILL_AFTER=abc -> usage error, exit 2" {
+  local out rc=0
+  out="$(PI_KILL_AFTER=abc bash "$SCRIPT" "do it" 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ]
+  [[ "$out" == *"PI_KILL_AFTER"* ]]
+}
+
+@test "PI_KILL_AFTER=-5 -> usage error, exit 2" {
+  local out rc=0
+  out="$(PI_KILL_AFTER=-5 bash "$SCRIPT" "do it" 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ]
+  [[ "$out" == *"PI_KILL_AFTER"* ]]
 }
 
 # --- Issue #16 coverage: verdict variants, round-cap sentinel, mid-loop INCOMPLETE, JSON shape

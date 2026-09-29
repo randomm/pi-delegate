@@ -32,6 +32,15 @@
 #                      Requires `timeout` (coreutils) or `gtimeout`
 #                      (macOS brew coreutils) on PATH; if neither exists,
 #                      pi runs unbounded and a warning is logged once.
+#   PI_KILL_AFTER      Seconds to wait after the PI_TIMEOUT SIGTERM before
+#                      escalating to SIGKILL (passed as `--kill-after`).
+#                      Default 30. A pi (or its child) that ignores SIGTERM
+#                      is SIGKILLed at PI_TIMEOUT + PI_KILL_AFTER; both the
+#                      SIGTERM (124) and SIGKILL (137) exit codes are
+#                      classified as a timeout. Ignored when no timeout
+#                      binary exists (unbounded path).
+#                      Known limit: processes that detach into their own
+#                      session (setsid/daemons) escape the timeout entirely.
 #
 # Output: all progress on stderr; exactly one JSON summary on the LAST
 # line of stdout (built with jq, never string interpolation).
@@ -41,13 +50,13 @@
 #   1  REJECTED (budget exhausted, no terminal verdict reached)
 #   2  INCOMPLETE (no parseable verdict from pi)
 #   3  PI_ERROR   (pi missing, pi crashed, a diff snapshot failed
-#       (git rev-parse / git diff / git status / git diff --no-index)
+#       (git rev-parse / git diff / git ls-files / git diff --no-index)
 #       with git's stderr surfaced verbatim, or pi timed out after
 #       PI_TIMEOUT seconds)
 #   2  is also used for CLI usage errors (unknown flag, missing task,
-#       invalid --max-rounds, invalid PI_TIMEOUT) — the spec defines exit
-#       codes 0-3 only, and a distinct usage code would require a new code;
-#       documented here.
+#       invalid --max-rounds, invalid PI_TIMEOUT, invalid PI_KILL_AFTER) —
+#       the spec defines exit codes 0-3 only, and a distinct usage code
+#       would require a new code; documented here.
 
 set -euo pipefail
 
@@ -151,6 +160,12 @@ PI_BIN="$(find_pi)" || die_env hint "pi executable not found (PATH, ~/.bun/bin, 
 PI_TIMEOUT="${PI_TIMEOUT:-1800}"
 if ! [[ "$PI_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$PI_TIMEOUT" -lt 1 ]; then
   die_usage "PI_TIMEOUT must be a positive integer (got: $PI_TIMEOUT)"
+fi
+# SIGKILL escalation grace window (see PI_KILL_AFTER above); the unbounded
+# path (no timeout binary) silently ignores it.
+PI_KILL_AFTER="${PI_KILL_AFTER:-30}"
+if ! [[ "$PI_KILL_AFTER" =~ ^[0-9]+$ ]] || [ "$PI_KILL_AFTER" -lt 1 ]; then
+  die_usage "PI_KILL_AFTER must be a positive integer (got: $PI_KILL_AFTER)"
 fi
 TIMEOUT_CMD=""
 if command -v timeout >/dev/null 2>&1; then
@@ -362,7 +377,9 @@ run_pi() {
   local rc=0
   local output
   if [ -n "$TIMEOUT_CMD" ]; then
-    output="$(printf '%s' "$prompt" | "$TIMEOUT_CMD" "$PI_TIMEOUT" "$PI_BIN" "${args[@]}" 2>&1)" || rc=$?
+    # --kill-after escalates to SIGKILL if pi (or its child) ignores the
+    # SIGTERM sent at PI_TIMEOUT; that path exits 137 instead of 124.
+    output="$(printf '%s' "$prompt" | "$TIMEOUT_CMD" --kill-after="$PI_KILL_AFTER" "$PI_TIMEOUT" "$PI_BIN" "${args[@]}" 2>&1)" || rc=$?
   else
     if [ "$no_timeout_warned" -eq 0 ]; then
       no_timeout_warned=1
@@ -372,7 +389,11 @@ run_pi() {
   fi
   total_pi_calls=$((total_pi_calls + 1))
 
-  if [ "$rc" -eq 124 ]; then
+  # 124 = timed out (SIGTERM honored); 137 = survived SIGTERM, SIGKILLed
+  # at the --kill-after grace expiry (128+9). Both are timeouts; the fixed
+  # message overrides $output so partial output from the hung run never
+  # leaks into pi_stderr.
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
     pi_stderr="pi timed out after ${PI_TIMEOUT}s"
     return 1
   fi
@@ -460,7 +481,7 @@ dispatch_fix() {
   return 0
 }
 
-# --- Diff snapshots ---------------------------------------------------------
+# --- Start ref (recorded before develop) -----------------------------------
 
 # git stderr lands in GIT_ERR_FILE only on failure paths that exit
 # immediately (die_git_error / fail_pi_error / INCOMPLETE), so a single
