@@ -34,18 +34,20 @@ setup() {
   # Temp dirs for the mock pi and its call log.
   CALL_LOG="$(mktemp)"
   ARGV_LOG="$(mktemp)"
+  STDIN_LOG="$(mktemp)"
   FIXTURES_DIR="$(mktemp -d)"
   BIN_DIR="$(mktemp -d)"
   ln -s "$FIXTURES/mock-pi" "$BIN_DIR/pi"
   export PATH="$BIN_DIR:$PATH"
   export MOCK_PI_CALL_LOG="$CALL_LOG"
   export MOCK_PI_ARGV_LOG="$ARGV_LOG"
+  export MOCK_PI_STDIN_LOG="$STDIN_LOG"
   export MOCK_PI_FIXTURES_DIR="$FIXTURES_DIR"
 }
 
 teardown() {
   cd "$REPO" 2>/dev/null || true
-  rm -rf "$REPO" "$CALL_LOG" "$ARGV_LOG" "$FIXTURES_DIR" "$BIN_DIR"
+  rm -rf "$REPO" "$CALL_LOG" "$ARGV_LOG" "$STDIN_LOG" "$FIXTURES_DIR" "$BIN_DIR"
 }
 
 run_driver() {
@@ -118,10 +120,10 @@ fixture() {
   # `git diff --no-index -- /dev/null <f>` renders it with a
   # `new file mode` header and `+` content lines (the old reversed
   # argument order rendered it as a deletion).
-  grep -q "new file mode" "$ARGV_LOG"
-  grep -q "^+new-module$" "$ARGV_LOG"
-  grep -q "newfile.txt" "$ARGV_LOG"
-  ! grep -q "^-new-module$" "$ARGV_LOG"
+  grep -q "new file mode" "$STDIN_LOG"
+  grep -q "^+new-module$" "$STDIN_LOG"
+  grep -q "newfile.txt" "$STDIN_LOG"
+  ! grep -q "^-new-module$" "$STDIN_LOG"
 }
 
 @test "untracked file whose name contains a space is enumerated safely" {
@@ -132,11 +134,11 @@ fixture() {
   fixture 2 'Reviewing the spaced file.' 'VERDICT: APPROVED'
   run_driver "do it"
   [ "$status" -eq 0 ]
-  grep -q "new spaced file.txt" "$ARGV_LOG"
-  grep -q "^+spaced$" "$ARGV_LOG"
+  grep -q "new spaced file.txt" "$STDIN_LOG"
+  grep -q "^+spaced$" "$STDIN_LOG"
   # The untracked part is not the only content (a.txt is modified too),
   # so the diff-vs-start-ref part is present as well.
-  grep -q "diff --git a/a.txt b/a.txt" "$ARGV_LOG"
+  grep -q "diff --git a/a.txt b/a.txt" "$STDIN_LOG"
 }
 
 @test "untracked file inside a new directory is enumerated as a file, not a dir" {
@@ -148,9 +150,9 @@ fixture() {
   fixture 2 'Reviewing the new directory.' 'VERDICT: APPROVED'
   run_driver "do it"
   [ "$status" -eq 0 ]
-  grep -q "new-dir/inner.txt" "$ARGV_LOG"
-  grep -q "^+in-new-dir$" "$ARGV_LOG"
-  ! grep -q "^new-dir/$" "$ARGV_LOG"
+  grep -q "new-dir/inner.txt" "$STDIN_LOG"
+  grep -q "^+in-new-dir$" "$STDIN_LOG"
+  ! grep -q "^new-dir/$" "$STDIN_LOG"
 }
 
 @test "developer commits its change -> change is reviewed and PASS" {
@@ -169,11 +171,11 @@ F
   # embed the diff-vs-start-ref (the actual content change), not an
   # empty diff. Verify both the diff header and the a.txt change are
   # present in the review prompt.
-  grep -q "diff --git a/a.txt b/a.txt" "$ARGV_LOG"
-  grep -q "Current diff (git diff" "$ARGV_LOG"
+  grep -q "diff --git a/a.txt b/a.txt" "$STDIN_LOG"
+  grep -q "Current diff (git diff" "$STDIN_LOG"
   # The review prompt must reference the original pre-develop commit as
   # the diff source.
-  grep -q "$base" "$ARGV_LOG"
+  grep -q "$base" "$STDIN_LOG"
   local out
   out="$(tail_json)"
   [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
@@ -189,11 +191,11 @@ F
   fixture 2 'Reviewing the new repo.' 'VERDICT: APPROVED'
   run_driver "do it"
   [ "$status" -eq 0 ]
-  grep -q "unborn.txt" "$ARGV_LOG"
+  grep -q "unborn.txt" "$STDIN_LOG"
   # The untracked file shows as an addition (not the empty tree vs HEAD
   # diff, which has no per-file content lines for a new blob).
-  grep -q "new file mode" "$ARGV_LOG"
-  grep -q "^+fresh$" "$ARGV_LOG"
+  grep -q "new file mode" "$STDIN_LOG"
+  grep -q "^+fresh$" "$STDIN_LOG"
 }
 
 @test "ignored files do NOT appear in the review diff" {
@@ -209,13 +211,13 @@ F
   [ "$status" -eq 0 ]
   # The tracked change is present (sanity check: the test is exercising
   # the right scenario).
-  grep -q "diff --git a/a.txt b/a.txt" "$ARGV_LOG"
+  grep -q "diff --git a/a.txt b/a.txt" "$STDIN_LOG"
   # The index must be untouched by the diff snapshot: `git diff` and
   # `git diff --no-index` never stage, so the staged tree still matches
   # HEAD.
   git diff --cached --quiet
   # The ignored file's content must not leak into any pi call.
-  ! grep -q "ignored-secret" "$ARGV_LOG"
+  ! grep -q "ignored-secret" "$STDIN_LOG"
 }
 
 @test "non-empty working tree at entry: develop runs, review proceeds (no EMPTY_DIFF)" {
@@ -389,14 +391,14 @@ WRAP
   head -c 5000 /dev/zero | tr '\0' 'a' > a.txt
   fixture 2 'Looks fine.' 'VERDICT: APPROVED'
   PI_DIFF_MAX_BYTES=400 bash "$SCRIPT" "do it" >/dev/null 2>&1 || true
-  grep -q "truncated: [1-9][0-9]* of [1-9][0-9]* bytes shown" "$ARGV_LOG"
-  grep -q "PI_DIFF_MAX_BYTES=400)" "$ARGV_LOG"
+  grep -q "truncated: [1-9][0-9]* of [1-9][0-9]* bytes shown" "$STDIN_LOG"
+  grep -q "PI_DIFF_MAX_BYTES=400)" "$STDIN_LOG"
   # The prompt must still embed the diff marker.
-  grep -q "Current diff (git diff" "$ARGV_LOG"
+  grep -q "Current diff (git diff" "$STDIN_LOG"
   # The truncation must keep a non-trivial head of the diff — on BSD head
   # (macOS) the old `head -n -1` line trim silently produced an empty diff.
   # 400-byte cap on a ~5KB diff: at least the first diff line must remain.
-  grep -q "diff --git a/a.txt b/a.txt" "$ARGV_LOG"
+  grep -q "diff --git a/a.txt b/a.txt" "$STDIN_LOG"
 }
 
 @test "fix prompt embeds the reviewer transcript, capped (PI_DIFF_MAX_BYTES=50)" {
@@ -408,16 +410,16 @@ WRAP
   fixture 3 'Fix applied.'
   PI_DIFF_MAX_BYTES=50 bash "$SCRIPT" "do it" >/dev/null 2>&1 || true
   # The fix prompt (call 3) must carry a truncation notice for the transcript.
-  grep -q "truncated: [1-9][0-9]* of [1-9][0-9]* bytes shown" "$ARGV_LOG"
+  grep -q "truncated: [1-9][0-9]* of [1-9][0-9]* bytes shown" "$STDIN_LOG"
   # The bulk of the transcript must NOT be embedded (it would appear as
-  # 1000 consecutive 'x' characters in the argv log).
-  ! grep -q "${big}" "$ARGV_LOG"
+  # 1000 consecutive 'x' characters in the stdin log).
+  ! grep -q "${big}" "$STDIN_LOG"
 }
 
 @test "small diff is NOT truncated (no notice under PI_DIFF_MAX_BYTES)" {
   fixture 2 'Looks fine.' 'VERDICT: APPROVED'
   PI_DIFF_MAX_BYTES=999999 bash "$SCRIPT" "do it" >/dev/null 2>&1 || true
-  ! grep -q "bytes shown (PI_DIFF_MAX_BYTES" "$ARGV_LOG"
+  ! grep -q "bytes shown (PI_DIFF_MAX_BYTES" "$STDIN_LOG"
 }
 
 # --- Loop + hard caps --------------------------------------------------------
@@ -517,17 +519,17 @@ WRAP
 @test "review prompt embeds the diff as real newlines, not literal \\n" {
   fixture 2 'Looks fine.' 'VERDICT: APPROVED'
   run_driver "do it"
-  # The review prompt (last arg of pi call 2) contains the "Current diff
-  # (git diff ...):" marker exactly once in the ARGV_LOG file.
+  # The review prompt (stdin of pi call 2) contains the "Current diff
+  # (git diff ...):" marker exactly once in the STDIN_LOG file.
   # od -c renders a real newline (0x0a) as two chars "\n"; a literal
   # two-char "\n" in the prompt would render as four chars "\ \\ n".
   # Count occurrences of the real-newline rendering before the marker
   # ("\\n C") — must be >= 1 — and of the literal rendering
   # ("\\ \\ n C") — must be 0.
   local real literal
-  real="$(od -An -c "$ARGV_LOG" | tr -s ' ' | grep -c '\\n C' || true)"
+  real="$(od -An -c "$STDIN_LOG" | tr -s ' ' | grep -c '\\n C' || true)"
   [ "$real" -ge 1 ]
-  literal="$(od -An -c "$ARGV_LOG" | tr -s ' ' | grep -c '\\ \\ n C' || true)"
+  literal="$(od -An -c "$STDIN_LOG" | tr -s ' ' | grep -c '\\ \\ n C' || true)"
   [ "$literal" -eq 0 ]
 }
 
@@ -552,11 +554,9 @@ WRAP
   [ "$status" -eq 0 ]
   [ "$(pi_calls)" -eq 4 ]
   # The fix call (call 3) must reference the findings from the review (call 2).
-  # Verify by checking the ARGV_LOG: the fix prompt (last arg of call 3)
-  # should contain the finding text. Since multi-line args break the
-  # one-line-per-arg format, we grep for the finding text in the log
-  # and verify it appears in a line that also contains "findings".
-  grep -q "a.txt:1] wrong value" "$ARGV_LOG"
+  # Verify by checking the STDIN_LOG: the fix prompt (stdin of call 3)
+  # should contain the finding text.
+  grep -q "a.txt:1] wrong value" "$STDIN_LOG"
 }
 
 # --- Verdict parser -----------------------------------------------------------
@@ -668,10 +668,10 @@ WRAP
   fixture 2 'Looks fine.' 'VERDICT: APPROVED'
   run_driver "do it"
   # The review prompt (call 2) must embed the current diff. The diff text
-  # appears in the ARGV_LOG as part of the review prompt arg.
-  grep -q "diff --git a/a.txt b/a.txt" "$ARGV_LOG"
-  grep -q -- "-base" "$ARGV_LOG"
-  grep -q -- "+modified" "$ARGV_LOG"
+  # appears in the STDIN_LOG as part of the review prompt.
+  grep -q "diff --git a/a.txt b/a.txt" "$STDIN_LOG"
+  grep -q -- "-base" "$STDIN_LOG"
+  grep -q -- "+modified" "$STDIN_LOG"
 }
 
 @test "round announcements go to stderr with round numbering" {
@@ -680,6 +680,63 @@ WRAP
   local all
   all="$(printf '%s\n' "${lines[@]}")"
   [[ "$all" == *"Round 1/3: reviewing"* ]]
+}
+
+# --- Issue #29: stdin transport, total budget, trim_diff edge case ------------
+
+@test "prompt is passed via stdin, not as an argv argument" {
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  # The ARGV_LOG should contain only flags (no multi-line prompt text).
+  # The develop prompt (task "do it") should NOT appear in the ARGV_LOG
+  # as a positional argument. The flags are still there.
+  grep -q -- "--mode" "$ARGV_LOG"
+  grep -q -- "--no-session" "$ARGV_LOG"
+  # The task text IS in the stdin log (piped to pi).
+  grep -q "do it" "$STDIN_LOG"
+}
+
+@test "total prompt budget exceeded -> PI_ERROR with clear message (PI_PROMPT_MAX_BYTES=10)" {
+  # Set PI_PROMPT_MAX_BYTES very low so any prompt exceeds it.
+  # The driver should produce a clear error mentioning the byte count.
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  local out rc=0
+  out="$(PI_PROMPT_MAX_BYTES=10 bash "$SCRIPT" "do it" 2>&1)" || rc=$?
+  # Should fail (exit 3 = PI_ERROR) with a clear message about the limit.
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"exceeds"* ]]
+  [[ "$out" == *"PI_PROMPT_MAX_BYTES"* ]]
+}
+
+@test "total prompt budget: normal-sized prompts pass (PI_PROMPT_MAX_BYTES=120000)" {
+  # Default budget should allow normal-sized prompts through.
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  PI_PROMPT_MAX_BYTES=120000 bash "$SCRIPT" "do it" >/dev/null 2>&1
+  local rc=$?
+  [ "$rc" -eq 0 ]
+}
+
+@test "trim_diff: truncated prefix with no newline keeps the prefix (not empty)" {
+  # Create a diff where the first line has no newline within the limit.
+  # With PI_DIFF_MAX_BYTES=50 and a file whose first diff line is 60 bytes,
+  # the truncated prefix (50 bytes) has no newline — the old code would
+  # empty it; the fix keeps the 50-byte prefix.
+  local bigline
+  bigline="$(head -c 60 /dev/zero | tr '\0' 'X')"
+  echo "$bigline" > bigfile.txt
+  git add bigfile.txt
+  # Now the diff will be ~70 bytes for this file. With PI_DIFF_MAX_BYTES=30,
+  # the 30-byte prefix has no newline (the first line is 61 bytes including newline).
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  PI_DIFF_MAX_BYTES=30 bash "$SCRIPT" "do it" >/dev/null 2>&1 || true
+  # The truncation notice must be present.
+  grep -q "truncated:" "$STDIN_LOG"
+  # The prefix must NOT be empty: at least some X characters from the big
+  # line should appear before the truncation notice.
+  local xcount
+  xcount="$(grep -o 'X' "$STDIN_LOG" | wc -l | tr -d ' ')"
+  [ "$xcount" -gt 0 ]
 }
 
 # --- CLI validation -----------------------------------------------------------
@@ -758,7 +815,7 @@ WRAP
   [ "$(printf '%s' "$out" | jq -r .verdict)" = "CRITICAL_ISSUES_FOUND" ]
   all="$(printf '%s\n' "${lines[@]}")"
   [[ "$all" != *"SENTINEL_ROUND_7_MUST_NEVER_APPEAR"* ]]
-  ! grep -q "SENTINEL_ROUND_7_MUST_NEVER_APPEAR" "$ARGV_LOG"
+  ! grep -q "SENTINEL_ROUND_7_MUST_NEVER_APPEAR" "$STDIN_LOG"
 }
 
 # --- Mid-loop INCOMPLETE --------------------------------------------------------

@@ -38,7 +38,13 @@ log_call() {
 log_call "$@"
 n="$(wc -l <"$MOCK_PI_CALL_LOG" | tr -d ' ')"
 
-# Never inherit an open stdin (a bare SLEEP: fixture would hang tail).
+# Capture stdin content (the prompt is passed via stdin by the driver).
+# If MOCK_PI_STDIN_LOG is set, write the stdin content there. Then close
+# stdin so bare fixtures (SLEEP) don't hang.
+stdin_content="$(cat)"
+if [ -n "${MOCK_PI_STDIN_LOG:-}" ]; then
+  printf '%s\n' "$stdin_content" >> "$MOCK_PI_STDIN_LOG"
+fi
 exec </dev/null
 
 if [ -n "${MOCK_PI_FIXTURES_DIR:-}" ] && [ -f "$MOCK_PI_FIXTURES_DIR/$n" ]; then

@@ -56,6 +56,12 @@ request through as `$ARGUMENTS` (the full task description):
   Do not restrict tools with `--tools`.
 - Plain text mode (no `--mode json`) — stdout is the transcript's final
   text, nothing to parse.
+- **Prompt transport:** if the task description is long (more than a few
+  hundred words), pass it via stdin instead of as a positional argument:
+  `printf '%s' "$ARGUMENTS" | "$PI_BIN" -p --no-session ...`. This avoids
+  `E2BIG` on Linux where a single argv element is capped at 128 KiB
+  (`MAX_ARG_STRLEN`). Short prompts (a sentence or two) work fine as a
+  positional argument.
 
 ### Model
 

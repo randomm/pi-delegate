@@ -21,9 +21,13 @@
 #                      --no-context-files so the target repo's agent
 #                      instructions do not override the role prompts.
 #   PI_DIFF_MAX_BYTES  Max bytes of diff embedded in a review prompt.
-#                      Default 100000 (Linux caps a single argv element
-#                      at ~128KB, MAX_ARG_STRLEN; keep the prompt arg
-#                      well under that).
+#                      Default 90000 (total prompt budget is 120000 bytes
+#                      to stay well under Linux MAX_ARG_STRLEN of 131072;
+#                      90000 leaves ~30KB for the rest of the prompt).
+#   PI_PROMPT_MAX_BYTES  Max total bytes for a single pi call (all argv
+#                      args + stdin combined). Default 120000. Exceeding
+#                      this causes a clear PI_ERROR instead of an opaque
+#                      E2BIG from the kernel.
 #   PI_TIMEOUT         Seconds to allow each pi invocation. Default 1800.
 #                      Requires `timeout` (coreutils) or `gtimeout`
 #                      (macOS brew coreutils) on PATH; if neither exists,
@@ -283,14 +287,14 @@ die_git_error() {
 }
 
 # Truncate the review diff (or any embedded text such as the reviewer
-# transcript in a fix prompt) to PI_DIFF_MAX_BYTES (default 100000),
+# transcript in a fix prompt) to PI_DIFF_MAX_BYTES (default 90000),
 # keeping whole lines and appending a truncation notice if dropped.
-# Rationale: the diff is embedded in a single argv element passed to pi,
-# and Linux caps one argument at ~128KB (MAX_ARG_STRLEN). Byte lengths
+# Rationale: the prompt is passed to pi (via stdin or argv), and Linux
+# caps a single argv element at ~128KB (MAX_ARG_STRLEN). Byte lengths
 # are measured with `wc -c` (locale-independent) so the notice always
 # shows byte counts even in a UTF-8 locale.
 trim_diff() {
-  local raw="$1" limit="${PI_DIFF_MAX_BYTES:-100000}"
+  local raw="$1" limit="${PI_DIFF_MAX_BYTES:-90000}"
   local total shown
   total="$(printf '%s' "$raw" | wc -c | tr -d ' ' )"
   if [ "$total" -le "$limit" ]; then
@@ -301,10 +305,11 @@ trim_diff() {
   # If the cut landed mid-line, drop the trailing partial line so the
   # prompt never contains a broken diff line. Pure parameter expansion so
   # the behaviour is identical on GNU and BSD (macOS `head -n -1` fails).
+  # Edge case: if the truncated prefix contains no newline at all, keep
+  # the prefix as-is (the old code emptied it, producing a useless
+  # prompt with only the truncation notice).
   if [[ "$shown" == *$'\n'* ]]; then
     shown="${shown%$'\n'*}"
-  else
-    shown=""
   fi
   printf '%s\n[truncated: %s of %s bytes shown (PI_DIFF_MAX_BYTES=%s)]' "$shown" "$(printf '%s' "$shown" | wc -c | tr -d ' ')" "$total" "$limit"
 }
@@ -313,6 +318,18 @@ trim_diff() {
 # run_pi <prompt> <system-prompt-content|-> [tools]
 # Runs pi headless in JSON mode; stores the extracted final text in
 # $last_transcript. Returns 1 (and sets $pi_stderr) on non-zero exit.
+#
+# The prompt is passed via stdin (piped to pi) rather than as an argv
+# string. This avoids E2BIG ("Argument list too long") when the prompt
+# exceeds MAX_ARG_STRLEN (131072 bytes on Linux). Pi reads piped stdin
+# and merges it into the initial prompt (stdin content + @file content +
+# positional message, joined). Since no positional message is given,
+# the prompt text is the entire initial prompt.
+#
+# Total size check: the combined byte count of all argv elements and
+# stdin content is verified against PI_PROMPT_MAX_BYTES (default 120000)
+# before calling pi. If exceeded, a clear error is produced (exit 3)
+# instead of an opaque E2BIG from the kernel.
 run_pi() {
   local prompt="$1" system_prompt="$2" tools="${3:--}"
   local args=(--mode json -p --no-session --no-extensions --no-skills --no-prompt-templates)
@@ -320,18 +337,38 @@ run_pi() {
   [ "$system_prompt" != "-" ] && args+=(--append-system-prompt "$system_prompt")
   [ "$tools" != "-" ] && args+=(--tools "$tools")
   [ -n "$model_arg" ] && args+=(--model "$model_arg")
-  args+=("$prompt")
+
+  # Total byte budget check: sum of all argv elements + prompt (stdin).
+  # This catches cases where the system prompt, tools, or other args are
+  # large enough to push the total over MAX_ARG_STRLEN even after the
+  # diff/transcript has been trimmed to PI_DIFF_MAX_BYTES.
+  local prompt_bytes argv_bytes total_bytes
+  prompt_bytes="$(printf '%s' "$prompt" | wc -c | tr -d ' ')"
+  argv_bytes=0
+  local a
+  for a in "${args[@]}"; do
+    local a_len
+    a_len="$(printf '%s' "$a" | wc -c | tr -d ' ')"
+    argv_bytes=$((argv_bytes + a_len))
+  done
+  total_bytes=$((prompt_bytes + argv_bytes))
+  local max_bytes="${PI_PROMPT_MAX_BYTES:-120000}"
+  if [ "$total_bytes" -gt "$max_bytes" ]; then
+    log "ERROR: total prompt size ${total_bytes} bytes exceeds PI_PROMPT_MAX_BYTES=${max_bytes} (prompt=${prompt_bytes}, args=${argv_bytes})"
+    pi_stderr="prompt size ${total_bytes} bytes exceeds limit ${max_bytes} bytes (PI_PROMPT_MAX_BYTES)"
+    return 1
+  fi
 
   local rc=0
   local output
   if [ -n "$TIMEOUT_CMD" ]; then
-    output="$("$TIMEOUT_CMD" "$PI_TIMEOUT" "$PI_BIN" "${args[@]}" </dev/null 2>&1)" || rc=$?
+    output="$(printf '%s' "$prompt" | "$TIMEOUT_CMD" "$PI_TIMEOUT" "$PI_BIN" "${args[@]}" 2>&1)" || rc=$?
   else
     if [ "$no_timeout_warned" -eq 0 ]; then
       no_timeout_warned=1
       log "WARNING: neither timeout nor gtimeout found on PATH; pi calls run without a time limit"
     fi
-    output="$("$PI_BIN" "${args[@]}" </dev/null 2>&1)" || rc=$?
+    output="$(printf '%s' "$prompt" | "$PI_BIN" "${args[@]}" 2>&1)" || rc=$?
   fi
   total_pi_calls=$((total_pi_calls + 1))
 
