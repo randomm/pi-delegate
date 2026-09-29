@@ -18,8 +18,10 @@ setup() {
   root=$(cd "$test_dir/../../.." && pwd)
   SKILL_FILE="$root/skills/pi-oneshot/SKILL.md"
   README_FILE="$root/README.md"
+  CONFIG_FILE="$root/docs/configuration.md"
   [ -f "$SKILL_FILE" ] || { echo "setup: missing $SKILL_FILE" >&2; return 1; }
   [ -f "$README_FILE" ] || { echo "setup: missing $README_FILE" >&2; return 1; }
+  [ -f "$CONFIG_FILE" ] || { echo "setup: missing $CONFIG_FILE" >&2; return 1; }
 }
 
 # Extract the SKILL.md section named $1 (heading to the next ##/### boundary).
@@ -27,37 +29,38 @@ skill_section() {
   awk -v h="$1" 'BEGIN{s=0} $0 == h {s=1; next} s && /^##(#[^#]|[^# ])/ {s=0} s {print}' "$SKILL_FILE"
 }
 
-# --- README: pi-oneshot section ---
+# --- README + docs: pi-oneshot section (re-pointed from README to
+# docs/configuration.md, issue #45 — identical literal checks) ---
 
-@test "README names PI_TIMEOUT/PI_KILL_AFTER with the 1800/30 defaults for pi-oneshot" {
-  grep -qF 'PI_TIMEOUT:-1800' "$README_FILE"
-  grep -qF 'PI_KILL_AFTER:-30' "$README_FILE"
+@test "README or docs names PI_TIMEOUT/PI_KILL_AFTER with the 1800/30 defaults for pi-oneshot" {
+  grep -qF 'PI_TIMEOUT:-1800' "$CONFIG_FILE" || grep -qF 'PI_TIMEOUT:-1800' "$README_FILE"
+  grep -qF 'PI_KILL_AFTER:-30' "$CONFIG_FILE" || grep -qF 'PI_KILL_AFTER:-30' "$README_FILE"
 }
 
-@test "README names the timeout wrapper (--kill-after) for pi-oneshot" {
-  grep -q -- '--kill-after' "$README_FILE"
+@test "README or docs names the timeout wrapper (--kill-after) for pi-oneshot" {
+  grep -q -- '--kill-after' "$CONFIG_FILE" || grep -q -- '--kill-after' "$README_FILE"
 }
 
-@test "README mentions gtimeout for pi-oneshot" {
-  grep -q 'gtimeout' "$README_FILE"
+@test "README or docs mentions gtimeout for pi-oneshot" {
+  grep -q 'gtimeout' "$CONFIG_FILE" || grep -q 'gtimeout' "$README_FILE"
 }
 
-@test "README documents 124/137 = timed out for pi-oneshot" {
-  grep -qE '(^|[^0-9])124([^0-9]|$)' "$README_FILE"
-  grep -qE '(^|[^0-9])137([^0-9]|$)' "$README_FILE"
+@test "README or docs documents 124/137 = timed out for pi-oneshot" {
+  grep -qE '(^|[^0-9])124([^0-9]|$)' "$CONFIG_FILE" || grep -qE '(^|[^0-9])124([^0-9]|$)' "$README_FILE"
+  grep -qE '(^|[^0-9])137([^0-9]|$)' "$CONFIG_FILE" || grep -qE '(^|[^0-9])137([^0-9]|$)' "$README_FILE"
 }
 
-@test "README documents the pi-oneshot unbounded-with-warning path" {
-  grep -qEi 'unbounded|no time limit|without a time limit' "$README_FILE"
-  grep -q 'warn' "$README_FILE"
+@test "README or docs documents the pi-oneshot unbounded-with-warning path" {
+  grep -qEi 'unbounded|no time limit|without a time limit' "$CONFIG_FILE" || grep -qEi 'unbounded|no time limit|without a time limit' "$README_FILE"
+  grep -q 'warn' "$CONFIG_FILE" || grep -q 'warn' "$README_FILE"
 }
 
-@test "README carries the long-run guidance (run_in_background) for both skills" {
-  grep -q 'run_in_background' "$README_FILE"
+@test "README or docs carries the long-run guidance (run_in_background) for both skills" {
+  grep -q 'run_in_background' "$CONFIG_FILE" || grep -q 'run_in_background' "$README_FILE"
 }
 
-@test "README states the correct worst-case loop wall clock (183 min, not 33)" {
-  grep -q '183 min' "$README_FILE"
+@test "README or docs states the correct worst-case loop wall clock (183 min, not 33)" {
+  grep -q '183 min' "$CONFIG_FILE" || grep -q '183 min' "$README_FILE"
 }
 
 # --- pi-oneshot SKILL.md: Invocation block has the timeout wrapper ---
@@ -153,21 +156,21 @@ skill_section() {
 
 # --- Cross-file consistency: README and SKILL.md agree ---
 
-@test "README and SKILL.md agree on the 1800 default" {
+@test "README or docs and SKILL.md agree on the 1800 default" {
   grep -qE '(^|[^0-9])1800([^0-9]|$)' "$SKILL_FILE"
-  grep -qE '(^|[^0-9])1800([^0-9]|$)' "$README_FILE"
+  grep -qE '(^|[^0-9])1800([^0-9]|$)' "$CONFIG_FILE" || grep -qE '(^|[^0-9])1800([^0-9]|$)' "$README_FILE"
 }
 
-@test "README and SKILL.md agree on the 30 default" {
+@test "README or docs and SKILL.md agree on the 30 default" {
   grep -qF 'PI_KILL_AFTER:-30' "$SKILL_FILE"
-  grep -qF 'PI_KILL_AFTER:-30' "$README_FILE"
+  grep -qF 'PI_KILL_AFTER:-30' "$CONFIG_FILE" || grep -qF 'PI_KILL_AFTER:-30' "$README_FILE"
 }
 
-@test "README and SKILL.md agree on 124/137 = timed out" {
+@test "README or docs and SKILL.md agree on 124/137 = timed out" {
   grep -qE '(^|[^0-9])124([^0-9]|$)' "$SKILL_FILE"
   grep -qE '(^|[^0-9])137([^0-9]|$)' "$SKILL_FILE"
-  grep -qE '(^|[^0-9])124([^0-9]|$)' "$README_FILE"
-  grep -qE '(^|[^0-9])137([^0-9]|$)' "$README_FILE"
+  grep -qE '(^|[^0-9])124([^0-9]|$)' "$CONFIG_FILE" || grep -qE '(^|[^0-9])124([^0-9]|$)' "$README_FILE"
+  grep -qE '(^|[^0-9])137([^0-9]|$)' "$CONFIG_FILE" || grep -qE '(^|[^0-9])137([^0-9]|$)' "$README_FILE"
 }
 
 # --- Issue #30: safety preflight doc-drift ---

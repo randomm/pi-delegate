@@ -134,11 +134,9 @@ This is informational only — missing fields are reported as
 `unknown/unknown`, the exit code and JSON summary contract are unchanged.
 Use it to confirm which model actually answered each round.
 
-> **Model pinning (`PI_PROVIDER`/`PI_MODEL` env vars) was proposed in issue
-> #26 but declined by operator policy** — `--model` passthrough remains the
-> only supported model-selection mechanism. The per-call logging above is the
-> substitute: it surfaces the `provider/model` pair pi reports, without
-> introducing a failure mode or changing the six-field JSON contract.
+**Model selection:** models are not pinned — `--model` passthrough is the
+only selection mechanism, and the per-call `provider/model` logging above
+shows which model actually answered each round.
 
 ## Interpreting the JSON summary
 

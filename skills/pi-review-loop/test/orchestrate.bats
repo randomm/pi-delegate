@@ -1010,19 +1010,23 @@ F
   grep -q 'run_in_background' "$loop"
 }
 
-@test "README and pi-oneshot SKILL.md both state 124/137 = timed out" {
-  local readme oneshot
+@test "README, docs, and pi-oneshot SKILL.md all state 124/137 = timed out" {
+  local readme oneshot config
   readme="$REPO_ROOT/README.md"
   oneshot="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  config="$REPO_ROOT/docs/configuration.md"
   [ -f "$readme" ]
   [ -f "$oneshot" ]
-  # Word-boundary numerals: plain `grep -q '124'` would match "120000" and
-  # pass after the whole timeout paragraph is deleted.
-  grep -qE '(^|[^0-9])124([^0-9]|$)' "$readme"
-  grep -qE '(^|[^0-9])137([^0-9]|$)' "$readme"
-  grep -q 'SIGTERM at' "$readme"
-  grep -q 'SIGKILL escalation' "$readme"
-  grep -q 'timed out' "$readme"
+  [ -f "$config" ]
+  for f in "$readme" "$config"; do
+    # Word-boundary numerals: plain `grep -q '124'` would match "120000" and
+    # pass after the whole timeout paragraph is deleted.
+    grep -qE '(^|[^0-9])124([^0-9]|$)' "$f"
+    grep -qE '(^|[^0-9])137([^0-9]|$)' "$f"
+    grep -q 'SIGTERM at' "$f"
+    grep -q 'SIGKILL escalation' "$f"
+    grep -q 'timed out' "$f"
+  done
   grep -qE '(^|[^0-9])124([^0-9]|$)' "$oneshot"
   grep -qE '(^|[^0-9])137([^0-9]|$)' "$oneshot"
   grep -q 'SIGTERM at' "$oneshot"
@@ -1030,21 +1034,24 @@ F
   grep -q 'timed out' "$oneshot"
 }
 
-@test "README pi-oneshot section mentions timeout/gtimeout and PI_TIMEOUT" {
-  local readme
-  readme="$REPO_ROOT/README.md"
-  [ -f "$readme" ]
-  grep -qE '(^|[^0-9])timeout([^0-9]|$)' "$readme"
-  grep -q 'gtimeout' "$readme"
-  grep -q 'PI_TIMEOUT' "$readme"
-  grep -q 'PI_KILL_AFTER' "$readme"
+@test "docs/configuration.md names the timeout wrapper (timeout/gtimeout, PI_TIMEOUT/PI_KILL_AFTER)" {
+  local config
+  config="$REPO_ROOT/docs/configuration.md"
+  [ -f "$config" ]
+  grep -qE '(^|[^0-9])timeout([^0-9]|$)' "$config"
+  grep -q 'gtimeout' "$config"
+  grep -q 'PI_TIMEOUT' "$config"
+  grep -q 'PI_KILL_AFTER' "$config"
 }
 
-@test "README pi-review-loop section mentions run_in_background" {
-  local readme
+@test "README and docs/configuration.md mention run_in_background (long-run guidance)" {
+  local readme config
   readme="$REPO_ROOT/README.md"
+  config="$REPO_ROOT/docs/configuration.md"
   [ -f "$readme" ]
+  [ -f "$config" ]
   grep -q 'run_in_background' "$readme"
+  grep -q 'run_in_background' "$config"
 }
 
 # --- Doc drift: long-run guidance (issue #39) ---------------------------------
@@ -1122,33 +1129,79 @@ model_block() {
   done
 }
 
-@test "doc: README reflects pi-oneshot wrapper (PI_TIMEOUT/PI_KILL_AFTER, gtimeout, unbounded warning, 124/137) and both long-run sections" {
-  local readme="$REPO_ROOT/README.md"
-  grep -q "PI_TIMEOUT" "$readme"
-  grep -q "PI_KILL_AFTER" "$readme"
-  grep -q "gtimeout" "$readme"
-  grep -q "unbounded" "$readme"
-  grep -q "124" "$readme"
-  grep -q "137" "$readme"
-  grep -qi "timed out" "$readme"
-  # pi-oneshot long-run section
-  awk '/^## Usage — pi-oneshot/,/^## Usage — pi-review-loop/' "$readme" \
+@test "doc: README and docs reflect pi-oneshot wrapper (PI_TIMEOUT/PI_KILL_AFTER, gtimeout, unbounded warning, 124/137) and long-run guidance" {
+  local readme config
+  readme="$REPO_ROOT/README.md"
+  config="$REPO_ROOT/docs/configuration.md"
+  [ -f "$readme" ]
+  [ -f "$config" ]
+  # The literals may live in the README, docs/configuration.md, or the
+  # SKILL.md files — but at least the README + configuration pair must
+  # carry each one, so deleting the whole section still fails.
+  grep -q "PI_TIMEOUT" "$readme" || grep -q "PI_TIMEOUT" "$config"
+  grep -q "PI_KILL_AFTER" "$readme" || grep -q "PI_KILL_AFTER" "$config"
+  grep -q "gtimeout" "$readme" || grep -q "gtimeout" "$config"
+  grep -q "unbounded" "$readme" || grep -q "unbounded" "$config"
+  grep -q "124" "$readme" || grep -q "124" "$config"
+  grep -q "137" "$readme" || grep -q "137" "$config"
+  grep -qi "timed out" "$readme" || grep -qi "timed out" "$config"
+  # Long-run guidance: the README carries a run_in_background pointer and
+  # docs/configuration.md carries the "Long runs" section (anchored on the
+  # surviving headings so the check cannot pass against an empty range).
+  grep -q "run_in_background" "$readme"
+  awk '/^## Long runs under/,/^## Flags/' "$config" \
     | grep -q "run_in_background"
-  # pi-review-loop long-run section (between the ## heading and the ## Model selection guide section)
-  awk '/^## Usage — pi-review-loop/,/^## Model selection guide/' "$readme" \
-    | grep -q "run_in_background"
+  awk '/^## Long runs under/,/^## Flags/' "$config" \
+    | grep -q "183 min"
 }
 
-@test "doc: README 124/137 = timed out agrees with pi-oneshot SKILL.md semantics" {
-  # Both files must state 124 is SIGTERM at PI_TIMEOUT and 137 is SIGKILL
-  # escalation, i.e. the same semantics as orchestrate.sh.
+@test "doc: README 124/137 = timed out agrees with docs/configuration.md and pi-oneshot SKILL.md semantics" {
+  # Both doc files must state 124 is SIGTERM at PI_TIMEOUT and 137 is
+  # SIGKILL escalation, i.e. the same semantics as orchestrate.sh.
   local f
-  for f in "$REPO_ROOT/README.md" "$REPO_ROOT/skills/pi-oneshot/SKILL.md"; do
+  for f in "$REPO_ROOT/docs/configuration.md" "$REPO_ROOT/skills/pi-oneshot/SKILL.md"; do
     grep -q "124" "$f"
     grep -q "137" "$f"
     grep -qi "SIGTERM" "$f"
     grep -qi "SIGKILL" "$f"
   done
+}
+
+# --- #40 regression greps (README drift fixes) ----------------------------
+
+@test "#40 regression: no '--max-rounds 3' remediation advice in README or docs" {
+  local f
+  for f in "$REPO_ROOT/README.md" "$REPO_ROOT/docs/troubleshooting.md" "$REPO_ROOT/docs/how-it-works.md" "$REPO_ROOT/docs/configuration.md"; do
+    ! grep -q -- '--max-rounds 3' "$f"
+  done
+  # The troubleshooting REJECTED section must instead give the hard-cap
+  # fact and actionable advice.
+  grep -q 'hard-capped at 3' "$REPO_ROOT/docs/troubleshooting.md"
+  grep -q 're-run' "$REPO_ROOT/docs/troubleshooting.md"
+}
+
+@test "#40 regression: no 'not present yet' install conditional in README or docs" {
+  local f
+  for f in "$REPO_ROOT/README.md" "$REPO_ROOT/docs/troubleshooting.md" "$REPO_ROOT/docs/how-it-works.md" "$REPO_ROOT/docs/configuration.md"; do
+    ! grep -qi 'not present yet' "$f"
+  done
+}
+
+@test "#40 regression: docs/how-it-works.md loop sequence distinguishes the ISSUES_FOUND and CRITICAL arms with the non-terminal fix round" {
+  local how
+  how="$REPO_ROOT/docs/how-it-works.md"
+  [ -f "$how" ]
+  # The ISSUES_FOUND bullet must mention a fix round at non-terminal rounds
+  # (and only the terminal round is PASSED_WITH_FINDINGS).
+  awk '/^## Loop sequence/,/^## Verdicts/' "$how" | grep -q 'ISSUES_FOUND'
+  awk '/^## Loop sequence/,/^## Verdicts/' "$how" | grep -q 'non-terminal'
+  awk '/^## Loop sequence/,/^## Verdicts/' "$how" | grep -q 'PASSED_WITH_FINDINGS'
+  awk '/^## Loop sequence/,/^## Verdicts/' "$how" | grep -q 'fix round'
+  awk '/^## Loop sequence/,/^## Verdicts/' "$how" | grep -q 'CRITICAL_ISSUES_FOUND'
+  awk '/^## Loop sequence/,/^## Verdicts/' "$how" | grep -q 'REJECTED'
+  # The verdict table row must likewise carry the non-terminal fix round.
+  awk '/^## Verdicts/,/^## JSON summary/' "$how" | grep -q 'ISSUES_FOUND'
+  awk '/^## Verdicts/,/^## JSON summary/' "$how" | grep -q 'non-terminal'
 }
 
 # --- Issue #30: safety preflight ------------------------------------------------
