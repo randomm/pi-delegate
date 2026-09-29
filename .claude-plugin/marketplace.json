@@ -1,0 +1,12 @@
+{
+  "name": "pi-delegate",
+  "owner": {
+    "name": "randomm"
+  },
+  "plugins": [
+    {
+      "name": "pi-delegate",
+      "source": "./"
+    }
+  ]
+}
