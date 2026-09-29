@@ -970,7 +970,8 @@ F
   oneshot="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
   [ -f "$oneshot" ]
   # The invocation block must reference the timeout binary and the env vars.
-  grep -q 'timeout' "$oneshot"
+  # Word boundaries so this doesn't match incidental numerals or "gtimeout".
+  grep -qE '(^|[^0-9])timeout([^0-9]|$)' "$oneshot"
   grep -q 'gtimeout' "$oneshot"
   grep -q 'PI_KILL_AFTER' "$oneshot"
   grep -q 'PI_TIMEOUT' "$oneshot"
@@ -1002,11 +1003,17 @@ F
   oneshot="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
   [ -f "$readme" ]
   [ -f "$oneshot" ]
-  grep -q '124' "$readme"
-  grep -q '137' "$readme"
+  # Word-boundary numerals: plain `grep -q '124'` would match "120000" and
+  # pass after the whole timeout paragraph is deleted.
+  grep -qE '(^|[^0-9])124([^0-9]|$)' "$readme"
+  grep -qE '(^|[^0-9])137([^0-9]|$)' "$readme"
+  grep -q 'SIGTERM at' "$readme"
+  grep -q 'SIGKILL at' "$readme"
   grep -q 'timed out' "$readme"
-  grep -q '124' "$oneshot"
-  grep -q '137' "$oneshot"
+  grep -qE '(^|[^0-9])124([^0-9]|$)' "$oneshot"
+  grep -qE '(^|[^0-9])137([^0-9]|$)' "$oneshot"
+  grep -q 'SIGTERM at' "$oneshot"
+  grep -q 'SIGKILL at' "$oneshot"
   grep -q 'timed out' "$oneshot"
 }
 
@@ -1014,7 +1021,7 @@ F
   local readme
   readme="$REPO_ROOT/README.md"
   [ -f "$readme" ]
-  grep -q 'timeout' "$readme"
+  grep -qE '(^|[^0-9])timeout([^0-9]|$)' "$readme"
   grep -q 'gtimeout' "$readme"
   grep -q 'PI_TIMEOUT' "$readme"
   grep -q 'PI_KILL_AFTER' "$readme"
