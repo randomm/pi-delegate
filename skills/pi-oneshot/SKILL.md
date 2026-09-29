@@ -64,8 +64,8 @@ fi
 
 When the wrapper runs, a deadline failure surfaces as pi's exit code:
 
-- **124** — pi was SIGTERMed at `PI_TIMEOUT` seconds: the call **timed out**.
-- **137** — pi ignored SIGTERM and was SIGKILLed at `PI_TIMEOUT + PI_KILL_AFTER` seconds: the call **timed out**.
+- **124** — pi was SIGTERMed at `PI_TIMEOUT` seconds (SIGTERM at `PI_TIMEOUT`): the call **timed out**.
+- **137** — pi ignored SIGTERM and was SIGKILLed at `PI_TIMEOUT + PI_KILL_AFTER` seconds (SIGKILL at `PI_TIMEOUT + PI_KILL_AFTER`): the call **timed out**.
 
 Both mean "timed out" — tell the user the single pi call hit the time limit
 and offer a re-run (optionally with a larger `PI_TIMEOUT`). Any other
@@ -132,8 +132,10 @@ never append `--model` to an un-wrapped call:
   "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS" --model <model>
 ```
 
-- If the user explicitly named a model, use the wrapped `--model <model>`
-  variant above.
+- If the user explicitly named a model, append `--model <model>` to the
+  **same wrapped invocation** shown above — the wrapper wraps the whole
+  command (… `"$PI_BIN" … "$ARGUMENTS" [--model X]`), so the
+  model-passthrough variant is bounded identically.
 - Otherwise omit `--model` entirely — pi falls back to its configured
   default.
 
