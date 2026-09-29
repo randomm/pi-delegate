@@ -83,14 +83,27 @@ if [ -n "${MOCK_PI_FIXTURES_DIR:-}" ] && [ -f "$MOCK_PI_FIXTURES_DIR/$n" ]; then
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
       ;;
     PUSH:*)
-      # Simulate a pi process that attempts `git push origin HEAD`. The push
-      # runs with the current environment (so GIT_CONFIG_* neutralisation is
-      # in effect). The push's stderr is discarded; its exit code is appended
-      # to $MOCK_PI_PUSH_LOG (a side file the test reads) so the result is
-      # not routed through pi's stdout (which the driver parses as JSON
-      # events and would swallow).
-      git push origin HEAD 2>/dev/null
+      # Dump the GIT_CONFIG_* env first, so a single PUSH: fixture line gives
+      # both the driver's push-neutralisation config AND the push result in
+      # one side file. The push's exit code is appended on the final line.
+      if [ -n "${MOCK_PI_ENV_LOG:-}" ]; then
+        env | grep '^GIT_CONFIG_' >>"$MOCK_PI_ENV_LOG"
+      fi
+      push_target="${first#PUSH:}"
+      push_args=()
+      for tok in $push_target; do
+        push_args+=("$tok")
+      done
+      git push "${push_args[@]}" 2>/dev/null
       printf '%s\n' "$?" >>"${MOCK_PI_PUSH_LOG:-/dev/null}"
+      tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
+      ;;
+    ENV:*)
+      # Dump the current GIT_CONFIG_* env (the push-neutralisation entries
+      # the driver exported) to $MOCK_PI_ENV_LOG so a test can verify the
+      # real driver built the config it claims to, without hardcoding the
+      # indices. The directive text after `ENV:` is ignored.
+      env | grep '^GIT_CONFIG_' >"${MOCK_PI_ENV_LOG:-/dev/null}"
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
       ;;
     *)

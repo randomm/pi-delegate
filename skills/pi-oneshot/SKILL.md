@@ -71,22 +71,45 @@ if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
       fi
     fi
   fi
-  # 2. Refuse secret-looking files (.env, .env.*, *.pem, *.key).
+  # 2. Refuse secret-looking files (.env, .env.*, *.pem, *.key) — regular
+  #    files and symlinks alike, anywhere in the tree. The scan runs from
+  #    the repo root (paths are reported relative to it) and is fail-closed:
+  #    any non-zero `find` exit (e.g. an unreadable directory) is a refusal
+  #    — a partial scan must never pass.
+  repo_root="$(git rev-parse --show-toplevel)" || { echo "REFUSED: could not determine the repo root" >&2; exit 3; }
   secrets_found=""
+  scan_file="$(mktemp)"
+  scan_err_file="$(mktemp)"
+  find "$repo_root" -not -path "$repo_root/.git" -not -path "$repo_root/.git/*" -not -path "$repo_root/node_modules" -not -path "$repo_root/node_modules/*" \
+    \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' \) \( -type f -o -type l \) \
+    > "$scan_file" 2> "$scan_err_file" || { echo "REFUSED: secret-file scan failed: $(cat "$scan_err_file")" >&2; exit 3; }
+  rm -f "$scan_err_file"
+  # .env.example / .env.sample / .env.template are safe (no secrets). Max 5
+  # paths are listed in the refusal message (integer counter, not a
+  # per-iteration grep|wc pipeline).
+  shown=0
   while IFS= read -r sf; do
+    sf="${sf#"$repo_root"/}"
     case "$sf" in *.example|*.sample|*.template) continue ;; esac
     if [ -z "$secrets_found" ]; then secrets_found="$sf"; else secrets_found="${secrets_found}, ${sf}"; fi
-    [ "$(printf '%s' "$secrets_found" | grep -o ',' | wc -l | tr -d ' ')" -ge 4 ] && break
-  done < <(find . -not -path './.git' -not -path './.git/*' -not -path './node_modules' -not -path './node_modules/*' \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' \) -type f 2>/dev/null)
+    shown=$((shown + 1))
+    [ "$shown" -ge 5 ] && break
+  done < "$scan_file"
+  rm -f "$scan_file"
   if [ -n "$secrets_found" ]; then
     echo "REFUSED: secret-looking file(s) present: ${secrets_found} (set PI_DELEGATE_UNSAFE=1 to override)" >&2
     exit 3
   fi
   # 3. Neutralise git push for the pi process via GIT_CONFIG_* env.
-  #    Indices continue from any pre-existing GIT_CONFIG_COUNT so caller
-  #    entries are preserved; a non-numeric pre-existing count makes the
-  #    arithmetic fail loudly under set -e (git itself hard-errors on it).
+  #    The single cursor _gc starts at the validated pre-existing
+  #    GIT_CONFIG_COUNT (so caller entries are preserved) and each entry
+  #    exports its KEY_n / VALUE_n pair then increments; a non-numeric
+  #    pre-existing count is a refusal (git itself hard-errors on it).
   _gc="${GIT_CONFIG_COUNT:-0}"
+  if ! [[ "$_gc" =~ ^[0-9]+$ ]]; then
+    echo "REFUSED: pre-existing GIT_CONFIG_COUNT='${GIT_CONFIG_COUNT}' is not a non-negative integer (set PI_DELEGATE_UNSAFE=1 to override)" >&2
+    exit 3
+  fi
   export GIT_CONFIG_KEY_${_gc}=push.default GIT_CONFIG_VALUE_${_gc}=nothing
   _gc=$((_gc + 1))
   # pushInsteadOf rewrites common URL prefixes to the dead helper. Known

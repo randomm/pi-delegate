@@ -171,40 +171,43 @@ reviewer_md_content="$(cat "$REVIEWER_MD")"
 # single opt-out is PI_DELEGATE_UNSAFE=1.
 if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
   # Build the GIT_CONFIG_* entries, appending to any pre-existing ones so we
-  # never clobber a caller's config. GIT_CONFIG entries are 0-indexed; new
-  # entries start at the existing count, so a caller-provided
+  # never clobber a caller's config. GIT_CONFIG entries are 0-indexed; the
+  # single cursor _gc starts at the validated pre-existing GIT_CONFIG_COUNT,
+  # and each entry exports its KEY_n / VALUE_n pair then increments (COUNT
+  # is exported once, at the end). A caller-provided
   # GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n (e.g. git
-  # re-exports them in a subshell) is preserved. An invalid (non-numeric)
-  # pre-existing GIT_CONFIG_COUNT makes the arithmetic below fail loudly
-  # under set -e; git itself hard-errors on such a value, so either way the
-  # run dies before pi starts — never with silently disabled guards.
-  _gc_count="${GIT_CONFIG_COUNT:-0}"
-  _gc_key_base="${_gc_count}"
-  _gc_count=$(( _gc_count + 1 ))
-  export GIT_CONFIG_KEY_${_gc_key_base}=push.default
-  export GIT_CONFIG_VALUE_${_gc_key_base}=nothing
+  # re-exports them in a subshell) is preserved. A pre-existing count that
+  # is not a non-negative integer is refused (git hard-errors on it anyway):
+  # the guards are never built on top of garbage indices.
+  _gc="${GIT_CONFIG_COUNT:-0}"
+  if ! [[ "$_gc" =~ ^[0-9]+$ ]]; then
+    # emit_json is defined later in the script (after this block); build the
+    # refusal summary inline (jq, never string interpolation) so the JSON
+    # contract is identical to every other PI_ERROR refusal path.
+    log "REFUSED: pre-existing GIT_CONFIG_COUNT='${GIT_CONFIG_COUNT}' is not a non-negative integer (set PI_DELEGATE_UNSAFE=1 to override)"
+    jq -cn '{status:"PI_ERROR",verdict:null,rounds:0,total_pi_calls:0,findings:[],raw_output:""}'
+    exit 3
+  fi
+  export GIT_CONFIG_KEY_${_gc}=push.default GIT_CONFIG_VALUE_${_gc}=nothing
+  _gc=$((_gc + 1))
   # pushInsteadOf rewrites matching URL prefixes to the dead helper. Known
   # limit: git does not rewrite bare relative local paths (e.g.
   # `git push ../repo`) — they have no prefix for the matching, so that
   # form cannot be blocked via config (an inherent git limitation).
   for _p in https:// http:// ssh:// git:// file:// git@ /; do
-    _gc_key_base="$(( _gc_count ))"
-    _gc_count=$(( _gc_count + 1 ))
-    export GIT_CONFIG_KEY_${_gc_key_base}="url.pi-delegate-push-disabled://.pushInsteadOf"
-    export GIT_CONFIG_VALUE_${_gc_key_base}="${_p}"
+    export GIT_CONFIG_KEY_${_gc}="url.pi-delegate-push-disabled://.pushInsteadOf" GIT_CONFIG_VALUE_${_gc}="${_p}"
+    _gc=$((_gc + 1))
   done
   # For every configured remote, set a pushurl to an invalid URL. This makes
   # `git push <remote>` (and `git push <remote> <ref>`) fail with a clear
   # "remote helper ... aborted session" error rather than pushing.
-  while IFS= read -r _remote_name; do
-    [ -n "$_remote_name" ] || continue
-    _gc_key_base="$(( _gc_count ))"
-    _gc_count=$(( _gc_count + 1 ))
-    export GIT_CONFIG_KEY_${_gc_key_base}="remote.${_remote_name}.pushurl"
-    export GIT_CONFIG_VALUE_${_gc_key_base}=pi-delegate-push-disabled://dead
+  while IFS= read -r _r; do
+    [ -n "$_r" ] || continue
+    export GIT_CONFIG_KEY_${_gc}="remote.${_r}.pushurl" GIT_CONFIG_VALUE_${_gc}=pi-delegate-push-disabled://dead
+    _gc=$((_gc + 1))
   done < <(git remote 2>/dev/null || true)
-  export GIT_CONFIG_COUNT="${_gc_count}"
-  unset _gc_count _gc_key_base _remote_name _p
+  export GIT_CONFIG_COUNT="${_gc}"
+  unset _gc _p _r
 fi
 
 # pi discovery: PATH first (`command -v pi` + executable check), then
@@ -329,16 +332,34 @@ if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
     fi
   fi
   # Secret-looking files anywhere in the working tree (tracked, untracked,
-  # and ignored — pi can read ignored files too). `find` from the repo root,
-  # pruning .git and node_modules, matching the secret patterns. Max 5 paths
-  # are listed in the refusal message.
-  secrets_file="$(mktemp)" || secrets_file="/dev/null"
-  find . -not -path './.git' -not -path './.git/*' -not -path './node_modules' -not -path './node_modules/*' \
-    \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' \) -type f \
-    2>/dev/null > "$secrets_file" || true
-  # .env.example / .env.sample / .env.template are safe (no secrets).
+  # and ignored — pi can read ignored files too). `find` runs from the repo
+  # root (paths are reported relative to it), pruning .git and node_modules,
+  # matching the secret patterns on regular files and symlinks alike. The
+  # scan is fail-closed: any non-zero `find` exit (e.g. an unreadable
+  # directory) is refused as PI_ERROR — a partial scan must never pass.
+  repo_root="$(git rev-parse --show-toplevel)"
+  secrets_file="$(mktemp)"
+  scan_err_file="$(mktemp)"
+  secrets_rc=0
+  find "$repo_root" -not -path "$repo_root/.git" -not -path "$repo_root/.git/*" -not -path "$repo_root/node_modules" -not -path "$repo_root/node_modules/*" \
+    \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' \) \( -type f -o -type l \) \
+    > "$secrets_file" 2> "$scan_err_file" || secrets_rc=$?
+  if [ "$secrets_rc" -ne 0 ]; then
+    scan_err="$(cat "$scan_err_file")"
+    [ -n "$scan_err" ] || scan_err="(no output)"
+    log "REFUSED: secret-file scan failed: ${scan_err}"
+    emit_json "PI_ERROR" "" 0 0 '[]' ""
+    rm -f "$secrets_file" "$scan_err_file"
+    exit 3
+  fi
+  # .env.example / .env.sample / .env.template are safe (no secrets). Max 5
+  # paths are listed in the refusal message (integer counter, not a per-
+  # iteration grep|wc pipeline).
   secrets_found=""
+  sf=""
+  shown=0
   while IFS= read -r sf; do
+    sf="${sf#"$repo_root"/}"
     case "$sf" in
       *.example|*.sample|*.template) continue ;;
     esac
@@ -347,14 +368,15 @@ if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
     else
       secrets_found="${secrets_found}, ${sf}"
     fi
-    [ "$(printf '%s' "$secrets_found" | grep -o ',' | wc -l | tr -d ' ')" -ge 4 ] && break
+    shown=$((shown + 1))
+    [ "$shown" -ge 5 ] && break
   done < "$secrets_file"
+  rm -f "$secrets_file" "$scan_err_file"
   if [ -n "$secrets_found" ]; then
     log "REFUSED: secret-looking file(s) present in the working tree: ${secrets_found} (set PI_DELEGATE_UNSAFE=1 to override)"
     emit_json "PI_ERROR" "" 0 0 '[]' ""
     exit 3
   fi
-  rm -f "$secrets_file"
 fi
 
 # --- Diff snapshot --------------------------------------------------------
