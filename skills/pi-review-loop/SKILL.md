@@ -77,6 +77,20 @@ bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"
 - `--max-rounds <N>` (1–3, default 3) is also passed through if the user
   asks for a smaller review budget; the script rejects values above 3.
 
+**Per-call provider/model logging (issue #26):** after every successful pi
+call, the driver reads the `provider` and `model` fields from the assistant
+`message_end` events in pi's `--mode json` transcript and logs the pair to
+**stderr** (e.g. `pi call 1: provider/model anthropic/claude-opus-4`).
+This is informational only — missing fields are reported as
+`unknown/unknown`, the exit code and JSON summary contract are unchanged.
+Use it to confirm which model actually answered each round.
+
+> **Model pinning (`PI_PROVIDER`/`PI_MODEL` env vars) was proposed in issue
+> #26 but declined by operator policy** — `--model` passthrough remains the
+> only supported model-selection mechanism. The per-call logging above is the
+> substitute: it surfaces the `provider/model` pair pi reports, without
+> introducing a failure mode or changing the six-field JSON contract.
+
 ## Interpreting the JSON summary
 
 The summary on the last stdout line has this shape:

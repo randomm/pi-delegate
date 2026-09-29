@@ -161,10 +161,26 @@ orchestrate.sh --model <model> --max-rounds <N> "<task description>"
   argv string, which avoids `E2BIG` for large prompts on its own; this check
   is a second, explicit guard for the combined size.
 
+> **Model pinning (issue #26, closed — declined by operator policy):** the
+> original proposal to add `PI_PROVIDER` / `PI_MODEL` env vars that forward
+> `--provider` / `--model` to every pi call was explicitly declined in issue
+> #26. The model remains unpinned; `--model` passthrough is the only supported
+> way to select a model. Instead, after every successful pi call the driver
+> reads the `provider` and `model` fields from the assistant `message_end`
+> events in the `--mode json` transcript and logs the pair to **stderr**
+> (e.g. `pi call 1: provider/model anthropic/claude-opus-4`). This is purely
+> informational: missing fields are reported as `unknown/unknown`, the exit
+> code and JSON summary contract are unchanged, and no failure mode is
+> introduced. A `pi` that reports a different provider/model than expected
+> will be visible in the stderr log, but the driver does not fail.
+
 ## Model selection guide
 
 There are **no pinned model defaults** — both skills pass `--model` through only
 when you explicitly name one, otherwise pi uses whatever default its config has.
+After each pi call the review-loop driver logs the `provider/model` pair reported
+by pi's `message_end` events to stderr (issue #26); check the stderr output to
+confirm which model actually answered each round.
 Pick models by the *kind* of work:
 
 | Work | Model class | Rationale |

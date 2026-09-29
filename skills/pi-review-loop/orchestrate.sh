@@ -409,7 +409,30 @@ run_pi() {
   local text
   text="$(printf '%s' "$output" | jq -s -r '[.[] | select(.type == "message_end") | select(.message.role == "assistant") | select(.message.stopReason == "stop")] | last | (.message.content // [] | map(select(.type == "text") | .text) | join("\n")) // empty' 2>/dev/null)" || text=""
   last_transcript="$text"
+
+  verify_provider_model "$output" "pi call ${total_pi_calls}"
   return 0
+}
+
+# --- Provider/model verification ------------------------------------------
+# After each successful pi call, read every assistant message_end from the
+# --mode json transcript and log to stderr which provider/model answered
+# (issue #26: the model is intentionally unpinned, so the user can see
+# where the work actually went). No failure mode: a missing field is
+# reported as "unknown", never fatal. Runs once per call; the jq parse is
+# on a single run's output only.
+verify_provider_model() {
+  local output="$1" label="$2"
+  local pm
+  pm="$(printf '%s' "$output" | jq -s -r '[.[] | select(.type == "message_end") | select(.message.role == "assistant") | ((.message.provider // "unknown") + "/" + (.message.model // "unknown"))] | unique | .[]' 2>/dev/null)" || pm=""
+  if [ -n "$pm" ]; then
+    local pair
+    for pair in $pm; do
+      log "${label}: provider/model ${pair}"
+    done
+  else
+    log "${label}: provider/model not reported in transcript"
+  fi
 }
 
 # --- Verdict parsing ------------------------------------------------------
