@@ -142,8 +142,15 @@ orchestrate.sh --model <model> --max-rounds <N> "<task description>"
   neither exists, pi calls run without a time limit and a warning is logged
   once. Must be a positive integer, or the driver exits 2.
 - `PI_DIFF_MAX_BYTES` — max bytes of the diff (or fix-prompt transcript) embedded
-  in a review prompt (default 100000); larger content is truncated with a
-  notice.
+  in a review prompt (default 90000); larger content is truncated with a
+  notice. The lower default (was 100000) ensures the total prompt stays well
+  under `MAX_ARG_STRLEN` (131072 on Linux).
+- `PI_PROMPT_MAX_BYTES` — max total bytes for a single pi call (all argv args +
+  stdin combined, default 120000). If the total exceeds this, the driver
+  produces a clear `PI_ERROR` (exit 3) instead of an opaque `E2BIG` from the
+  kernel. The prompt itself is passed via **stdin** (piped to pi), not as an
+  argv string, which avoids `E2BIG` for large prompts on its own; this check
+  is a second, explicit guard for the combined size.
 
 ## Model selection guide
 
