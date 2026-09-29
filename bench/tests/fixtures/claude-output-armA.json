@@ -1,0 +1,30 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "result": "done",
+  "duration_ms": 42000,
+  "duration_api_ms": 40000,
+  "total_cost_usd": 0.42,
+  "modelUsage": {
+    "claude-sonnet-5-5": {
+      "inputTokens": 1200,
+      "outputTokens": 800,
+      "cacheReadInputTokens": 5000,
+      "cacheCreationInputTokens": 21000,
+      "costUSD": 0.42,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 0,
+      "canonicalModel": "claude-sonnet-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [
+    {"tool": "Bash", "reason": "outside allowed dirs"}
+  ],
+  "terminal_reason": "completed",
+  "num_turns": 3,
+  "session_id": "00000000-0000-0000-0000-000000000000"
+}

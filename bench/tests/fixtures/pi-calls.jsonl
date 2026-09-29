@@ -1,0 +1,2 @@
+{"argv":["--mode","json","-p","--no-session","task: do the thing"],"duration_ms":5000,"exit":0,"mode":"json","call_id":"1700000000000_12345"}
+{"argv":["-p","--no-session","--no-extensions","task: oneshot task"],"duration_ms":2000,"exit":0,"mode":"text","call_id":"1700000001000_12346"}

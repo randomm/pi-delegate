@@ -1,0 +1,28 @@
+{
+  "type": "result",
+  "subtype": "error",
+  "is_error": true,
+  "result": "something went wrong",
+  "duration_ms": 1500,
+  "duration_api_ms": 1200,
+  "total_cost_usd": 0.01,
+  "modelUsage": {
+    "claude-sonnet-5-5": {
+      "inputTokens": 50,
+      "outputTokens": 10,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 100,
+      "costUSD": 0.01,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 0,
+      "canonicalModel": "claude-sonnet-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [],
+  "terminal_reason": "error",
+  "num_turns": 1,
+  "session_id": "11111111-1111-1111-1111-111111111111"
+}

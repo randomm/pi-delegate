@@ -1,0 +1,11 @@
+{
+  "task": "issue-41-mech",
+  "arm": "A",
+  "run": 2,
+  "test_cmd": "bats skills/pi-review-loop/test/",
+  "patch": "/Users/janni/projects/pi-delegate/bench/tasks/issue-41-mech/grading.patch",
+  "test_log": "/tmp/pi-bench/issue-41-mech/A/2/test-output.log",
+  "pass": false,
+  "error": "test command exited 1",
+  "graded_at": "2026-09-29T12:30:00Z"
+}

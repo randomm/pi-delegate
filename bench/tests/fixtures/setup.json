@@ -1,0 +1,13 @@
+{
+  "task": "issue-41-mech",
+  "arm": "A",
+  "run": 1,
+  "repo": "/Users/janni/projects/pi-delegate",
+  "base_sha": "b1a2b78",
+  "fix_commit": "be3d6146cb278316f7b2bf5fabf1e4b1f59b3253",
+  "test_cmd": "bats skills/pi-review-loop/test/",
+  "clone_sha": "b1a2b782a1d093830824d6766e01b1d4821f8c18",
+  "branch": "bench/A/1",
+  "run_dir": "/tmp/pi-bench/issue-41-mech/A/1",
+  "setup_at": "2026-09-29T12:00:00Z"
+}

@@ -1,0 +1,12 @@
+{
+  "task": "issue-41-mech",
+  "arm": "A",
+  "run": 1,
+  "model": "claude-sonnet-5-5",
+  "perm_mode": "auto",
+  "pi_delegate_sha": "",
+  "config_dir": "/tmp/pi-bench/issue-41-mech/A/1/claude-config",
+  "prompt_file": "/tmp/pi-bench/issue-41-mech/A/1/prompt.txt",
+  "claude_exit": 0,
+  "started_at": "2026-09-29T12:00:05Z"
+}
