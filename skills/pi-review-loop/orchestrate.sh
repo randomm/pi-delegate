@@ -50,7 +50,7 @@
 #   1  REJECTED (budget exhausted, no terminal verdict reached)
 #   2  INCOMPLETE (no parseable verdict from pi)
 #   3  PI_ERROR   (pi missing, pi crashed, a diff snapshot failed
-#       (git rev-parse / git diff / git status / git diff --no-index)
+#       (git rev-parse / git diff / git ls-files / git diff --no-index)
 #       with git's stderr surfaced verbatim, or pi timed out after
 #       PI_TIMEOUT seconds)
 #   2  is also used for CLI usage errors (unknown flag, missing task,
@@ -481,7 +481,7 @@ dispatch_fix() {
   return 0
 }
 
-# --- Diff snapshots ---------------------------------------------------------
+# --- Start ref (recorded before develop) -----------------------------------
 
 # git stderr lands in GIT_ERR_FILE only on failure paths that exit
 # immediately (die_git_error / fail_pi_error / INCOMPLETE), so a single
