@@ -36,6 +36,104 @@ curl -fsSL https://pi.dev/install.sh | sh
 
 then offer to re-run once it is available.
 
+## Safety preflight (issue #30)
+
+pi has **no sandbox**: its full toolset can read every file in the working tree
+(including ignored ones) and run arbitrary commands — including `git push`.
+Before running pi, perform the same checks `orchestrate.sh` performs, unless
+`PI_DELEGATE_UNSAFE=1` is set:
+
+```bash
+# --- Safety preflight (skip if PI_DELEGATE_UNSAFE=1) -----------------------
+if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
+  # 1. Refuse the default branch (or detached HEAD at its tip).
+  default_branch=""
+  head_ref="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" || head_ref=""
+  if [ -n "$head_ref" ]; then
+    default_branch="${head_ref#origin/}"
+  else
+    for cand in main master; do
+      git show-ref --verify --quiet "refs/heads/$cand" 2>/dev/null && { default_branch="$cand"; break; }
+    done
+  fi
+  cur_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || cur_branch=""
+  if [ -n "$default_branch" ]; then
+    if [ -n "$cur_branch" ] && [ "$cur_branch" = "$default_branch" ]; then
+      echo "REFUSED: current branch is the default branch '${default_branch}' (set PI_DELEGATE_UNSAFE=1 to override)" >&2
+      exit 3
+    fi
+    if [ -z "$cur_branch" ]; then
+      head_sha="$(git rev-parse --quiet --verify HEAD 2>/dev/null)" || head_sha=""
+      def_sha="$(git rev-parse --quiet --verify "refs/heads/${default_branch}" 2>/dev/null)" || def_sha=""
+      if [ -n "$head_sha" ] && [ "$head_sha" = "$def_sha" ]; then
+        echo "REFUSED: detached HEAD at the tip of the default branch '${default_branch}' (set PI_DELEGATE_UNSAFE=1 to override)" >&2
+        exit 3
+      fi
+    fi
+  fi
+  # 2. Refuse secret-looking files (.env, .env.*, *.pem, *.key) — regular
+  #    files and symlinks alike, anywhere in the tree. The scan runs from
+  #    the repo root (paths are reported relative to it) and is fail-closed:
+  #    any non-zero `find` exit (e.g. an unreadable directory) is a refusal
+  #    — a partial scan must never pass.
+  repo_root="$(git rev-parse --show-toplevel)" || { echo "REFUSED: could not determine the repo root" >&2; exit 3; }
+  secrets_found=""
+  scan_file="$(mktemp)"
+  scan_err_file="$(mktemp)"
+  find "$repo_root" -not -path "$repo_root/.git" -not -path "$repo_root/.git/*" -not -path "$repo_root/node_modules" -not -path "$repo_root/node_modules/*" \
+    \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' \) \( -type f -o -type l \) \
+    > "$scan_file" 2> "$scan_err_file" || { echo "REFUSED: secret-file scan failed: $(cat "$scan_err_file")" >&2; exit 3; }
+  rm -f "$scan_err_file"
+  # .env.example / .env.sample / .env.template are safe (no secrets). Max 5
+  # paths are listed in the refusal message (integer counter, not a
+  # per-iteration grep|wc pipeline).
+  shown=0
+  while IFS= read -r sf; do
+    sf="${sf#"$repo_root"/}"
+    case "$sf" in *.example|*.sample|*.template) continue ;; esac
+    if [ -z "$secrets_found" ]; then secrets_found="$sf"; else secrets_found="${secrets_found}, ${sf}"; fi
+    shown=$((shown + 1))
+    [ "$shown" -ge 5 ] && break
+  done < "$scan_file"
+  rm -f "$scan_file"
+  if [ -n "$secrets_found" ]; then
+    echo "REFUSED: secret-looking file(s) present: ${secrets_found} (set PI_DELEGATE_UNSAFE=1 to override)" >&2
+    exit 3
+  fi
+  # 3. Neutralise git push for the pi process via GIT_CONFIG_* env.
+  #    The single cursor _gc starts at the validated pre-existing
+  #    GIT_CONFIG_COUNT (so caller entries are preserved) and each entry
+  #    exports its KEY_n / VALUE_n pair then increments; a non-numeric
+  #    pre-existing count is a refusal (git itself hard-errors on it).
+  _gc="${GIT_CONFIG_COUNT:-0}"
+  if ! [[ "$_gc" =~ ^[0-9]+$ ]]; then
+    echo "REFUSED: pre-existing GIT_CONFIG_COUNT='${GIT_CONFIG_COUNT}' is not a non-negative integer (set PI_DELEGATE_UNSAFE=1 to override)" >&2
+    exit 3
+  fi
+  export GIT_CONFIG_KEY_${_gc}=push.default GIT_CONFIG_VALUE_${_gc}=nothing
+  _gc=$((_gc + 1))
+  # pushInsteadOf rewrites common URL prefixes to the dead helper; the
+  # empty value in the last entry matches every remaining URL (including
+  # bare relative local paths like `git push ../repo`).
+  for _p in https:// http:// ssh:// git:// file:// git@ / ""; do
+    export GIT_CONFIG_KEY_${_gc}="url.pi-delegate-push-disabled://.pushInsteadOf" GIT_CONFIG_VALUE_${_gc}="${_p}"
+    _gc=$((_gc + 1))
+  done
+  while IFS= read -r _r; do
+    [ -n "$_r" ] || continue
+    export GIT_CONFIG_KEY_${_gc}="remote.${_r}.pushurl" GIT_CONFIG_VALUE_${_gc}=pi-delegate-push-disabled://dead
+    _gc=$((_gc + 1))
+  done < <(git remote 2>/dev/null)
+  export GIT_CONFIG_COUNT="${_gc}"
+  unset _gc _r _p
+fi
+# --- End safety preflight ---------------------------------------------------
+```
+
+Then proceed to the `## Invocation` block below. Real isolation (a disposable
+clone/worktree or a container) is the correct fix; this preflight is a
+last-resort guardrail, not a substitute.
+
 ## Invocation
 
 Run the task as a single one-shot, stateless call, passing the user's

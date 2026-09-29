@@ -41,6 +41,12 @@
 #                      binary exists (unbounded path).
 #                      Known limit: processes that detach into their own
 #                      session (setsid/daemons) escape the timeout entirely.
+#   PI_DELEGATE_UNSAFE  Set to 1 to skip the safety preflight (allow running
+#                      on the default branch, allow secret-looking files,
+#                      do not neutralise git push). Only set this when you
+#                      have arranged real isolation (a disposable clone /
+#                      worktree or a container) and understand that pi has
+#                      no sandbox. See the README "Safety" section.
 #
 # Output: all progress on stderr; exactly one JSON summary on the LAST
 # line of stdout (built with jq, never string interpolation).
@@ -52,11 +58,22 @@
 #   3  PI_ERROR   (pi missing, pi crashed, a diff snapshot failed
 #       (git rev-parse / git diff / git ls-files / git diff --no-index)
 #       with git's stderr surfaced verbatim, or pi timed out after
-#       PI_TIMEOUT seconds)
+#       PI_TIMEOUT seconds, or the safety preflight refused the run
+#       (default branch / secret files) — the refusal emits a JSON
+#       summary with status PI_ERROR)
 #   2  is also used for CLI usage errors (unknown flag, missing task,
 #       invalid --max-rounds, invalid PI_TIMEOUT, invalid PI_KILL_AFTER) —
 #       the spec defines exit codes 0-3 only, and a distinct usage code
 #       would require a new code; documented here.
+#
+# Safety preflight (issue #30): unless PI_DELEGATE_UNSAFE=1, the driver
+# refuses to run (exit 3, JSON summary) when the current branch is the
+# default branch (or HEAD is detached on its tip) or when secret-looking
+# files (.env, .env.*, *.pem, *.key) are present in the working tree.
+# It also neutralises `git push` for every pi process via the
+# GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n env (push.default
+# = nothing + per-remote pushurl to an invalid URL). See the README "Safety"
+# section for the rationale and the PI_DELEGATE_UNSAFE=1 opt-out.
 
 set -euo pipefail
 
@@ -126,6 +143,7 @@ die_env() {
 
 command -v git >/dev/null 2>&1 || die_env "-" "git is not installed or not on PATH"
 git rev-parse --git-dir >/dev/null 2>&1 || die_env "-" "not inside a git repository"
+
 command -v jq >/dev/null 2>&1 || die_env hint "jq is not installed or not on PATH"
 
 for f in "$DEVELOPER_MD" "$REVIEWER_MD"; do
@@ -135,6 +153,63 @@ done
 # Load the role prompts once at startup (not via `cat` inside run_pi).
 developer_md_content="$(cat "$DEVELOPER_MD")"
 reviewer_md_content="$(cat "$REVIEWER_MD")"
+
+# --- Push neutralisation (skipped when PI_DELEGATE_UNSAFE=1) ---------------
+# pi's full toolset can run `git push`. To keep the developer from pushing
+# feature-branch work (or, worse, the default branch) to a remote, the env is
+# configured so that every pi process's `git push` fails. This uses
+# GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n (0-indexed, git's
+# native env mechanism) to append to any existing GIT_CONFIG_* entries rather
+# than clobbering them. The config sets push.default=nothing (so a bare
+# `git push` with no refspec fails) and, for every `git remote`, a pushurl
+# pointing at an invalid URL (so `git push <remote>` fails). Pushes to an
+# explicit URL (`git push <url>`) bypass per-remote config, so common URL
+# prefixes (https://, http://, ssh://, git://, file://, the scp-like git@
+# form, and absolute local paths /) are additionally rewritten via
+# pushInsteadOf to the same dead helper. pushInsteadOf cannot rewrite bare
+# relative local paths (e.g. ../repo) — see the code comment below. The
+# single opt-out is PI_DELEGATE_UNSAFE=1.
+if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
+  # Build the GIT_CONFIG_* entries, appending to any pre-existing ones so we
+  # never clobber a caller's config. GIT_CONFIG entries are 0-indexed; the
+  # single cursor _gc starts at the validated pre-existing GIT_CONFIG_COUNT,
+  # and each entry exports its KEY_n / VALUE_n pair then increments (COUNT
+  # is exported once, at the end). A caller-provided
+  # GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n (e.g. git
+  # re-exports them in a subshell) is preserved. A pre-existing count that
+  # is not a non-negative integer is refused (git hard-errors on it anyway):
+  # the guards are never built on top of garbage indices.
+  _gc="${GIT_CONFIG_COUNT:-0}"
+  if ! [[ "$_gc" =~ ^[0-9]+$ ]]; then
+    # emit_json is defined later in the script (after this block); build the
+    # refusal summary inline (jq, never string interpolation) so the JSON
+    # contract is identical to every other PI_ERROR refusal path.
+    log "REFUSED: pre-existing GIT_CONFIG_COUNT='${GIT_CONFIG_COUNT}' is not a non-negative integer (set PI_DELEGATE_UNSAFE=1 to override)"
+    jq -cn '{status:"PI_ERROR",verdict:null,rounds:0,total_pi_calls:0,findings:[],raw_output:""}'
+    exit 3
+  fi
+  export GIT_CONFIG_KEY_${_gc}=push.default GIT_CONFIG_VALUE_${_gc}=nothing
+  _gc=$((_gc + 1))
+  # pushInsteadOf rewrites matching URL prefixes to the dead helper. The
+  # final entry has an EMPTY value, which matches every remaining URL
+  # (including bare relative local paths like `git push ../repo`, which
+  # have no prefix for the per-prefix entries above) — closing the last
+  # form a caller could use to bypass the dead helper.
+  for _p in https:// http:// ssh:// git:// file:// git@ / ""; do
+    export GIT_CONFIG_KEY_${_gc}="url.pi-delegate-push-disabled://.pushInsteadOf" GIT_CONFIG_VALUE_${_gc}="${_p}"
+    _gc=$((_gc + 1))
+  done
+  # For every configured remote, set a pushurl to an invalid URL. This makes
+  # `git push <remote>` (and `git push <remote> <ref>`) fail with a clear
+  # "remote helper ... aborted session" error rather than pushing.
+  while IFS= read -r _r; do
+    [ -n "$_r" ] || continue
+    export GIT_CONFIG_KEY_${_gc}="remote.${_r}.pushurl" GIT_CONFIG_VALUE_${_gc}=pi-delegate-push-disabled://dead
+    _gc=$((_gc + 1))
+  done < <(git remote 2>/dev/null || true)
+  export GIT_CONFIG_COUNT="${_gc}"
+  unset _gc _p _r
+fi
 
 # pi discovery: PATH first (`command -v pi` + executable check), then
 # well-known install locations.
@@ -208,6 +283,102 @@ fail_pi_error() {
   emit_json "PI_ERROR" "$verdict" "$round" "$total_pi_calls" "$findings_json" "$last_transcript"
   exit 3
 }
+
+# --- Safety preflight (skipped entirely when PI_DELEGATE_UNSAFE=1) ---------
+# pi has no sandbox: its full toolset can read every file in the working tree
+# (including ignored ones) and run arbitrary commands. This preflight refuses
+# to hand an unsafe tree to pi. Two checks: (1) the current branch must not be
+# the repo's default branch (or HEAD must not be detached on its tip) — pi must
+# work on a feature branch so its edits are not lost if it pushes or amends the
+# mainline; (2) secret-looking files (.env, .env.*, *.pem, *.key) must be
+# absent — pi's tools can read them and send them to the model provider. The
+# single opt-out is PI_DELEGATE_UNSAFE=1 (documented in README + both SKILL.md).
+# The preflight runs after loop-state init and function definitions so that
+# emit_json and the loop-state variables (verdict, round, total_pi_calls,
+# findings_json, last_transcript) are all in scope for the refusal path.
+if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
+  # Default branch: origin/HEAD target (minus "origin/"), else main, else
+  # master (only when the local branch exists); otherwise empty (no default).
+  default_branch=""
+  head_ref="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" || head_ref=""
+  if [ -n "$head_ref" ]; then
+    default_branch="${head_ref#origin/}"
+  else
+    cur="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || cur=""
+    for cand in main master; do
+      if [ -z "$cur" ] || [ "$cur" = "$cand" ]; then
+        if git show-ref --verify --quiet "refs/heads/$cand" 2>/dev/null; then
+          default_branch="$cand"
+          break
+        fi
+      fi
+    done
+  fi
+  cur_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || cur_branch=""
+  if [ -n "$default_branch" ]; then
+    if [ -n "$cur_branch" ] && [ "$cur_branch" = "$default_branch" ]; then
+      log "REFUSED: current branch is the default branch '${default_branch}' (set PI_DELEGATE_UNSAFE=1 to override)"
+      emit_json "PI_ERROR" "" 0 0 '[]' ""
+      exit 3
+    fi
+    # Detached HEAD exactly at the default branch's tip is equally unsafe.
+    if [ -z "$cur_branch" ]; then
+      head_sha="$(git rev-parse --quiet --verify HEAD 2>/dev/null)" || head_sha=""
+      def_sha="$(git rev-parse --quiet --verify "refs/heads/${default_branch}" 2>/dev/null)" || def_sha=""
+      if [ -n "$head_sha" ] && [ "$head_sha" = "$def_sha" ]; then
+        log "REFUSED: detached HEAD at the tip of the default branch '${default_branch}' (set PI_DELEGATE_UNSAFE=1 to override)"
+        emit_json "PI_ERROR" "" 0 0 '[]' ""
+        exit 3
+      fi
+    fi
+  fi
+  # Secret-looking files anywhere in the working tree (tracked, untracked,
+  # and ignored — pi can read ignored files too). `find` runs from the repo
+  # root (paths are reported relative to it), pruning .git and node_modules,
+  # matching the secret patterns on regular files and symlinks alike. The
+  # scan is fail-closed: any non-zero `find` exit (e.g. an unreadable
+  # directory) is refused as PI_ERROR — a partial scan must never pass.
+  repo_root="$(git rev-parse --show-toplevel)"
+  secrets_file="$(mktemp)"
+  scan_err_file="$(mktemp)"
+  secrets_rc=0
+  find "$repo_root" -not -path "$repo_root/.git" -not -path "$repo_root/.git/*" -not -path "$repo_root/node_modules" -not -path "$repo_root/node_modules/*" \
+    \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' \) \( -type f -o -type l \) \
+    > "$secrets_file" 2> "$scan_err_file" || secrets_rc=$?
+  if [ "$secrets_rc" -ne 0 ]; then
+    scan_err="$(cat "$scan_err_file")"
+    [ -n "$scan_err" ] || scan_err="(no output)"
+    log "REFUSED: secret-file scan failed: ${scan_err}"
+    emit_json "PI_ERROR" "" 0 0 '[]' ""
+    rm -f "$secrets_file" "$scan_err_file"
+    exit 3
+  fi
+  # .env.example / .env.sample / .env.template are safe (no secrets). Max 5
+  # paths are listed in the refusal message (integer counter, not a per-
+  # iteration grep|wc pipeline).
+  secrets_found=""
+  sf=""
+  shown=0
+  while IFS= read -r sf; do
+    sf="${sf#"$repo_root"/}"
+    case "$sf" in
+      *.example|*.sample|*.template) continue ;;
+    esac
+    if [ -z "$secrets_found" ]; then
+      secrets_found="$sf"
+    else
+      secrets_found="${secrets_found}, ${sf}"
+    fi
+    shown=$((shown + 1))
+    [ "$shown" -ge 5 ] && break
+  done < "$secrets_file"
+  rm -f "$secrets_file" "$scan_err_file"
+  if [ -n "$secrets_found" ]; then
+    log "REFUSED: secret-looking file(s) present in the working tree: ${secrets_found} (set PI_DELEGATE_UNSAFE=1 to override)"
+    emit_json "PI_ERROR" "" 0 0 '[]' ""
+    exit 3
+  fi
+fi
 
 # --- Diff snapshot --------------------------------------------------------
 # get_diff <label> — snapshot the full change set since START_REF:

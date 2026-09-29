@@ -23,13 +23,19 @@ setup() {
   # Temp git repo with a working-tree change so `git diff HEAD` is non-empty.
   REPO="$(mktemp -d)"
   cd "$REPO" || return 1
-  git init -q .
+  git init -q -b main .
   git config user.email t@t.t
   git config user.name t
   echo base > a.txt
   git add a.txt
   git commit -qm init
   echo modified > a.txt
+  # Create and switch to a feature branch so the safety preflight (which
+  # refuses the default branch) does not fire for the existing tests. The
+  # default branch is "main" — pinned via `git init -b main` so the suite
+  # is deterministic regardless of the machine's init.defaultBranch default
+  # (CI git defaults to "master").
+  git checkout -q -b feature/test-branch
 
   # Temp dirs for the mock pi and its call log.
   CALL_LOG="$(mktemp)"
@@ -333,7 +339,14 @@ WRAP
   wrap_dir="$(mktemp -d)"
   cat > "$wrap_dir/git" <<'WRAP'
 #!/bin/bash
-if [ "$1" = "rev-parse" ] && [ "$2" != "--git-dir" ]; then
+# The wrapper blocks `git rev-parse` EXCEPT for the two forms the preflight
+# needs (`--git-dir` for the is-a-repo check, `--show-toplevel` for the
+# secret scan's repo root) and EXCEPT `--verify -q HEAD` (the start-ref
+# recording) — those are what the driver must fail on. `hash-object` is
+# blocked too (the unborn-repo fallback).
+if [ "$1" = "rev-parse" ] && { [ "$2" = "--git-dir" ] || [ "$2" = "--show-toplevel" ]; }; then
+  : # allow
+elif [ "$1" = "rev-parse" ]; then
   echo "fatal: revparse boom" >&2
   exit 129
 elif [ "$1" = "hash-object" ]; then
@@ -1136,4 +1149,428 @@ model_block() {
     grep -qi "SIGTERM" "$f"
     grep -qi "SIGKILL" "$f"
   done
+}
+
+# --- Issue #30: safety preflight ------------------------------------------------
+
+@test "safety: refuse on the default branch (exit 3, PI_ERROR JSON, REFUSED stderr)" {
+  # The setup creates a feature branch; switch back to main to trigger the refusal.
+  git checkout -q main
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"default branch"* ]]
+  [[ "$out" == *"PI_DELEGATE_UNSAFE=1"* ]]
+  # The JSON summary must be the last line with status PI_ERROR.
+  local last
+  last="$(printf '%s\n' "$out" | tail -n 1)"
+  printf '%s' "$last" | jq -e '.status == "PI_ERROR"' >/dev/null
+}
+
+@test "safety: allow on a feature branch (no refusal, develop runs)" {
+  # The setup creates a feature branch; stay on it. The preflight must not
+  # fire, and the develop round must run.
+  fixture 1 'Developed it.'
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 3 ]
+  [[ "$out" != *"REFUSED:"* ]]
+}
+
+@test "safety: refuse on detached HEAD at the default branch's tip" {
+  # Switch to main, then detach at the tip.
+  git checkout -q main
+  git checkout -q --detach
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"detached HEAD"* ]]
+  [[ "$out" == *"default branch"* ]]
+}
+
+@test "safety: refuse when .env is present in the working tree" {
+  # On the feature branch (setup), add a .env file.
+  echo "SECRET=abc" > .env
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"secret-looking file"* ]]
+  [[ "$out" == *".env"* ]]
+}
+
+@test "safety: allow when only .env.example is present" {
+  # On the feature branch (setup), add only .env.example (safe).
+  echo "SECRET=example" > .env.example
+  fixture 1 'Developed it.'
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 3 ]
+  [[ "$out" != *"REFUSED:"* ]]
+}
+
+@test "safety: refuse when a *.pem file is present" {
+  # On the feature branch (setup), add a .pem file.
+  echo "-----BEGIN KEY-----" > key.pem
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"secret-looking file"* ]]
+  [[ "$out" == *".pem"* ]]
+}
+
+@test "safety: refuse when a *.key file is present" {
+  # On the feature branch (setup), add a .key file.
+  echo "KEYDATA" > secret.key
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"secret-looking file"* ]]
+  [[ "$out" == *".key"* ]]
+}
+
+@test "safety: refuse when a .env symlink is present" {
+  # The scan must match symlinks too: a .env symlink is as readable as the
+  # real file, so it must be refused.
+  echo "TARGET=real-secret" > real-secret.txt
+  ln -s real-secret.txt .env
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"secret-looking file"* ]]
+  [[ "$out" == *".env"* ]]
+}
+
+@test "safety: refuse when a *.key symlink is present" {
+  echo "K" > backing.key-file.txt
+  ln -s backing.key-file.txt cert.key
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"cert.key"* ]]
+}
+
+@test "safety: secret scan reports paths relative to the repo root" {
+  # The scan runs from the repo root, so the refusal message must carry a
+  # root-relative path (no leading slash, no './' prefix).
+  echo "SECRET=abc" > .env
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED: secret-looking file(s) present in the working tree: .env"* ]]
+}
+
+@test "safety: fail-closed — unreadable directory in the scan -> PI_ERROR, exit 3" {
+  # The secret scan is fail-closed: if `find` cannot read a directory (e.g.
+  # permissions 000), the driver must refuse (exit 3, PI_ERROR JSON, a
+  # REFUSED: secret-file scan failed message) rather than pass with a
+  # partial scan. Root can read anything, so this test only works for
+  # non-root users.
+  [ "$(id -u)" -ne 0 ] || skip "running as root; chmod 000 cannot block the scan"
+  local hidden
+  hidden="locked-dir"
+  mkdir "$hidden"
+  chmod 000 "$hidden"
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  chmod 755 "$hidden" 2>/dev/null || true
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED: secret-file scan failed"* ]]
+  # The JSON summary must be the last line with status PI_ERROR.
+  local last
+  last="$(printf '%s\n' "$out" | tail -n 1)"
+  printf '%s' "$last" | jq -e '.status == "PI_ERROR"' >/dev/null
+}
+
+@test "safety: opt-out PI_DELEGATE_UNSAFE=1 allows the default branch" {
+  # On main (default), the opt-out must skip the preflight and let the
+  # develop round run.
+  git checkout -q main
+  fixture 1 'Developed it.'
+  local out rc=0
+  out="$(PI_DELEGATE_UNSAFE=1 bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 3 ]
+  [[ "$out" != *"REFUSED:"* ]]
+}
+
+@test "safety: opt-out PI_DELEGATE_UNSAFE=1 allows secret files" {
+  # On the feature branch with a .env present, the opt-out must skip the
+  # preflight.
+  echo "SECRET=abc" > .env
+  fixture 1 'Developed it.'
+  local out rc=0
+  out="$(PI_DELEGATE_UNSAFE=1 bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 3 ]
+  [[ "$out" != *"REFUSED:"* ]]
+}
+
+@test "safety: opt-out PI_DELEGATE_UNSAFE=1 allows detached HEAD at default tip" {
+  git checkout -q main
+  git checkout -q --detach
+  fixture 1 'Developed it.'
+  local out rc=0
+  out="$(PI_DELEGATE_UNSAFE=1 bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 3 ]
+  [[ "$out" != *"REFUSED:"* ]]
+}
+
+@test "safety: push neutralisation — mock pi push fails (default)" {
+  # On the feature branch (setup), add a remote, and have the mock pi attempt
+  # a push. The GIT_CONFIG_* env must make the push fail.
+  # Set up a bare remote to push to.
+  local remote
+  remote="$(mktemp -d)/origin.git"
+  git init -q --bare "$remote"
+  git -C "$remote" config receive.denyCurrentBranch ignore
+  git remote add origin "$remote"
+  # Create a commit to push.
+  echo more >> a.txt
+  git add a.txt
+  git commit -qm "push test"
+  # Side file the mock pi appends the push exit code to.
+  local push_log
+  push_log="$(mktemp)"
+  export MOCK_PI_PUSH_LOG="$push_log"
+  # Fixture: the mock pi attempts a push (PUSH: directive). Write the raw
+  # directive (not JSON-wrapped) so the mock pi's case match sees "PUSH:".
+  printf '%s\n' 'PUSH:origin HEAD' > "$FIXTURES_DIR/1"
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  # The push must have failed (non-zero exit code in the side file).
+  [ -s "$push_log" ]
+  local p_rc
+  p_rc="$(head -n 1 "$push_log" | tr -d ' ')"
+  [ -n "$p_rc" ] && [ "$p_rc" -ne 0 ]
+  # The remote must NOT have received the push.
+  [ "$(git -C "$remote" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ]
+  rm -f "$push_log"
+  rm -rf "$(dirname "$remote")"
+}
+
+@test "safety: push neutralisation — mock pi push succeeds with opt-out" {
+  # On the feature branch (setup), add a remote, and have the mock pi attempt
+  # a push. With PI_DELEGATE_UNSAFE=1, the GIT_CONFIG_* env is not set, so the
+  # push must succeed.
+  local remote
+  remote="$(mktemp -d)/origin.git"
+  git init -q --bare "$remote"
+  git -C "$remote" config receive.denyCurrentBranch ignore
+  git remote add origin "$remote"
+  echo more >> a.txt
+  git add a.txt
+  git commit -qm "push test optout"
+  # Side file the mock pi appends the push exit code to.
+  local push_log
+  push_log="$(mktemp)"
+  export MOCK_PI_PUSH_LOG="$push_log"
+  printf '%s\n' 'PUSH:origin HEAD' > "$FIXTURES_DIR/1"
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  local out rc=0
+  out="$(PI_DELEGATE_UNSAFE=1 bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  # The push must have succeeded (exit code 0 in the side file).
+  [ -s "$push_log" ]
+  local p_rc
+  p_rc="$(head -n 1 "$push_log" | tr -d ' ')"
+  [ -n "$p_rc" ] && [ "$p_rc" -eq 0 ]
+  # The remote must have received the push.
+  [ "$(git -C "$remote" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" -ge 1 ]
+  rm -f "$push_log"
+  rm -rf "$(dirname "$remote")"
+}
+
+@test "safety: push neutralisation — explicit URL pushes are blocked (pushInsteadOf)" {
+  # The preflight rewrites common URL prefixes to the dead helper via
+  # pushInsteadOf, so `git push <url>` (which bypasses per-remote config)
+  # must also fail. This exercises the REAL driver: the mock pi's PUSH: and
+  # ENV: directives run inside an actual orchestrate.sh invocation, so the
+  # env it dumps (MOCK_PI_ENV_LOG) is the config the driver itself built.
+  local remote
+  remote="$(mktemp -d)/origin.git"
+  git init -q --bare "$remote"
+  git -C "$remote" config receive.denyCurrentBranch ignore
+  git remote add origin "$remote"
+  echo more >> a.txt
+  git add a.txt
+  git commit -qm "pushinsteadof test"
+
+  local push_log env_log
+  push_log="$(mktemp)"
+  env_log="$(mktemp)"
+  export MOCK_PI_PUSH_LOG="$push_log"
+  export MOCK_PI_ENV_LOG="$env_log"
+  # Fixture 1 (develop call): a single PUSH: directive with three explicit
+  # URL forms. The mock pi dumps the driver's exported GIT_CONFIG_* env to
+  # MOCK_PI_ENV_LOG first, then attempts the push (which pushInsteadOf must
+  # block). Fixture 2 (review): APPROVED to end the loop.
+  printf '%s\n' 'PUSH:https://example.com/x.git HEAD' > "$FIXTURES_DIR/1"
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+
+  # The mock pi must have dumped the real GIT_CONFIG_* env from inside the
+  # driver run.
+  [ -s "$env_log" ]
+  grep -q '^GIT_CONFIG_COUNT=' "$env_log"
+  grep -q '^GIT_CONFIG_KEY_0=push.default$' "$env_log"
+  grep -q '^GIT_CONFIG_VALUE_0=nothing$' "$env_log"
+  grep -q 'pushInsteadOf' "$env_log"
+  grep -q 'remote.origin.pushurl' "$env_log"
+
+  # The explicit-URL push must have failed (non-zero exit code in the side
+  # file), and the remote must never have received a ref.
+  [ -s "$push_log" ]
+  local p_rc
+  p_rc="$(head -n 1 "$push_log" | tr -d ' ')"
+  [ -n "$p_rc" ] && [ "$p_rc" -ne 0 ]
+  [ "$(git -C "$remote" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ]
+  rm -f "$push_log" "$env_log"
+  rm -rf "$(dirname "$remote")"
+}
+
+@test "safety: push neutralisation — bare relative local paths are blocked (empty pushInsteadOf)" {
+  # A bare relative local path (e.g. `git push ../origin.git HEAD`) has no
+  # prefix for the per-prefix pushInsteadOf entries, so the driver appends
+  # one empty-valued pushInsteadOf that matches every remaining URL. This
+  # regression test exercises the REAL driver: the mock pi's PUSH: directive
+  # runs inside an actual orchestrate.sh invocation and pushes to the bare
+  # remote via its RELATIVE path, which the empty rewrite must block.
+  local remote
+  remote="$(mktemp -d)/origin.git"
+  git init -q --bare "$remote"
+  git -C "$remote" config receive.denyCurrentBranch ignore
+  git remote add origin "$remote"
+  echo more >> a.txt
+  git add a.txt
+  git commit -qm "relative push test"
+  # The relative path to the bare remote from the repo root (the driver and
+  # mock pi both run with cwd at the repo root).
+  local rel
+  rel="$(python3 -c 'import os,sys;print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$remote" "$(git rev-parse --show-toplevel)")"
+  local push_log env_log
+  push_log="$(mktemp)"
+  env_log="$(mktemp)"
+  export MOCK_PI_PUSH_LOG="$push_log"
+  export MOCK_PI_ENV_LOG="$env_log"
+  # Fixture 1 (develop call): the PUSH: directive is whitespace-split by the
+  # mock pi, so the relative target (no spaces in this relpath) is passed
+  # verbatim as the push URL. The mock pi also dumps the driver's env so we
+  # can verify the empty catch-all entry is present. Fixture 2 (review):
+  # APPROVED to end the loop.
+  printf '%s\n' "PUSH:${rel} HEAD" > "$FIXTURES_DIR/1"
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+
+  # The driver's env must contain the pushInsteadOf entries (the empty
+  # catch-all entry appears in the env dump as a bare GIT_CONFIG_VALUE_n
+  # line, which is what the blocked push below proves end-to-end).
+  [ -s "$env_log" ]
+  grep -q 'pushInsteadOf' "$env_log"
+
+  # The relative-path push must have failed (non-zero exit code), and the
+  # bare remote must never have received a ref.
+  [ -s "$push_log" ]
+  local p_rc
+  p_rc="$(head -n 1 "$push_log" | tr -d ' ')"
+  [ -n "$p_rc" ] && [ "$p_rc" -ne 0 ]
+  [ "$(git -C "$remote" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ]
+  rm -f "$push_log" "$env_log"
+  rm -rf "$(dirname "$remote")"
+}
+
+@test "safety: preflight appends to a pre-existing GIT_CONFIG_COUNT (no clobber)" {
+  # A caller (or git itself) may have exported GIT_CONFIG_COUNT/KEY_n/VALUE_n;
+  # the preflight must continue the indexing from the existing count instead
+  # of overwriting those entries. This exercises the REAL driver: the caller
+  # exports 2 entries (indices 0-1), the driver appends its own (starting at
+  # index 2), and the mock pi's ENV: directive dumps the resulting env from
+  # inside an actual orchestrate.sh run.
+  local remote
+  remote="$(mktemp -d)/origin.git"
+  git init -q --bare "$remote"
+  git remote add origin "$remote"
+
+  # A caller's 2 entries (indices 0-1). The driver must preserve them and
+  # start its own entries at index 2.
+  export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=T GIT_CONFIG_KEY_1=user.email GIT_CONFIG_VALUE_1=t@t
+
+  local env_log push_log
+  env_log="$(mktemp)"
+  push_log="$(mktemp)"
+  export MOCK_PI_ENV_LOG="$env_log"
+  export MOCK_PI_PUSH_LOG="$push_log"
+  # Fixture 1 (develop call): a single PUSH: directive. The mock pi dumps
+  # the driver's exported env to MOCK_PI_ENV_LOG, then attempts the push
+  # (which must fail — push.default=nothing is in effect at index 2, not
+  # 0). Fixture 2 (review): APPROVED to end the loop.
+  printf '%s\n' 'PUSH:origin HEAD' > "$FIXTURES_DIR/1"
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+
+  [ -s "$env_log" ]
+  # The caller's entries survive (no clobber):
+  grep -q '^GIT_CONFIG_KEY_0=user.name$' "$env_log"
+  grep -q '^GIT_CONFIG_VALUE_0=T$' "$env_log"
+  grep -q '^GIT_CONFIG_KEY_1=user.email$' "$env_log"
+  grep -q '^GIT_CONFIG_VALUE_1=t@t$' "$env_log"
+  # The driver's entries start at index 2 and the count reflects the append
+  # (>= 12: 2 caller + 1 push.default + 8 pushInsteadOf entries (7 prefixes
+  # + 1 empty catch-all for bare relative local paths) + 1 remote pushurl
+  # = 12).
+  grep -q '^GIT_CONFIG_KEY_2=push.default$' "$env_log"
+  grep -q '^GIT_CONFIG_VALUE_2=nothing$' "$env_log"
+  grep -q '^GIT_CONFIG_COUNT=12$' "$env_log"
+  grep -q 'remote.origin.pushurl' "$env_log"
+  # The push must have failed.
+  [ -s "$push_log" ]
+  local p_rc
+  p_rc="$(head -n 1 "$push_log" | tr -d ' ')"
+  [ -n "$p_rc" ] && [ "$p_rc" -ne 0 ]
+  rm -f "$env_log" "$push_log"
+  rm -rf "$(dirname "$remote")"
+}
+
+@test "safety: pre-existing GIT_CONFIG_COUNT that is not numeric -> PI_ERROR, exit 3" {
+  # The preflight must refuse (not crash under set -e arithmetic) when the
+  # environment carries a non-numeric GIT_CONFIG_COUNT. In practice git itself
+  # hard-errors on a bogus count, so a direct export would fail the driver's
+  # own `git rev-parse` before the preflight. To reach the preflight's own
+  # guard we use a git wrapper that strips GIT_CONFIG_COUNT from the child
+  # environment (so git's own calls succeed) while the driver's shell still
+  # sees the bogus value in its own environment — the preflight's numeric
+  # check is what catches it.
+  local wrap_dir out rc=0
+  wrap_dir="$(mktemp -d)"
+  cat > "$wrap_dir/git" <<'WRAP'
+#!/bin/bash
+env -u GIT_CONFIG_COUNT /usr/bin/git "$@"
+WRAP
+  chmod +x "$wrap_dir/git"
+  out="$(GIT_CONFIG_COUNT=abc PATH="$wrap_dir:$PATH" bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  rm -f "$wrap_dir/git"; rmdir "$wrap_dir"
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"GIT_CONFIG_COUNT"* ]]
+  [[ "$out" == *"PI_DELEGATE_UNSAFE=1"* ]]
+  local last
+  last="$(printf '%s\n' "$out" | tail -n 1)"
+  printf '%s' "$last" | jq -e '.status == "PI_ERROR"' >/dev/null
+}
+
+@test "safety: pre-existing GIT_CONFIG_COUNT=0 (numeric) is accepted" {
+  # A numeric pre-existing count (even 0) must be accepted, not refused.
+  export GIT_CONFIG_COUNT=0
+  fixture 1 'Developed it.'
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 3 ]
+  [[ "$out" != *"REFUSED:"* ]]
 }

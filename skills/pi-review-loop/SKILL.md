@@ -22,6 +22,19 @@ SKILL.md):
 - `${CLAUDE_SKILL_DIR}/developer.md` — developer/fixer role prompt (passed to pi via `--append-system-prompt`)
 - `${CLAUDE_SKILL_DIR}/adversarial-reviewer.md` — reviewer role prompt (passed to pi via `--append-system-prompt`)
 
+## Safety (issue #30)
+
+**pi has no sandbox.** `orchestrate.sh` performs a **safety preflight** before
+any pi call: it **refuses to run** (exit 3, `REFUSED:` on stderr + `PI_ERROR`
+JSON) when (1) the current branch is the repo's default branch (or HEAD is
+detached at its tip), or (2) secret-looking files (`.env`, `.env.*` except
+`*.example`/`*.sample`/`*.template`, `*.pem`, `*.key`) are present in the
+working tree. It also **neutralises `git push`** for every pi process via the
+`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` env (so `git push`
+fails). **Real isolation is a disposable clone/worktree or a container** — the
+preflight is a last-resort guardrail. To opt out of all three guards, set
+`PI_DELEGATE_UNSAFE=1`.
+
 ## Invocation
 
 Run the loop with the user's request as the task, passed as a **single
