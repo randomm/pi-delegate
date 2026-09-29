@@ -161,6 +161,34 @@ fixture() {
   ! grep -q "^new-dir/$" "$STDIN_LOG"
 }
 
+@test "untracked symlink created in develop round: note in prompt, no --no-index rendering, no sentinel" {
+  # Gate resolution (b): the develop-round mock creates an untracked symlink
+  # to a file OUTSIDE the repo whose contents hold a sentinel string.
+  # The review prompt must carry the synthetic `new symlink` note AND must
+  # NOT carry the raw `git diff --no-index` rendering (mode 120000 + the
+  # target path); the sentinel-content check is a guard against a path that
+  # would read the target itself.
+  local secret
+  secret="$(mktemp)"
+  echo "SENTINEL-SECRET-CONTENT-xyz" > "$secret"
+  printf '%s\n' "SYMLINK:link-to-secret:${secret}" > "$FIXTURES_DIR/1"
+  fixture 2 'Reviewing the symlink note.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  # (a) the synthetic note is present in the review prompt
+  grep -q "new symlink link-to-secret -> ${secret} (content not shown)" "$STDIN_LOG"
+  # (b) the mode-120000 --no-index hunk for the symlink is absent: the
+  #     symlink is never rendered as a diff, so the target path appears
+  #     only inside the synthetic note, never as a diff header / mode line.
+  if grep -q "new file mode" "$STDIN_LOG"; then return 1; fi
+  if grep -q "120000" "$STDIN_LOG"; then return 1; fi
+  # (c) the sentinel (the target's content) never reaches any pi prompt
+  if grep -q "SENTINEL-SECRET-CONTENT-xyz" "$STDIN_LOG"; then return 1; fi
+  # The link itself exists on disk (the mock really created it).
+  if [ ! -L link-to-secret ]; then return 1; fi
+  rm -f "$secret"
+}
+
 @test "developer commits its change -> change is reviewed and PASS" {
   # A develop round that commits (pi often does when the task says so)
   # leaves a diff against HEAD empty. The review diff must still cover the
@@ -186,6 +214,39 @@ F
   out="$(tail_json)"
   [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
   [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
+}
+
+@test "untracked symlink created mid-develop: note in prompt, no --no-index hunk" {
+  # A develop round that creates an untracked symlink (pi has no sandbox;
+  # the symlink may point at sensitive content outside the repo). get_diff
+  # must render it as a synthetic one-line note, never via `git diff
+  # --no-index` (which would expose the target path in the raw diff hunk).
+  # The sentinel file lives OUTSIDE the repo so the note — which carries
+  # only the target path — is the only trace of the link in the prompt.
+  local sentinel
+  sentinel="$(mktemp)"
+  echo "SENTINEL-SECRET-CONTENT" > "$sentinel"
+  cat > "$FIXTURES_DIR/1" <<F
+SYMLINK:link-to-secret:${sentinel}
+F
+  fixture 2 'Reviewing with the symlink note.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  # (a) The synthetic note IS present in the review prompt.
+  grep -q "new symlink link-to-secret -> ${sentinel} (content not shown)" "$STDIN_LOG"
+  # (b) The raw `git diff --no-index` rendering for the symlink is ABSENT:
+  #     no mode-120000 hunk, no "+<target>" content line, no diff header
+  #     for the symlink path. (The sentinel's *content* was never exposed
+  #     even before the fix — `--no-index` shows the target path, not the
+  #     target's file content — so (b) is the discriminating assertion; the
+  #     sentinel-content check below is a guard against a future regression
+  #     that reads the target.)
+  ! grep -q "new file mode 120000" "$STDIN_LOG"
+  ! grep -q "++ b/link-to-secret" "$STDIN_LOG"
+  ! grep -q "diff --git a/link-to-secret" "$STDIN_LOG"
+  # (c) Sentinel content guard: the target's file content must not appear.
+  ! grep -q "SENTINEL-SECRET-CONTENT" "$STDIN_LOG"
+  rm -f "$sentinel"
 }
 
 @test "unborn repo (no commits yet): develop runs, new file reviewed" {

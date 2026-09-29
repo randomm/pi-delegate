@@ -409,6 +409,10 @@ get_diff() {
 
   # Tracked changes since the start ref (a commit recorded at entry, or the
   # empty-tree hash on an unborn repo; both are valid `git diff` refs).
+  # Note: tracked symlinks are safe here — git renders a committed symlink
+  # as a mode-120000 blob whose only diff line is the target path string,
+  # never the target's file content (verified empirically with `git diff
+  # <start-ref>` on this host).
   rc=0
   head_part="$(git diff "$START_REF" 2>"$GIT_ERR_FILE")" || rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -434,6 +438,20 @@ get_diff() {
   while IFS= read -r -d '' f; do
     local untracked_diff
     rc=0
+    # Untracked symlinks: never pass to git diff --no-index (which would
+    # expose the target path in the diff). Instead emit a one-line synthetic
+    # note. `readlink` (not readlink -f) returns the stored target path even
+    # for dangling symlinks, so this is safe regardless of target existence.
+    if [ -L "$f" ]; then
+      local link_target
+      link_target="$(readlink "$f")"
+      if [ -n "$untracked_part" ]; then
+        untracked_part="${untracked_part}"$'\n'"new symlink ${f} -> ${link_target} (content not shown)"
+      else
+        untracked_part="new symlink ${f} -> ${link_target} (content not shown)"
+      fi
+      continue
+    fi
     untracked_diff="$(git diff --no-index -- /dev/null "$f" 2>"$GIT_ERR_FILE")" || rc=$?
     if [ "$rc" -gt 1 ]; then
       log "ERROR: git diff --no-index failed during ${label} for ${f}"

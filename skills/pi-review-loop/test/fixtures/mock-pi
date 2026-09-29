@@ -20,6 +20,11 @@
 #     SIGTERM (trap), then spawns `sleep n` in a child process so that
 #     GNU timeout's process-group kill cannot reach the sleep directly.
 #     This exercises the SIGKILL escalation path (--kill-after → rc 137).
+#   - If the fixture starts with "SYMLINK:<relpath>:<target>" it creates a
+#     symlink at <relpath> (repo-relative, no expansion) pointing to
+#     <target> (taken verbatim; may point outside the repo, e.g.
+#     /etc/passwd) inside the driver's cwd (the repo root), then emits the
+#     remaining lines on stdout and exits 0.
 #   - Otherwise the fixture is emitted on stdout and the call exits 0.
 
 log_call() {
@@ -69,6 +74,19 @@ if [ -n "${MOCK_PI_FIXTURES_DIR:-}" ] && [ -f "$MOCK_PI_FIXTURES_DIR/$n" ]; then
       git commit -qm "${first#COMMIT:}" || true
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
       ;;
+    SYMLINK:*)
+      # Simulate a develop round that leaves an untracked symlink behind
+      # (e.g. pi linked to a sensitive file during the round). The form is
+      # SYMLINK:<relpath>:<target>, where <target> is everything after the
+      # second colon (a target path may itself contain colons). The symlink
+      # is created AFTER any COMMIT: side effects would have run, so it
+      # stays untracked when get_diff later snapshots the change set.
+      symlink_spec="${first#SYMLINK:}"
+      symlink_rel="${symlink_spec%%:*}"
+      symlink_target="${symlink_spec#*:}"
+      ln -s "$symlink_target" "$symlink_rel"
+      tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
+      ;;
     SLEEP:*)
       sleep "${first#SLEEP:}"
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
@@ -80,6 +98,18 @@ if [ -n "${MOCK_PI_FIXTURES_DIR:-}" ] && [ -f "$MOCK_PI_FIXTURES_DIR/$n" ]; then
       # At kill-after expiry, SIGKILL terminates the whole group → rc 137.
       trap "" TERM
       sleep "${first#SLEEP-IGNORE-TERM:}"
+      tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
+      ;;
+    SYMLINK:*)
+      # Create a symlink inside the repo working tree. The fixture line is
+      # SYMLINK:<relpath>:<target>: <relpath> is relative to the driver's
+      # cwd (the repo root, where the driver invokes pi); <target> is taken
+      # verbatim from the fixture — it may point outside the repo. The
+      # -f flag makes the mock idempotent if the link already exists.
+      symlink_spec="${first#SYMLINK:}"
+      symlink_path="${symlink_spec%%:*}"
+      symlink_target="${symlink_spec#*:}"
+      ln -sf "$symlink_target" "$symlink_path" 2>/dev/null || true
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
       ;;
     PUSH:*)
