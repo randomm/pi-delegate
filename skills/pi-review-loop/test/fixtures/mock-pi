@@ -82,6 +82,17 @@ if [ -n "${MOCK_PI_FIXTURES_DIR:-}" ] && [ -f "$MOCK_PI_FIXTURES_DIR/$n" ]; then
       sleep "${first#SLEEP-IGNORE-TERM:}"
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
       ;;
+    PUSH:*)
+      # Simulate a pi process that attempts `git push origin HEAD`. The push
+      # runs with the current environment (so GIT_CONFIG_* neutralisation is
+      # in effect). The push's stderr is discarded; its exit code is appended
+      # to $MOCK_PI_PUSH_LOG (a side file the test reads) so the result is
+      # not routed through pi's stdout (which the driver parses as JSON
+      # events and would swallow).
+      git push origin HEAD 2>/dev/null
+      printf '%s\n' "$?" >>"${MOCK_PI_PUSH_LOG:-/dev/null}"
+      tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
+      ;;
     *)
       cat "$MOCK_PI_FIXTURES_DIR/$n"
       ;;
