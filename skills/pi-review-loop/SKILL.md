@@ -31,6 +31,29 @@ shell argument**:
 bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"
 ```
 
+**Run in background and poll.** Claude Code's Bash tool imposes a
+per-foreground-call timeout: `BASH_DEFAULT_TIMEOUT_MS` defaults to
+`120000` ms (2 minutes) and `BASH_MAX_TIMEOUT_MS` defaults to `600000` ms
+(10 minutes); `timeout` values above the max are silently clamped to the
+max. The loop's worst-case wall clock is `6 × (PI_TIMEOUT + PI_KILL_AFTER)`
+— at the defaults, `6 × (1800 + 30) = 10980` s ≈ 183 min (~3 h) — which
+exceeds even the 10-minute foreground ceiling, so a foreground invocation
+will always be killed mid-loop.
+
+Instead, launch the invocation in the background and poll its output:
+
+1. Run the `bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"` command
+   with the Bash tool's `run_in_background` set to `true`.
+2. Poll by reading the background task's output file with the `Read`
+   tool, at an interval of a few minutes, until the file stops growing or
+   shows the JSON summary on its last line.
+3. When the process exits, parse the last line of the output as the JSON
+   summary and report per the "Interpreting the JSON summary" and
+   "Reporting the verdict" sections below.
+
+Background tasks are not subject to the foreground `BASH_MAX_TIMEOUT_MS`
+ceiling, so the full `6 × (PI_TIMEOUT + PI_KILL_AFTER)` budget is honored.
+
 - **Quote `$ARGUMENTS`.** An unquoted `$ARGUMENTS` still performs command
   substitution: `bash orchestrate.sh $ARGUMENTS` with a request containing
   `$(id -u)` executes that command before the script ever runs. Quoting is
@@ -61,7 +84,8 @@ bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"
   was SIGKILLed (rc 137). Known limit: a process that detaches into its own
   session (`setsid`/daemons) escapes the timeout entirely — that escape
   cannot be fixed in-script, so the worst-case wall clock for the whole loop
-  is `6 × (PI_TIMEOUT + PI_KILL_AFTER)` only for non-detached processes. If
+  is `6 × (PI_TIMEOUT + PI_KILL_AFTER)` — at the defaults `6 × (1800 + 30)
+  = 10980` s ≈ 183 min (~3 h) — only for non-detached processes. If
   the entire script produces no output for an extended period, check that
   the pi binary and git are available and that a develop round is running (or
   could run); a run with no progress is safe to interrupt and re-run.
