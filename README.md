@@ -36,17 +36,32 @@ You need three things: Claude Code, a working `pi` installation, and `jq`.
    jq --version
    ```
 
-3. **Install the skills** into `~/.claude/skills/`:
+3. **Install the skills as a Claude Code plugin:**
+
+   ```
+   /plugin marketplace add randomm/pi-delegate
+   /plugin install pi-delegate@pi-delegate
+   ```
+
+   The skills are namespaced: use `/pi-delegate:pi-oneshot` and
+   `/pi-delegate:pi-review-loop`.
+
+   Update: `/plugin marketplace update pi-delegate` (or
+   `claude plugin update pi-delegate` from your shell). Uninstall:
+   `claude plugin uninstall pi-delegate`.
+
+   Fallback — install manually into `~/.claude/skills/` (remove with
+   `rm -rf ~/.claude/skills/pi-review-loop ~/.claude/skills/pi-oneshot`):
 
    ```bash
-   git clone https://github.com/randomm/pi-delegate.git
-   mkdir -p ~/.claude/skills
-   cp -R pi-delegate/skills/pi-review-loop ~/.claude/skills/
-   cp -R pi-delegate/skills/pi-oneshot   ~/.claude/skills/
+   git clone https://github.com/randomm/pi-delegate.git && mkdir -p ~/.claude/skills && cp -R pi-delegate/skills/pi-review-loop ~/.claude/skills/ && cp -R pi-delegate/skills/pi-oneshot ~/.claude/skills/
    ```
 
    (The `pi-oneshot` directory ships with this repo per issue #5; if it is
-   not present yet, install `pi-review-loop` only.)
+   not present yet, install `pi-review-loop` only.) If you are switching
+   from a manual install to the plugin, remove the manual copies first
+   (`rm -rf ~/.claude/skills/pi-review-loop ~/.claude/skills/pi-oneshot`) so
+   both copies don't shadow each other.
 
 4. **Verify.** In Claude Code, ask for a trivial one-shot delegation and
    confirm pi runs:
