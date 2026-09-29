@@ -45,39 +45,42 @@ setup() {
 # --- marketplace.json required keys ---
 
 @test "marketplace.json has a non-empty top-level name" {
-  # Reject missing/null/non-string names: (null|type) is "null", so a
-  # missing key or non-string value fails the type check, and the empty
-  # string fails the second clause.
-  jq -e '(.name | type) == "string" and .name != ""' "$MARKETPLACE" >/dev/null
+  # Type-check as well: jq -r on a number or boolean would pass a bare
+  # non-empty string test, but the marketplace contract requires a string.
+  # (null|type)=="null" also covers the missing-key case.
+  [ "$(jq '(.name|type) == "string" and .name != ""' "$MARKETPLACE")" = "true" ]
 }
 
-# The name check must also REJECT bad manifests — the real file can only
-# prove the positive path, so use temp fixtures (one per case).
-_mk_name_fixture() {
-  jq '.name = '$1'' "$MARKETPLACE" > "$BATS_TEST_TMPDIR/marketplace.json"
+@test "marketplace.json: a missing name is rejected (temp fixture)" {
+  local fixture
+  fixture=$(mktemp "${BATS_TEST_TMPDIR:-/tmp}/manifest.XXXXXX")
+  trap 'rm -f "$fixture"' RETURN
+  printf '%s' '{"owner":{"name":"x"},"plugins":[{"name":"x","source":"./"}]}' > "$fixture"
+  [ "$(jq '(.name|type) == "string" and .name != ""' "$fixture")" = "false" ]
 }
 
-@test "marketplace name check rejects a missing or null name" {
-  # A missing key is dropped; an explicit null sets null — both must fail.
-  _mk_name_fixture 'null'
-  ! jq -e '(.name | type) == "string" and .name != ""' "$BATS_TEST_TMPDIR/marketplace.json" >/dev/null
-  jq 'del(.name)' "$BATS_TEST_TMPDIR/marketplace.json" > "$BATS_TEST_TMPDIR/marketplace-missing.json"
-  ! jq -e '(.name | type) == "string" and .name != ""' "$BATS_TEST_TMPDIR/marketplace-missing.json" >/dev/null
+@test "marketplace.json: a null name is rejected (temp fixture)" {
+  local fixture
+  fixture=$(mktemp "${BATS_TEST_TMPDIR:-/tmp}/manifest.XXXXXX")
+  trap 'rm -f "$fixture"' RETURN
+  printf '%s' '{"name":null,"owner":{"name":"x"},"plugins":[{"name":"x","source":"./"}]}' > "$fixture"
+  [ "$(jq '(.name|type) == "string" and .name != ""' "$fixture")" = "false" ]
 }
 
-@test "marketplace name check rejects a non-string name" {
-  _mk_name_fixture '42'
-  ! jq -e '(.name | type) == "string" and .name != ""' "$BATS_TEST_TMPDIR/marketplace.json" >/dev/null
+@test "marketplace.json: a non-string name is rejected (temp fixture)" {
+  local fixture
+  fixture=$(mktemp "${BATS_TEST_TMPDIR:-/tmp}/manifest.XXXXXX")
+  trap 'rm -f "$fixture"' RETURN
+  printf '%s' '{"name":42,"owner":{"name":"x"},"plugins":[{"name":"x","source":"./"}]}' > "$fixture"
+  [ "$(jq '(.name|type) == "string" and .name != ""' "$fixture")" = "false" ]
 }
 
-@test "marketplace name check rejects an empty-string name" {
-  _mk_name_fixture '""'
-  ! jq -e '(.name | type) == "string" and .name != ""' "$BATS_TEST_TMPDIR/marketplace.json" >/dev/null
-}
-
-@test "marketplace name check accepts a valid non-empty string name" {
-  _mk_name_fixture '"pi-delegate"'
-  jq -e '(.name | type) == "string" and .name != ""' "$BATS_TEST_TMPDIR/marketplace.json" >/dev/null
+@test "marketplace.json: an empty-string name is rejected (temp fixture)" {
+  local fixture
+  fixture=$(mktemp "${BATS_TEST_TMPDIR:-/tmp}/manifest.XXXXXX")
+  trap 'rm -f "$fixture"' RETURN
+  printf '%s' '{"name":"","owner":{"name":"x"},"plugins":[{"name":"x","source":"./"}]}' > "$fixture"
+  [ "$(jq '(.name|type) == "string" and .name != ""' "$fixture")" = "false" ]
 }
 
 @test "marketplace.json has owner.name (non-empty)" {
@@ -141,7 +144,9 @@ _mk_name_fixture() {
 # --- plugin.json required keys ---
 
 @test "plugin.json has a non-empty name" {
-  [ "$(jq -r '.name // empty' "$PLUGIN")" != "" ]
+  # Same strict string check as the marketplace name (issue #50): the old
+  # `.name // empty` form would pass for a numeric or boolean name.
+  [ "$(jq '(.name|type) == "string" and .name != ""' "$PLUGIN")" = "true" ]
 }
 
 @test "plugin.json carries no version key" {
