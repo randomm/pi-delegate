@@ -20,7 +20,7 @@ setup() {
 
   command -v jq >/dev/null 2>&1 || { skip "jq is not installed"; }
 
-  # Temp git repo with a working-tree change so the start-ref diff is non-empty.
+  # Temp git repo with a working-tree change so `git diff HEAD` is non-empty.
   REPO="$(mktemp -d)"
   cd "$REPO" || return 1
   git init -q .
@@ -37,33 +37,7 @@ setup() {
   FIXTURES_DIR="$(mktemp -d)"
   BIN_DIR="$(mktemp -d)"
   ln -s "$FIXTURES/mock-pi" "$BIN_DIR/pi"
-  # PATH isolation: `pi` must resolve ONLY to the mock (a fake HOME blocks
-  # the well-known fallback locations, BIN_DIR leads PATH, and the tools
-  # dir below contains no `pi`). Resolve the host's real tool paths BEFORE
-  # narrowing PATH — on macOS `timeout` (brew coreutils) and other tools
-  # may live only in a dir we are about to drop — and symlink them into a
-  # dedicated tools dir so the controlled PATH still has a working
-  # timeout/gtimeout, jq, git, and bash (without timeout the driver runs
-  # pi unbounded, which hangs tests when a fixture goes missing).
-  TOOLS_DIR="$(mktemp -d)"
-  if command -v timeout > /dev/null 2>&1; then
-    ln -s "$(command -v timeout)" "$TOOLS_DIR/timeout"
-  fi
-  if command -v gtimeout > /dev/null 2>&1; then
-    ln -s "$(command -v gtimeout)" "$TOOLS_DIR/gtimeout"
-  fi
-  if command -v jq > /dev/null 2>&1; then
-    ln -s "$(command -v jq)" "$TOOLS_DIR/jq"
-  fi
-  if command -v git > /dev/null 2>&1; then
-    ln -s "$(command -v git)" "$TOOLS_DIR/git"
-  fi
-  if command -v bash > /dev/null 2>&1; then
-    ln -s "$(command -v bash)" "$TOOLS_DIR/bash"
-  fi
-  FAKE_HOME="$(mktemp -d)"
-  export HOME="$FAKE_HOME"
-  export PATH="$BIN_DIR:$TOOLS_DIR:/usr/bin:/bin:/usr/sbin:/sbin"
+  export PATH="$BIN_DIR:$PATH"
   export MOCK_PI_CALL_LOG="$CALL_LOG"
   export MOCK_PI_ARGV_LOG="$ARGV_LOG"
   export MOCK_PI_FIXTURES_DIR="$FIXTURES_DIR"
@@ -71,14 +45,13 @@ setup() {
 
 teardown() {
   cd "$REPO" 2>/dev/null || true
-  rm -rf "$REPO" "$CALL_LOG" "$ARGV_LOG" "$FIXTURES_DIR" "$BIN_DIR" "$TOOLS_DIR" "$FAKE_HOME"
+  rm -rf "$REPO" "$CALL_LOG" "$ARGV_LOG" "$FIXTURES_DIR" "$BIN_DIR"
 }
 
 run_driver() {
   local tmp
   tmp="$(mktemp)"
   local rc=0
-  if [ -f "$MOCK_PI_ARGV_LOG" ]; then : > "$MOCK_PI_ARGV_LOG"; fi
   bash "$SCRIPT" "$@" >"$tmp" 2>&1 || rc=$?
   lines=()
   while IFS= read -r l; do lines+=("$l"); done < "$tmp"
