@@ -63,6 +63,15 @@ the review loop — context files stay loaded by design) — text mode, pi's ful
 default toolset, no review loop, no structured JSON parsing. Claude runs it,
 reads pi's output, and summarizes what happened back to you.
 
+The pi call is wrapped in a per-call timeout —
+`timeout --kill-after=${PI_KILL_AFTER:-30} ${PI_TIMEOUT:-1800}` (falling back
+to `gtimeout` on macOS; if neither binary exists the call runs without a time
+limit and a warning is logged, bounded only by Claude Code's Bash-tool
+timeout). Exit code 124 (SIGTERM at `PI_TIMEOUT`) and 137 (SIGKILL escalation
+at `PI_TIMEOUT + PI_KILL_AFTER`) both mean **pi timed out**; any other
+non-zero exit is a real pi failure and is relayed verbatim. The wrapper
+applies to every invocation variant, including `--model <model>`.
+
 Good fits — mechanical, self-contained, verifiable tasks:
 
 ```
@@ -116,6 +125,13 @@ exceed 10 minutes, pass `run_in_background: true` to the Bash tool and poll
 by reading the background task's output file (via `Read`) until the run
 finishes. Do **not** pass a larger foreground `timeout` — it is clamped.
 
+**Long runs under Claude Code:** a single oneshot call can exceed the Bash
+tool's foreground ceiling (default `BASH_DEFAULT_TIMEOUT_MS` = 120000 ms,
+ceiling `BASH_MAX_TIMEOUT_MS` = 600000 ms, silently clamped above the max).
+For tasks that may run long, invoke with `run_in_background: true` and poll
+by reading the background task's output until pi's final output appears —
+don't rely on the 2-minute foreground default.
+
 ## Usage — pi-review-loop
 
 `pi-review-loop` is for work you want **reviewed, not just done**. It runs
@@ -130,6 +146,15 @@ The driver takes your request as the develop-round task, then loops:
 ```
 develop ──> review ──> fix ──> review ──> … (≤ 3 rounds, hard cap 3)
 ```
+
+**Long runs under Claude Code:** at the default `PI_TIMEOUT`/`PI_KILL_AFTER`
+the loop's worst-case wall clock is `6 × (1800 + 30)` s ≈ 183 min (~3 h) —
+far above the Bash tool's foreground ceiling (10 min by default). Invoke
+`orchestrate.sh` with `run_in_background: true` and poll by reading the
+background task's output until the final JSON summary line (the last line of
+stdout) appears — don't rely on the 2-minute foreground default, and don't
+try to raise the foreground `timeout` parameter, which is silently clamped
+to `BASH_MAX_TIMEOUT_MS` (600000 ms, 10 min).
 
 - **Round 1 (develop):** pi implements your task with full tool access.
 - **Each review round:** a *separate* pi instance, run **read-only**
@@ -204,7 +229,15 @@ foreground ceiling, so the full per-call budget is honored.
   exits 2. Ignored when no timeout binary exists (unbounded path). Known
   limit: processes that detach into their own session (`setsid`/daemons)
   escape the timeout entirely — worst-case wall clock for the loop is
-  `6 × (PI_TIMEOUT + PI_KILL_AFTER)` for non-detached processes.
+  `6 × (PI_TIMEOUT + PI_KILL_AFTER)` (≈ 183 min, ~3 h, at the defaults) for
+  non-detached processes.
+- `PI_TIMEOUT` / `PI_KILL_AFTER` also apply to **pi-oneshot**: the single pi
+call is wrapped in the identical per-call timeout
+(`timeout --kill-after=${PI_KILL_AFTER:-30} ${PI_TIMEOUT:-1800}`; `gtimeout`
+fallback on macOS; unbounded with a warning if neither binary exists), and
+exit 124 (SIGTERM) / 137 (SIGKILL escalation) both mean "timed out". On the
+unbounded path there is no 124/137 at all — only Claude Code's Bash-tool
+timeout bounds the run.
 - `PI_DIFF_MAX_BYTES` — max bytes of the diff (or fix-prompt transcript) embedded
   in a review prompt (default 90000); larger content is truncated with a
   notice. The lower default (was 100000) ensures the total prompt stays well
