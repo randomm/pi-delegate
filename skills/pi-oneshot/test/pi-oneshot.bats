@@ -169,3 +169,52 @@ skill_section() {
   grep -qE '(^|[^0-9])124([^0-9]|$)' "$README_FILE"
   grep -qE '(^|[^0-9])137([^0-9]|$)' "$README_FILE"
 }
+
+# --- Issue #30: safety preflight doc-drift ---
+
+oneshot_preflight_block() {
+  awk '/^## Safety preflight/,/^## Invocation$/' "$SKILL_FILE" |
+    awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}'
+}
+
+@test "pi-oneshot SKILL.md has a safety preflight section (issue #30)" {
+  grep -q '^## Safety preflight' "$SKILL_FILE"
+}
+
+@test "pi-oneshot safety preflight checks the default branch" {
+  oneshot_preflight_block | grep -qF 'default_branch'
+  oneshot_preflight_block | grep -qF 'refs/remotes/origin/HEAD'
+}
+
+@test "pi-oneshot safety preflight checks secret-looking files" {
+  oneshot_preflight_block | grep -qF -- '.env'
+  oneshot_preflight_block | grep -qF -- '*.pem'
+  oneshot_preflight_block | grep -qF -- '*.key'
+}
+
+@test "pi-oneshot safety preflight neutralises git push via GIT_CONFIG" {
+  oneshot_preflight_block | grep -qF 'GIT_CONFIG_KEY_'
+  oneshot_preflight_block | grep -qF 'push.default'
+  oneshot_preflight_block | grep -qF 'pi-delegate-push-disabled'
+}
+
+@test "pi-oneshot safety preflight honours the PI_DELEGATE_UNSAFE=1 opt-out" {
+  oneshot_preflight_block | grep -qF 'PI_DELEGATE_UNSAFE'
+  oneshot_preflight_block | grep -qF 'PI_DELEGATE_UNSAFE=1'
+}
+
+@test "pi-oneshot safety preflight block passes bash -n and shellcheck" {
+  local block
+  block="$(oneshot_preflight_block)"
+  [[ -n "$block" ]]
+  local tmp
+  tmp="$(mktemp)"
+  printf '%s\n' "$block" > "$tmp"
+  bash -n "$tmp"
+  shellcheck --norc --severity=warning -s bash "$tmp"
+  rm -f "$tmp"
+}
+
+@test "pi-oneshot SKILL.md documents PI_DELEGATE_UNSAFE opt-out in prose" {
+  grep -q 'PI_DELEGATE_UNSAFE=1' "$SKILL_FILE"
+}

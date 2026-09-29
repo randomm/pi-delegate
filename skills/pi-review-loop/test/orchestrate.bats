@@ -30,6 +30,10 @@ setup() {
   git add a.txt
   git commit -qm init
   echo modified > a.txt
+  # Create and switch to a feature branch so the safety preflight (which
+  # refuses the default branch) does not fire for the existing tests. The
+  # default branch is "main" (git's default for `git init` on modern git).
+  git checkout -q -b feature/test-branch
 
   # Temp dirs for the mock pi and its call log.
   CALL_LOG="$(mktemp)"
@@ -1136,4 +1140,183 @@ model_block() {
     grep -qi "SIGTERM" "$f"
     grep -qi "SIGKILL" "$f"
   done
+}
+
+# --- Issue #30: safety preflight ------------------------------------------------
+
+@test "safety: refuse on the default branch (exit 3, PI_ERROR JSON, REFUSED stderr)" {
+  # The setup creates a feature branch; switch back to main to trigger the refusal.
+  git checkout -q main
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"default branch"* ]]
+  [[ "$out" == *"PI_DELEGATE_UNSAFE=1"* ]]
+  # The JSON summary must be the last line with status PI_ERROR.
+  local last
+  last="$(printf '%s\n' "$out" | tail -n 1)"
+  printf '%s' "$last" | jq -e '.status == "PI_ERROR"' >/dev/null
+}
+
+@test "safety: allow on a feature branch (no refusal, develop runs)" {
+  # The setup creates a feature branch; stay on it. The preflight must not
+  # fire, and the develop round must run.
+  fixture 1 'Developed it.'
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 3 ]
+  [[ "$out" != *"REFUSED:"* ]]
+}
+
+@test "safety: refuse on detached HEAD at the default branch's tip" {
+  # Switch to main, then detach at the tip.
+  git checkout -q main
+  git checkout -q --detach
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"detached HEAD"* ]]
+  [[ "$out" == *"default branch"* ]]
+}
+
+@test "safety: refuse when .env is present in the working tree" {
+  # On the feature branch (setup), add a .env file.
+  echo "SECRET=abc" > .env
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"secret-looking file"* ]]
+  [[ "$out" == *".env"* ]]
+}
+
+@test "safety: allow when only .env.example is present" {
+  # On the feature branch (setup), add only .env.example (safe).
+  echo "SECRET=example" > .env.example
+  fixture 1 'Developed it.'
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 3 ]
+  [[ "$out" != *"REFUSED:"* ]]
+}
+
+@test "safety: refuse when a *.pem file is present" {
+  # On the feature branch (setup), add a .pem file.
+  echo "-----BEGIN KEY-----" > key.pem
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"secret-looking file"* ]]
+  [[ "$out" == *".pem"* ]]
+}
+
+@test "safety: refuse when a *.key file is present" {
+  # On the feature branch (setup), add a .key file.
+  echo "KEYDATA" > secret.key
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  [[ "$out" == *"REFUSED:"* ]]
+  [[ "$out" == *"secret-looking file"* ]]
+  [[ "$out" == *".key"* ]]
+}
+
+@test "safety: opt-out PI_DELEGATE_UNSAFE=1 allows the default branch" {
+  # On main (default), the opt-out must skip the preflight and let the
+  # develop round run.
+  git checkout -q main
+  fixture 1 'Developed it.'
+  local out rc=0
+  out="$(PI_DELEGATE_UNSAFE=1 bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 3 ]
+  [[ "$out" != *"REFUSED:"* ]]
+}
+
+@test "safety: opt-out PI_DELEGATE_UNSAFE=1 allows secret files" {
+  # On the feature branch with a .env present, the opt-out must skip the
+  # preflight.
+  echo "SECRET=abc" > .env
+  fixture 1 'Developed it.'
+  local out rc=0
+  out="$(PI_DELEGATE_UNSAFE=1 bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 3 ]
+  [[ "$out" != *"REFUSED:"* ]]
+}
+
+@test "safety: opt-out PI_DELEGATE_UNSAFE=1 allows detached HEAD at default tip" {
+  git checkout -q main
+  git checkout -q --detach
+  fixture 1 'Developed it.'
+  local out rc=0
+  out="$(PI_DELEGATE_UNSAFE=1 bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -ne 3 ]
+  [[ "$out" != *"REFUSED:"* ]]
+}
+
+@test "safety: push neutralisation — mock pi push fails (default)" {
+  # On the feature branch (setup), add a remote, and have the mock pi attempt
+  # a push. The GIT_CONFIG_* env must make the push fail.
+  # Set up a bare remote to push to.
+  local remote
+  remote="$(mktemp -d)/origin.git"
+  git init -q --bare "$remote"
+  git -C "$remote" config receive.denyCurrentBranch ignore
+  git remote add origin "$remote"
+  # Create a commit to push.
+  echo more >> a.txt
+  git add a.txt
+  git commit -qm "push test"
+  # Side file the mock pi appends the push exit code to.
+  local push_log
+  push_log="$(mktemp)"
+  export MOCK_PI_PUSH_LOG="$push_log"
+  # Fixture: the mock pi attempts a push (PUSH: directive). Write the raw
+  # directive (not JSON-wrapped) so the mock pi's case match sees "PUSH:".
+  printf '%s\n' 'PUSH:origin HEAD' > "$FIXTURES_DIR/1"
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  local out rc=0
+  out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  # The push must have failed (non-zero exit code in the side file).
+  [ -s "$push_log" ]
+  local p_rc
+  p_rc="$(head -n 1 "$push_log" | tr -d ' ')"
+  [ -n "$p_rc" ] && [ "$p_rc" -ne 0 ]
+  # The remote must NOT have received the push.
+  [ "$(git -C "$remote" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ]
+  rm -f "$push_log"
+  rm -rf "$(dirname "$remote")"
+}
+
+@test "safety: push neutralisation — mock pi push succeeds with opt-out" {
+  # On the feature branch (setup), add a remote, and have the mock pi attempt
+  # a push. With PI_DELEGATE_UNSAFE=1, the GIT_CONFIG_* env is not set, so the
+  # push must succeed.
+  local remote
+  remote="$(mktemp -d)/origin.git"
+  git init -q --bare "$remote"
+  git -C "$remote" config receive.denyCurrentBranch ignore
+  git remote add origin "$remote"
+  echo more >> a.txt
+  git add a.txt
+  git commit -qm "push test optout"
+  # Side file the mock pi appends the push exit code to.
+  local push_log
+  push_log="$(mktemp)"
+  export MOCK_PI_PUSH_LOG="$push_log"
+  printf '%s\n' 'PUSH:origin HEAD' > "$FIXTURES_DIR/1"
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  local out rc=0
+  out="$(PI_DELEGATE_UNSAFE=1 bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
+  # The push must have succeeded (exit code 0 in the side file).
+  [ -s "$push_log" ]
+  local p_rc
+  p_rc="$(head -n 1 "$push_log" | tr -d ' ')"
+  [ -n "$p_rc" ] && [ "$p_rc" -eq 0 ]
+  # The remote must have received the push.
+  [ "$(git -C "$remote" for-each-ref 2>/dev/null | wc -l | tr -d ' ')" -ge 1 ]
+  rm -f "$push_log"
+  rm -rf "$(dirname "$remote")"
 }
