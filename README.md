@@ -63,6 +63,15 @@ the review loop — context files stay loaded by design) — text mode, pi's ful
 default toolset, no review loop, no structured JSON parsing. Claude runs it,
 reads pi's output, and summarizes what happened back to you.
 
+The pi call is wrapped in a per-call timeout —
+`timeout --kill-after=${PI_KILL_AFTER:-30} ${PI_TIMEOUT:-1800}` (falling back
+to `gtimeout` on macOS; if neither binary exists the call runs without a time
+limit and a warning is logged, bounded only by Claude Code's Bash-tool
+timeout). Exit code 124 (SIGTERM at `PI_TIMEOUT`) and 137 (SIGKILL escalation
+at `PI_TIMEOUT + PI_KILL_AFTER`) both mean **pi timed out**; any other
+non-zero exit is a real pi failure and is relayed verbatim. The wrapper
+applies to every invocation variant, including `--model <model>`.
+
 Good fits — mechanical, self-contained, verifiable tasks:
 
 ```
@@ -71,8 +80,39 @@ use pi for: write a bats test for scripts/validate.sh
 pi oneshot: scaffold a Makefile with build, test, and clean targets
 ```
 
-`--model <model>` is passed through to pi only when you explicitly name a model;
-otherwise pi uses its configured default.
+### Per-call timeout
+
+The pi invocation is wrapped in `timeout` the same way `orchestrate.sh`
+wraps its pi calls:
+
+```bash
+printf '%s' "$ARGUMENTS" | timeout --kill-after="$PI_KILL_AFTER" "$PI_TIMEOUT" pi -p --no-session --no-extensions --no-skills --no-prompt-templates
+```
+
+(The prompt goes on stdin, the same transport `orchestrate.sh` uses — no
+argv size limit — and the timeout wrapper wraps pi only; the pipe feeds
+pi's stdin.)
+
+- `PI_TIMEOUT` — seconds allowed per pi invocation (default 1800).
+- `PI_KILL_AFTER` — seconds to wait after the `PI_TIMEOUT` SIGTERM before
+  escalating to SIGKILL (default 30; passed to timeout as `--kill-after`).
+- The wrapper prefers `timeout` (coreutils) and falls back to `gtimeout`
+  (macOS brew coreutils); if neither exists, the call runs unbounded at the
+  script level and a warning is printed to stderr.
+- **Exit codes 124 and 137 mean "timed out"** — 124 is pi SIGTERMed at
+  `PI_TIMEOUT`, 137 is pi SIGKILLed at `PI_TIMEOUT + PI_KILL_AFTER` after
+  ignoring SIGTERM. Any other non-zero exit is a genuine pi failure.
+  (On the unbounded path, 124/137 from this wrapper do not apply.)
+
+### Long runs under Claude Code's Bash tool
+
+Claude Code's Bash tool imposes a per-foreground-call timeout (`BASH_DEFAULT_TIMEOUT_MS`
+defaults to 120000 ms / 2 minutes; `BASH_MAX_TIMEOUT_MS` defaults to 600000 ms /
+10 minutes; values above the max are silently clamped). A single pi task can
+legitimately run far longer than the 10-minute foreground ceiling, so the skill
+instructs Claude to run the invocation with `run_in_background: true` and poll
+the background task's output file with the `Read` tool until pi exits — not
+to pass a larger foreground `timeout` (clamped values would not help).
 
 ## Usage — pi-review-loop
 
@@ -88,6 +128,15 @@ The driver takes your request as the develop-round task, then loops:
 ```
 develop ──> review ──> fix ──> review ──> … (≤ 3 rounds, hard cap 3)
 ```
+
+**Long runs under Claude Code:** at the default `PI_TIMEOUT`/`PI_KILL_AFTER`
+the loop's worst-case wall clock is `6 × (1800 + 30)` s ≈ 183 min (~3 h) —
+far above the Bash tool's foreground ceiling (10 min by default). Invoke
+`orchestrate.sh` with `run_in_background: true` and poll by reading the
+background task's output until the final JSON summary line (the last line of
+stdout) appears — don't rely on the 2-minute foreground default, and don't
+try to raise the foreground `timeout` parameter, which is silently clamped
+to `BASH_MAX_TIMEOUT_MS` (600000 ms, 10 min).
 
 - **Round 1 (develop):** pi implements your task with full tool access.
 - **Each review round:** a *separate* pi instance, run **read-only**
@@ -135,6 +184,19 @@ orchestrate.sh --model <model> --max-rounds <N> "<task description>"
   configured default.
 - `--max-rounds <N>` — review-round budget (default 3, hard cap 3).
 
+### Long runs under Claude Code's Bash tool
+
+Claude Code's Bash tool imposes a per-foreground-call timeout (`BASH_DEFAULT_TIMEOUT_MS`
+defaults to 120000 ms / 2 minutes; `BASH_MAX_TIMEOUT_MS` defaults to 600000 ms /
+10 minutes; values above the max are silently clamped). The loop's worst-case
+wall clock is `6 × (PI_TIMEOUT + PI_KILL_AFTER)` — at the defaults ≈ 183 min
+(~3 h) — which exceeds even the 10-minute foreground ceiling, so a foreground
+invocation is always killed mid-loop. The skill therefore instructs Claude to
+run `orchestrate.sh` with the Bash tool's `run_in_background: true` and poll
+the background task's output file with the `Read` tool until the final JSON
+line (the summary) appears — background tasks are not subject to the
+foreground ceiling, so the full per-call budget is honored.
+
 ### Environment
 
 - `PI_TIMEOUT` — seconds allowed per pi invocation (default 1800). Requires
@@ -149,7 +211,15 @@ orchestrate.sh --model <model> --max-rounds <N> "<task description>"
   exits 2. Ignored when no timeout binary exists (unbounded path). Known
   limit: processes that detach into their own session (`setsid`/daemons)
   escape the timeout entirely — worst-case wall clock for the loop is
-  `6 × (PI_TIMEOUT + PI_KILL_AFTER)` for non-detached processes.
+  `6 × (PI_TIMEOUT + PI_KILL_AFTER)` (≈ 183 min, ~3 h, at the defaults) for
+  non-detached processes.
+- `PI_TIMEOUT` / `PI_KILL_AFTER` also apply to **pi-oneshot**: the single pi
+call is wrapped in the identical per-call timeout
+(`timeout --kill-after=${PI_KILL_AFTER:-30} ${PI_TIMEOUT:-1800}`; `gtimeout`
+fallback on macOS; unbounded with a warning if neither binary exists), and
+exit 124 (SIGTERM) / 137 (SIGKILL escalation) both mean "timed out". On the
+unbounded path there is no 124/137 at all — only Claude Code's Bash-tool
+timeout bounds the run.
 - `PI_DIFF_MAX_BYTES` — max bytes of the diff (or fix-prompt transcript) embedded
   in a review prompt (default 90000); larger content is truncated with a
   notice. The lower default (was 100000) ensures the total prompt stays well
