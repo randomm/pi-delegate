@@ -45,7 +45,42 @@ setup() {
 # --- marketplace.json required keys ---
 
 @test "marketplace.json has a non-empty top-level name" {
-  [ "$(jq -r '.name // empty' "$MARKETPLACE")" != "" ]
+  # Type-check as well: jq -r on a number or boolean would pass a bare
+  # non-empty string test, but the marketplace contract requires a string.
+  # (null|type)=="null" also covers the missing-key case.
+  [ "$(jq '(.name|type) == "string" and .name != ""' "$MARKETPLACE")" = "true" ]
+}
+
+@test "marketplace.json: a missing name is rejected (temp fixture)" {
+  local fixture
+  fixture=$(mktemp "${BATS_TEST_TMPDIR:-/tmp}/manifest.XXXXXX")
+  trap 'rm -f "$fixture"' RETURN
+  printf '%s' '{"owner":{"name":"x"},"plugins":[{"name":"x","source":"./"}]}' > "$fixture"
+  [ "$(jq '(.name|type) == "string" and .name != ""' "$fixture")" = "false" ]
+}
+
+@test "marketplace.json: a null name is rejected (temp fixture)" {
+  local fixture
+  fixture=$(mktemp "${BATS_TEST_TMPDIR:-/tmp}/manifest.XXXXXX")
+  trap 'rm -f "$fixture"' RETURN
+  printf '%s' '{"name":null,"owner":{"name":"x"},"plugins":[{"name":"x","source":"./"}]}' > "$fixture"
+  [ "$(jq '(.name|type) == "string" and .name != ""' "$fixture")" = "false" ]
+}
+
+@test "marketplace.json: a non-string name is rejected (temp fixture)" {
+  local fixture
+  fixture=$(mktemp "${BATS_TEST_TMPDIR:-/tmp}/manifest.XXXXXX")
+  trap 'rm -f "$fixture"' RETURN
+  printf '%s' '{"name":42,"owner":{"name":"x"},"plugins":[{"name":"x","source":"./"}]}' > "$fixture"
+  [ "$(jq '(.name|type) == "string" and .name != ""' "$fixture")" = "false" ]
+}
+
+@test "marketplace.json: an empty-string name is rejected (temp fixture)" {
+  local fixture
+  fixture=$(mktemp "${BATS_TEST_TMPDIR:-/tmp}/manifest.XXXXXX")
+  trap 'rm -f "$fixture"' RETURN
+  printf '%s' '{"name":"","owner":{"name":"x"},"plugins":[{"name":"x","source":"./"}]}' > "$fixture"
+  [ "$(jq '(.name|type) == "string" and .name != ""' "$fixture")" = "false" ]
 }
 
 @test "marketplace.json has owner.name (non-empty)" {
@@ -109,7 +144,9 @@ setup() {
 # --- plugin.json required keys ---
 
 @test "plugin.json has a non-empty name" {
-  [ "$(jq -r '.name // empty' "$PLUGIN")" != "" ]
+  # Same strict string check as the marketplace name (issue #50): the old
+  # `.name // empty` form would pass for a numeric or boolean name.
+  [ "$(jq '(.name|type) == "string" and .name != ""' "$PLUGIN")" = "true" ]
 }
 
 @test "plugin.json carries no version key" {
