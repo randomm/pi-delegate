@@ -16,6 +16,11 @@
 #   - If the fixture starts with "SLEEP:<n>" it sleeps n seconds first
 #     (used to exercise the driver's PI_TIMEOUT path), then emits the
 #     remaining lines on stdout and exits 0.
+#   - If the fixture starts with "SLEEP-IGNORE-TERM:<n>" it traps (ignores)
+#     SIGTERM and then sleeps n seconds. The driver's timeout sends SIGTERM
+#     at the deadline; a process that ignores it must be SIGKILLed by the
+#     timeout's --kill-after escalation (rc 137), which exercises the
+#     escalation path that plain SLEEP cannot.
 #   - Otherwise the fixture is emitted on stdout and the call exits 0.
 
 log_call() {
@@ -67,6 +72,11 @@ if [ -n "${MOCK_PI_FIXTURES_DIR:-}" ] && [ -f "$MOCK_PI_FIXTURES_DIR/$n" ]; then
       ;;
     SLEEP:*)
       sleep "${first#SLEEP:}"
+      tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
+      ;;
+    SLEEP-IGNORE-TERM:*)
+      trap '' TERM
+      sleep "${first#SLEEP-IGNORE-TERM:}"
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
       ;;
     *)
