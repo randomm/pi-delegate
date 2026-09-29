@@ -1150,6 +1150,17 @@ timeout_section() {
   printf '%s\n' "$section"
 }
 
+@test "docs/configuration.md owns the timeout message literal (matches run_pi, default values substituted)" {
+  # Issue #50 doc-drift: the driver's exact message literal (run_pi, 124/137
+  # branch) must be present in configuration.md with the default values
+  # substituted — without this, rewording the message passes all script-side
+  # tests while the docs keep the old literal.
+  local section
+  section="$(timeout_section)"
+  printf '%s\n' "$section" | grep -qF 'pi timed out after 1800s (SIGKILL after a further 30s if needed)'
+  printf '%s\n' "$section"
+}
+
 @test "docs/configuration.md owns the unbounded-with-warning path" {
   local section
   section="$(timeout_section)"
@@ -1220,6 +1231,15 @@ long_runs_section() {
   grep -qi 'SIGKILL' "$oneshot"
   printf '%s\n' "$config_section" | grep -qE '(^|[^0-9])124([^0-9]|$)'
   printf '%s\n' "$config_section" | grep -qE '(^|[^0-9])137([^0-9]|$)'
+  # Timeout message literal agrees in both files. configuration.md shows the
+  # driver's message with default values substituted; SKILL.md quotes the
+  # same phrase. Both wrap the phrase across lines, so collapse whitespace
+  # before matching.
+  local oneshot_flat config_flat
+  oneshot_flat="$(tr '\n' ' ' < "$oneshot" | sed 's/[[:space:]][[:space:]]*/ /g')"
+  [[ "$oneshot_flat" == *'pi timed out after ${PI_TIMEOUT}s (SIGKILL after a further ${PI_KILL_AFTER}s if needed)'* ]]
+  config_flat="$(printf '%s' "$config_section" | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g')"
+  [[ "$config_flat" == *'pi timed out after 1800s (SIGKILL after a further 30s if needed)'* ]]
 }
 
 @test "cross-file: pi-oneshot SKILL.md unbounded warning message matches orchestrate.sh" {
