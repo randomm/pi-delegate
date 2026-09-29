@@ -16,7 +16,7 @@
 - Loop hard caps: develop ≤1, review ≤3, fix ≤2, total ≤6 pi invocations; no fix after terminal review
 - All loop pi calls use `pi --mode json -p --no-session`; final text extracted only from message_end events
 - Reviewer runs read-only: `--tools read,grep,find,ls`; developer/fixer get pi's full default toolset
-- Diff source is `git diff HEAD`, re-read fresh before every review round; empty diff at entry → EMPTY_DIFF, exit 0, zero pi calls
+- Diff source is the start ref recorded before the develop round (`git rev-parse --verify -q HEAD`, empty tree on unborn repos) — `git diff <start-ref>` plus `git diff --no-index` for untracked non-ignored files, re-read fresh before every review round; there is no entry-time diff gate, and EMPTY_DIFF (exit 0) is reported only after the develop round produced no change
 - VERDICT parser takes the LAST occurrence, case-insensitive, tolerates optional colon and markdown bold; enum APPROVED|MINOR_OBSERVATIONS|ISSUES_FOUND|CRITICAL_ISSUES_FOUND
 - Exit codes: 0=PASS/PASSED_WITH_FINDINGS/EMPTY_DIFF, 1=REJECTED, 2=INCOMPLETE, 3=PI_ERROR; JSON summary is last stdout line, built with jq (never string interpolation)
 - pi discovery: `command -v pi` + `[ -x ]`, fallback ~/.bun/bin/pi then ~/.local/bin/pi; no pinned model, --model passthrough only
