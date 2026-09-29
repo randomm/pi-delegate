@@ -1008,7 +1008,7 @@ F
   grep -qE '(^|[^0-9])124([^0-9]|$)' "$readme"
   grep -qE '(^|[^0-9])137([^0-9]|$)' "$readme"
   grep -q 'SIGTERM at' "$readme"
-  grep -q 'SIGKILL at' "$readme"
+  grep -q 'SIGKILL escalation' "$readme"
   grep -q 'timed out' "$readme"
   grep -qE '(^|[^0-9])124([^0-9]|$)' "$oneshot"
   grep -qE '(^|[^0-9])137([^0-9]|$)' "$oneshot"
@@ -1045,55 +1045,49 @@ loop_skill_md() {
 }
 
 oneshot_block() {
-  # Extract the Invocation-section ```bash block (the timeout wrapper).
-  # It is the second ```bash block in the file — the first is the pi-binary
-  #  discovery loop under "Locating the pi binary".
-  awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==2); next}
-       /^```$/{if (f) exit; f=0}
-       f {print}' \
+  # Extract the first ```bash block inside the "## Invocation" section
+  # (the timeout wrapper). Anchored on the section heading, not on block
+  # position, so the extraction survives block reordering.
+  awk 'BEGIN{n=0} /^## Invocation$/{s=1; next} s && /^## /{s=0} s && /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}' \
     "$REPO_ROOT/skills/pi-oneshot/SKILL.md"
 }
 
 model_block() {
-  # Extract the Model-section ```bash block (the wrapped --model variant).
-  # It is the third ```bash block in the file.
-  awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==3); next}
-       /^```$/{if (f) exit; f=0}
-       f {print}' \
+  # Extract the ```bash block inside the "### Model" section (the wrapped
+  # --model variant). Anchored on the section heading, not on block position.
+  awk 'BEGIN{n=0} /^### Model$/{s=1; next} s && /^## /{s=0} s && /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}' \
     "$REPO_ROOT/skills/pi-oneshot/SKILL.md"
 }
 
 @test "doc: pi-oneshot invocation block wraps pi in timeout with PI_TIMEOUT/PI_KILL_AFTER, gtimeout fallback, and unbounded warning" {
   oneshot_block | grep -qF 'TIMEOUT_CMD='
-  oneshot_block | grep -qF 'command -v timeout'
-  oneshot_block | grep -qF 'command -v gtimeout'
+  oneshot_block | grep -qF 'command -v "$cand"'
+  oneshot_block | grep -qF 'gtimeout'
   oneshot_block | grep -qF -- '--kill-after="${PI_KILL_AFTER:-30}"'
   oneshot_block | grep -qF -- '"${PI_TIMEOUT:-1800}"'
-  oneshot_block | grep -qF -- '"$TIMEOUT_CMD" --kill-after'
-  oneshot_block | grep -qF -- '"$PI_BIN" -p --no-session'
-  # timeout wraps pi only (wrapper precedes $PI_BIN)
-  oneshot_block | grep -qF -- '"$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}"'
+  # Single wrapper array: empty (no timeout binary) or timeout+flags,
+  # applied to every variant including the stdin transport.
+  oneshot_block | grep -qF 'wrap=()'
+  oneshot_block | grep -qF '"${wrap[@]}"'
+  oneshot_block | grep -qF -- '"${wrap[@]}" "$PI_BIN" -p --no-session'
+  oneshot_block | grep -qF -- 'PI_KILL_AFTER:-30'
   oneshot_block | grep -qF 'unbounded'
-  # gtimeout fallback: neither binary → unbounded call + stderr warning
-  oneshot_block | grep -qF 'gtimeout'
-  oneshot_block | grep -qF 'warning:'
+  # unbounded path: no usable binary → unbounded call + stderr warning
+  oneshot_block | grep -qF -- 'warning: no usable timeout binary'
   oneshot_block | grep -qF -- '>&2'
-  # Unwrapped fallback still present on the unbounded path
-  oneshot_block | grep -qF -- '"$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"'
   # pi-oneshot SKILL.md documents the unbounded path (124/137 don't apply there)
   oneshot_skill_md | grep -q 'unbounded path'
 }
 
 @test "doc: pi-oneshot SKILL.md documents exit 124 and 137 as timed out" {
-  oneshot_skill_md | grep -q "124"
-  oneshot_skill_md | grep -q "137"
+  oneshot_skill_md | grep -qE '(^|[^0-9])124([^0-9]|$)'
+  oneshot_skill_md | grep -qE '(^|[^0-9])137([^0-9]|$)'
   oneshot_skill_md | grep -qi "timed out"
 }
 
 @test "doc: pi-oneshot Model variant keeps the timeout wrapper" {
   # The Model subsection's bash block must also carry the wrapper.
-  model_block | grep -qF -- '"$TIMEOUT_CMD" --kill-after'
-  model_block | grep -qF -- '"${PI_TIMEOUT:-1800}"'
+  model_block | grep -qF -- '"${wrap[@]}"'
   model_block | grep -qF -- '"$PI_BIN"'
   model_block | grep -qF -- '--model'
 }

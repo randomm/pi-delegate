@@ -110,28 +110,6 @@ instructs Claude to run the invocation with `run_in_background: true` and poll
 the background task's output file with the `Read` tool until pi exits — not
 to pass a larger foreground `timeout` (clamped values would not help).
 
-**Timeout wrapper.** The skill wraps the `pi` call in an inline `timeout`
-(or `gtimeout` on macOS) so a runaway run is bounded by the skill itself,
-not by the Bash tool. The wrapper uses `--kill-after=${PI_KILL_AFTER:-30} ${PI_TIMEOUT:-1800}`: exit **124** (SIGTERM at `PI_TIMEOUT`) and **137**
-(SIGKILL at `PI_TIMEOUT + PI_KILL_AFTER`) both mean "pi timed out". If
-neither `timeout` nor `gtimeout` is on `PATH`, the call runs unbounded with
-a stderr warning (only the Bash tool ceiling then bounds the run).
-
-**Long runs — background + poll.** A single pi run can exceed the Bash tool's
-foreground ceiling (default 120000 ms = 2 min, max 600000 ms = 10 min;
-values above the max are silently clamped; `BASH_DEFAULT_TIMEOUT_MS` /
-`BASH_MAX_TIMEOUT_MS` env vars — re-verify current values). If the run may
-exceed 10 minutes, pass `run_in_background: true` to the Bash tool and poll
-by reading the background task's output file (via `Read`) until the run
-finishes. Do **not** pass a larger foreground `timeout` — it is clamped.
-
-**Long runs under Claude Code:** a single oneshot call can exceed the Bash
-tool's foreground ceiling (default `BASH_DEFAULT_TIMEOUT_MS` = 120000 ms,
-ceiling `BASH_MAX_TIMEOUT_MS` = 600000 ms, silently clamped above the max).
-For tasks that may run long, invoke with `run_in_background: true` and poll
-by reading the background task's output until pi's final output appears —
-don't rely on the 2-minute foreground default.
-
 ## Usage — pi-review-loop
 
 `pi-review-loop` is for work you want **reviewed, not just done**. It runs

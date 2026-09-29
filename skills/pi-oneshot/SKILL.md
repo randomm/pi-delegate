@@ -1,6 +1,6 @@
 ---
 name: pi-oneshot
-description: Delegates a self-contained task to the pi coding agent in a single headless `pi -p` invocation — text mode, full toolset, no review loop. Use when the user asks to "delegate to pi", to run a "pi task", to "use pi for" a job, or to run "pi oneshot" — a quick task you want done in one shot and then summarized.
+description: Delegates a self-contained task to the pi coding agent in a single headless `pi -p` invocation — text mode, full toolset, no review loop. Use when the user asks to "delegate to pi", to run a "pi task", to "use pi for" a job, or to "run pi oneshot" — a quick task you want done in one shot and then summarized.
 user_invocable: true
 ---
 
@@ -39,26 +39,52 @@ then offer to re-run once it is available.
 ## Invocation
 
 Run the task as a single one-shot, stateless call, passing the user's
-request through as `$ARGUMENTS` (the full task description). The call is wrapped in `timeout` exactly the way `orchestrate.sh` wraps its
-pi calls (`PI_TIMEOUT` default 1800 s, `PI_KILL_AFTER` default 30 s,
-`timeout` preferred with a `gtimeout` fallback):
+request through as `$ARGUMENTS` (the full task description). The call is
+wrapped in `timeout` exactly the way `orchestrate.sh` wraps its pi calls
+(`PI_TIMEOUT` default 1800 s, `PI_KILL_AFTER` default 30 s, `timeout`
+preferred with a `gtimeout` fallback, and a probe that treats a missing
+`--kill-after` flag as "no timeout binary at all"). Run this single block —
+it covers both prompt transports (positional argument and stdin) and both
+wrapper states (wrapped and unbounded) safely:
 
 ```bash
+# Discover the timeout binary and probe --kill-after support; if the probe
+# fails (e.g. an old macOS `timeout` without the flag) treat it as absent —
+# unbounded call + warning — mirroring orchestrate.sh.
 TIMEOUT_CMD=""
-if command -v timeout >/dev/null 2>&1; then
-  TIMEOUT_CMD="timeout"
-elif command -v gtimeout >/dev/null 2>&1; then
-  TIMEOUT_CMD="gtimeout"
+for cand in timeout gtimeout; do
+  if command -v "$cand" >/dev/null 2>&1 && "$cand" --kill-after=1 1 true >/dev/null 2>&1; then
+    TIMEOUT_CMD="$cand"
+    break
+  fi
+done
+
+# One wrapper array for every variant: empty when no usable timeout binary
+# exists, so "${wrap[@]}" expands to nothing (never to a bare --kill-after).
+wrap=()
+if [ -n "$TIMEOUT_CMD" ]; then
+  wrap=("$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}")
 fi
 
-if [ -n "$TIMEOUT_CMD" ]; then
-  "$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}" \
-    "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
-else
-  echo "warning: neither timeout nor gtimeout found; pi call is unbounded at the script level (only Claude Code's Bash tool timeout still applies)" >&2
-  "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
-fi
+# Short prompts (a sentence or two): positional argument.
+"${wrap[@]}" "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS"
+
+# Long prompts (more than a few hundred words): stdin transport, same wrapper.
+# printf '%s' "$ARGUMENTS" | "${wrap[@]}" "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates
+
+# Neither binary (or the probe failed): the wrapper is empty, so the call
+# runs unbounded at the script level — bounded only by Claude Code's Bash
+# tool timeout (below). Print a warning to stderr before the call:
+# echo "warning: no usable timeout binary found; pi call is unbounded at the script level" >&2
 ```
+
+(`PI_TIMEOUT` and `PI_KILL_AFTER` must be positive integers when set —
+non-positive or non-numeric values make the wrapper fail or behave
+unpredictably.)
+
+The stdin variant keeps the wrapper around pi only (the pipe feeds pi's
+stdin; the timeout command is never piped) and avoids `E2BIG` on Linux
+where a single argv element is capped at 128 KiB (`MAX_ARG_STRLEN`).
 
 ### Timeout wrapper
 
@@ -72,7 +98,7 @@ and offer a re-run (optionally with a larger `PI_TIMEOUT`). Any other
 non-zero exit is a genuine pi failure and is relayed verbatim per the
 "Reporting back" section below.
 
-On the **unbounded path** (neither `timeout`/`gtimeout` on `PATH`), the
+On the **unbounded path** (no usable `timeout`/`gtimeout` binary), the
 warning is printed to stderr and there is no script-level deadline —
 exit codes 124/137 from this wrapper do not apply; only Claude Code's
 Bash tool timeout (below) can kill the run, and a bare non-zero exit is
@@ -113,23 +139,13 @@ ceiling, so the full `${PI_TIMEOUT}` budget is honored.
 - Plain text mode (no `--mode json`) — stdout is the transcript's final
   text, nothing to parse.
 
-- **Prompt transport:** if the task description is long (more than a few
-  hundred words), pass it via stdin instead of as a positional argument,
-  keeping the wrapper around pi only:
-  `printf '%s' "$ARGUMENTS" | "$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}" "$PI_BIN" -p --no-session ...`
-  (the pipe feeds pi's stdin; the timeout command is never piped). This avoids
-  `E2BIG` on Linux where a single argv element is capped at 128 KiB
-  (`MAX_ARG_STRLEN`). Short prompts (a sentence or two) work fine as a
-  positional argument.
-
 ### Model
 
-The timeout wrapper must wrap the **whole** command, model flag included —
-never append `--model` to an un-wrapped call:
+The same wrapper wraps the **whole** command, model flag included — never
+append `--model` to an un-wrapped call:
 
 ```bash
-"$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}" \
-  "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS" --model <model>
+"${wrap[@]}" "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates "$ARGUMENTS" --model "MODEL"
 ```
 
 - If the user explicitly named a model, append `--model <model>` to the
