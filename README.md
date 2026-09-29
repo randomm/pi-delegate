@@ -82,9 +82,11 @@ Ask your agent for a trivial one-shot task:
 delegate to pi: write a bash function that prints today's date in ISO format
 ```
 
-Then check the run log for the `provider/model` line printed to stderr
-(e.g. `pi call 1: provider/model anthropic/claude-opus-4`) — that line
-proves which model actually answered.
+The skill reports back with a summary of pi's output (pi prints its final
+text on stdout in plain-text mode, and the exit code is 0 on success).
+`pi-oneshot` makes a single text-mode call and has no review loop, so there
+is no verdict to read; the review loop is where `provider/model` and verdict
+logging appear — see [how it works](docs/how-it-works.md#verdicts).
 
 ## The skills
 
