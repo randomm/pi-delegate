@@ -1867,3 +1867,143 @@ WRAP
   [ "$rc" -ne 3 ]
   [[ "$out" != *"REFUSED:"* ]]
 }
+
+# --- Issue #69: cross-call RUN_DIR state + single abort recipe --------------
+# Claude runs the launch and each wait/abort as SEPARATE Bash tool calls, so
+# shell variables do not persist: the launch block must print RUN_DIR and
+# every later block must re-derive LOG/PID_FILE from D.
+
+# loop_launch_block: the detached-launch block inside the loop's long-runs
+# guidance (between the "the only strategy to use" note and the "State does
+# not persist" note) — NOT the short ## Invocation example at the top.
+loop_launch_block() {
+  awk '/the only strategy to use/{s=1; next} s && /State does not persist/{s=0} s && /^## /{s=0} s' \
+    "$REPO_ROOT/skills/pi-review-loop/SKILL.md" \
+  | awk '/^```bash$/{c++; f=(c==1); next} f && /^```$/{f=0} f{print}'
+}
+
+# review_wait_block: the wait block is the first ```bash block AFTER the
+# "State does not persist" note.
+review_wait_block() {
+  awk '/State does not persist/{s=1; next} s && /^## /{s=0} s' \
+    "$REPO_ROOT/skills/pi-review-loop/SKILL.md" \
+  | awk '/^```bash$/{c++; f=(c==1); next} f && /^```$/{f=0} f{print}'
+}
+
+# abort_block_of <file>: the ```bash block after the "Stop / abort" prose
+# in <file> (the loop SKILL.md has no numbered step 5 to anchor on).
+abort_block_of() {
+  awk '/Stop \/ abort/{s=1; next} s && /^## /{s=0} s' "$1" \
+  | awk 'BEGIN{c=0} /^```bash$/{c++; f=(c==1); next} f && /^```$/{f=0} f{print}'
+}
+
+@test "review-loop launch block prints RUN_DIR= as its last line" {
+  local block
+  block="$(loop_launch_block)"
+  [[ -n "$block" ]]
+  [[ "$(printf '%s\n' "$block" | tail -n 1)" = 'echo "RUN_DIR=$D"' ]]
+  grep -q 'mktemp -d' <<<"$block"
+}
+
+@test "review-loop SKILL.md states RUN_DIR must be copied into every later call" {
+  local skill
+  skill="$REPO_ROOT/skills/pi-review-loop/SKILL.md"
+  grep -q 'State does not persist between Bash tool calls' "$skill"
+  grep -q 'every later call' "$skill"
+}
+
+@test "review-loop wait block starts with the D placeholder and re-derives LOG/PID_FILE" {
+  local block
+  block="$(review_wait_block)"
+  [[ -n "$block" ]]
+  [[ "$(printf '%s\n' "$block" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
+  grep -qF 'LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"' <<<"$block"
+}
+
+@test "review-loop abort block starts with the D placeholder and re-derives PID_FILE" {
+  local block
+  block="$(abort_block_of "$REPO_ROOT/skills/pi-review-loop/SKILL.md" 1)"
+  [[ -n "$block" ]]
+  [[ "$(printf '%s\n' "$block" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
+  grep -qF 'PID_FILE="$D/review-loop.pid"' <<<"$block"
+  # The pid-reuse guard checks the command line before killing.
+  grep -q 'ps -o command= -p' <<<"$block"
+  grep -q 'orchestrate.sh' <<<"$block"
+}
+
+@test "pi-oneshot launch block prints RUN_DIR= as its last line" {
+  local skill oneshot_wait
+  skill="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  [ -f "$skill" ]
+  local launch
+  launch="$(awk '/^### Long runs under/{s=1; next} s && /^##(#[^#]|[^# ])/{s=0} s' "$skill" | awk 'BEGIN{c=0} /^```bash$/{c++; f=(c==1); next} f && /^```$/{f=0} f{print}')"
+  [[ -n "$launch" ]]
+  [[ "$(printf '%s\n' "$launch" | tail -n 1)" = 'echo "RUN_DIR=$D"' ]]
+}
+
+@test "pi-oneshot wait and abort blocks start with the D placeholder and re-derive from D" {
+  local skill
+  skill="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  [ -f "$skill" ]
+  local longruns waitblock abortblock
+  longruns="$(awk '/^### Long runs under/{s=1; next} s && /^##(#[^#]|[^# ])/{s=0} s' "$skill")"
+  waitblock="$(printf '%s\n' "$longruns" | awk 'BEGIN{c=0} /^```bash$/{c++; f=(c==2); next} f && /^```$/{f=0} f{print}')"
+  [[ -n "$waitblock" ]]
+  [[ "$(printf '%s\n' "$waitblock" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
+  grep -qF 'LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"' <<<"$waitblock"
+  abortblock="$(printf '%s\n' "$longruns" | awk 'BEGIN{c=0} /^```bash$/{c++; f=(c==3); next} f && /^```$/{f=0} f{print}')"
+  [[ -n "$abortblock" ]]
+  [[ "$(printf '%s\n' "$abortblock" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
+  grep -qF 'PID_FILE="$D/pi-oneshot.pid"' <<<"$abortblock"
+  grep -q 'ps -o command= -p' <<<"$abortblock"
+}
+
+@test "abort recipe doc-drift: configuration.md, both SKILL.md copies are identical" {
+  local config loop_skill oneshot_skill
+  config="$REPO_ROOT/docs/configuration.md"
+  loop_skill="$REPO_ROOT/skills/pi-review-loop/SKILL.md"
+  oneshot_skill="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  [ -f "$config" ] && [ -f "$loop_skill" ] && [ -f "$oneshot_skill" ]
+  local a b
+  a="$(abort_block_of "$loop_skill")"
+  b="$(abort_block_of "$oneshot_skill")"
+  # The three copies differ only in skill-specific tokens (the guard
+  # string, the pid-file basename, the guard comment), so normalise those
+  # away before diffing: comments dropped, guard token -> __RUN__, pid
+  # file basename -> __PID__.
+  local canon
+  canon="$(awk '/Stop \/ abort/{s=1; next} s && /^- \*\*Stop \/ abort/{s=0} s' "$config" | awk 'BEGIN{c=0} /^```bash$/{c++; f=(c==1); next} f && /^```$/{f=0} f{print}')"
+  [[ -n "$canon" ]]
+  [[ -n "$a" ]] && [[ -n "$b" ]]
+  local norm_a norm_b norm_canon
+  norm_a="$(sed -e '/^[[:space:]]*#/d' -e 's/orchestrate\.sh/__RUN__/g' -e 's/review-loop\.pid/__PID__/g' <<<"$a")"
+  norm_b="$(sed -e '/^[[:space:]]*#/d' -e 's/\"\$PI_BIN\"/__RUN__/g' -e 's/\$PI_BIN/__RUN__/g' -e 's/pi-oneshot\.pid/__PID__/g' <<<"$b")"
+  norm_canon="$(sed -e '/^[[:space:]]*#/d' -e 's/orchestrate\.sh/__RUN__/g' -e 's/review-loop\.pid/__PID__/g' <<<"$canon")"
+  diff <(printf '%s\n' "$norm_a") <(printf '%s\n' "$norm_canon")
+  diff <(printf '%s\n' "$norm_b") <(printf '%s\n' "$norm_canon")
+}
+
+@test "lint: launch, wait and abort blocks pass bash -n and shellcheck (review-loop)" {
+  local tmp
+  tmp="$(mktemp)"
+  printf '%s\n' "$(loop_launch_block)" > "$tmp"
+  bash -n "$tmp"
+  shellcheck --norc --severity=warning -s bash "$tmp"
+  rm -f "$tmp"
+  local w
+  w="$(review_wait_block)"
+  local wtmp
+  wtmp="$(mktemp)"
+  printf '%s\n' "$w" > "$wtmp"
+  bash -n "$wtmp"
+  shellcheck --norc --severity=warning -s bash "$wtmp"
+  rm -f "$wtmp"
+  local ab
+  ab="$(abort_block_of "$REPO_ROOT/skills/pi-review-loop/SKILL.md")"
+  local abtmp
+  abtmp="$(mktemp)"
+  printf '%s\n' "$ab" > "$abtmp"
+  bash -n "$abtmp"
+  shellcheck --norc --severity=warning -s bash "$abtmp"
+  rm -f "$abtmp"
+}

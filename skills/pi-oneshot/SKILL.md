@@ -228,8 +228,11 @@ foreground bounded calls (`run_in_background` is NOT safe — see
 ```bash
 D=$(mktemp -d); LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"
 rm -f "$LOG" "$PID_FILE" "$RC_FILE"
+# `wrap` is reused from the ## Invocation block above (do not reset it to
+# wrap=() here); PI_BIN is resolved in the ## Locating the pi binary block.
 ( printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates > "$LOG" 2>&1; echo $? > "$RC_FILE" ) &
 echo "$!" > "$PID_FILE"
+echo "RUN_DIR=$D"
 ```
 
    The block above is the complete, verbatim launch — `wrap` is reused
@@ -238,20 +241,35 @@ echo "$!" > "$PID_FILE"
    explicitly named a model, the only variant is the same block with
    `--model "MODEL"` appended to the pi flags (before the `>` redirect);
    otherwise omit `--model` — pi uses its configured default.
+
+   **State does not persist between Bash tool calls.** Each step runs in
+   a separate `bash` process, so shell variables (`D`, `LOG`,
+   `PID_FILE`, `RC_FILE`) do not carry over. Copy the `RUN_DIR=...` line
+   the launch call printed into every later call: each wait/abort block
+   below starts with `D=<the RUN_DIR printed at launch>` (replacing the
+   placeholder with the actual path) and derives `$LOG`/`$PID_FILE`/
+   `$RC_FILE` from `$D`.
 2. **Wait in foreground, bounded calls.** Repeatedly run a foreground
    Bash call with `timeout` just under the 600000 ms ceiling (the Bash
    tool's `timeout` parameter, e.g. 595000). Each call exits as soon as
-   the exit-code file appears, or as soon as the recorded pid is gone:
+   the exit-code file appears, or as soon as the recorded pid is gone.
+   Replace the `D=` line with the `RUN_DIR` the launch printed before
+   running:
 ```bash
-   until [ -s "$RC_FILE" ]; do
-     kill -0 "$(cat "$PID_FILE")" 2>/dev/null || break
-     sleep 15
-   done
+D="<the RUN_DIR printed at launch>"
+LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"
+until [ -s "$RC_FILE" ]; do
+  kill -0 "$(cat "$PID_FILE")" 2>/dev/null || break
+  sleep 15
+done
+tail -n 1 "$RC_FILE" >/dev/null; [ -s "$LOG" ] >/dev/null
 ```
 
    If one wait call is killed at its 10-minute ceiling, start the next: the
    launch is detached and survives, and the wait resumes from the same
-   files.
+   files (re-deriving them from the launch's `RUN_DIR`). When the loop
+   exits, the wait block has left you `$RC_FILE` (the recorded exit code)
+   and `$LOG` (the pi output) ready to read.
 3. **Do not end the turn** before the exit-code file is read (or the pid is
    confirmed gone) — no "the task is running, I'll report when it
    finishes". When done, read `$RC_FILE` and the output in `$LOG` and
@@ -262,10 +280,41 @@ echo "$!" > "$PID_FILE"
    tail of log:") with `tail -n 20 "$LOG"`, and **never** report a result
    as if the run had completed.
 4. **Stop / abort (before ending the turn).** On abort, kill the recorded
-   pid and its children with the same recipe `pi-review-loop` documents
-   (pid file, walk `ps -axo pid,ppid` level by level, SIGTERM, then
-   SIGKILL stragglers after 5 s). macOS has no `setsid`; the recipe was
-   verified on macOS against a multi-level process tree.
+   pid and its children with the recipe below — the same block
+   `pi-review-loop` documents (the skill must stay self-contained; the
+   authoritative copy with the pid-reuse guard is `docs/configuration.md`,
+   **Long runs → Stop / abort**). Replace the `D=` line with the `RUN_DIR`
+   the launch printed before running:
+```bash
+D="<the RUN_DIR printed at launch>"
+PID_FILE="$D/pi-oneshot.pid"
+PID="$(cat "$PID_FILE")"
+# Pid-reuse guard: only proceed if the recorded pid still belongs to the pi
+# process (a plain `kill` on a recycled pid would hit an unrelated process).
+cmd="$(ps -o command= -p "$PID" 2>/dev/null || true)"
+if ! [[ "$cmd" == *"$PI_BIN"* ]]; then
+  echo "pid $PID no longer runs $PI_BIN — skipping kill"
+else
+  front="$PID"
+  all="$PID"
+  for _ in 1 2 3 4 5; do
+    next=""
+    for p in $front; do
+      next="${next}$(ps -axo pid,ppid | awk -v r="$p" '$2 == r { print $1 }')"
+    done
+    [ -n "$next" ] || break
+    all="$all $next"
+    front="$next"
+  done
+  for p in $all; do
+    kill "$p" 2>/dev/null || true
+  done
+  sleep 5
+  for p in $all; do
+    kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null || true
+  done
+fi
+```
 
 - `-p` — print mode: pi runs headless and emits its final text on stdout.
 - `--no-session` — no session is persisted or resumed; each invocation is

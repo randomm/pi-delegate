@@ -267,3 +267,67 @@ oneshot_preflight_block() {
 @test "pi-oneshot SKILL.md documents PI_DELEGATE_UNSAFE opt-out in prose" {
   grep -q 'PI_DELEGATE_UNSAFE=1' "$SKILL_FILE"
 }
+
+# --- Issue #69: cross-call RUN_DIR state + single abort recipe --------------
+# Claude runs the launch and each wait/abort as SEPARATE Bash tool calls, so
+# shell variables do not persist: the launch block must print RUN_DIR and
+# every later block must re-derive LOG/PID_FILE/RC_FILE from D.
+
+# The three Long-runs blocks (launch, wait, abort) by fence number.
+long_runs_block() {
+  local s
+  s="$(awk '/^### Long runs under/{s=1; next} s && /^##(#[^#]|[^# ])/{s=0} s' "$SKILL_FILE")"
+  if [ "$1" = "1" ]; then
+    # The launch block reuses `wrap` (built in the ## Invocation block) and
+    # `$PI_BIN` (resolved in ## Locating the pi binary); seed both for lint.
+    printf '%s\n%s\n%s\n' 'wrap=()' 'PI_BIN=pi' "$(printf '%s\n' "$s" | awk 'BEGIN{c=0} /^```bash$/{c++; f=(c==1); next} f && /^```$/{f=0} f{print}')"
+  else
+    printf '%s\n' "$s" | awk -v n="$1" 'BEGIN{c=0} /^```bash$/{c++; f=(c==n); next} f && /^```$/{f=0} f{print}'
+  fi
+}
+
+@test "pi-oneshot launch block prints RUN_DIR= as its last line" {
+  local block
+  block="$(long_runs_block 1)"
+  [[ -n "$block" ]]
+  [[ "$(printf '%s\n' "$block" | tail -n 1)" = 'echo "RUN_DIR=$D"' ]]
+}
+
+@test "pi-oneshot SKILL.md states RUN_DIR must be copied into every later call" {
+  grep -q 'State does not persist between Bash tool calls' "$SKILL_FILE"
+  grep -q 'every later call' "$SKILL_FILE"
+}
+
+@test "pi-oneshot wait block starts with the D placeholder and re-derives LOG/PID_FILE/RC_FILE" {
+  local block
+  block="$(long_runs_block 2)"
+  [[ -n "$block" ]]
+  [[ "$(printf '%s\n' "$block" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
+  grep -qF 'LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"' <<<"$block"
+}
+
+@test "pi-oneshot abort block starts with the D placeholder and re-derives PID_FILE" {
+  local block
+  block="$(long_runs_block 3)"
+  [[ -n "$block" ]]
+  [[ "$(printf '%s\n' "$block" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
+  grep -qF 'PID_FILE="$D/pi-oneshot.pid"' <<<"$block"
+  # The pid-reuse guard checks the command line before killing.
+  grep -q 'ps -o command= -p' <<<"$block"
+  grep -q '\$PI_BIN' <<<"$block"
+}
+
+@test "lint: pi-oneshot launch, wait and abort blocks pass bash -n and shellcheck" {
+  local n
+  for n in 1 2 3; do
+    local block
+    block="$(long_runs_block "$n")"
+    [[ -n "$block" ]]
+    local tmp
+    tmp="$(mktemp)"
+    printf '%s\n' "$block" > "$tmp"
+    bash -n "$tmp"
+    shellcheck --norc --severity=warning -s bash "$tmp"
+    rm -f "$tmp"
+  done
+}

@@ -73,17 +73,29 @@ D=$(mktemp -d); LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"
 rm -f "$LOG" "$PID_FILE"
 nohup bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS" > "$LOG" 2>&1 &
 echo "$!" > "$PID_FILE"
+echo "RUN_DIR=$D"
 ```
 
    Note that `$LOG` grows as pi streams output and can be deleted after
    the run.
+
+   **State does not persist between Bash tool calls.** Each of the steps
+   above runs in a separate `bash` process, so shell variables (`D`,
+   `LOG`, `PID_FILE`) do not carry over. Copy the `RUN_DIR=...` line the
+   launch call printed into every later call: each wait/abort block below
+   starts with `D=<the RUN_DIR printed at launch>` (replacing the
+   placeholder with the actual path) and derives `$LOG`/`$PID_FILE` from
+   `$D`.
 2. **Wait in foreground, bounded calls.** Repeatedly run a foreground
    Bash call with `timeout` just under the 600000 ms ceiling (the Bash
    tool's `timeout` parameter, e.g. 595000). Check only the LAST line of
    `$LOG` — it is the JSON summary when the loop has finished. Each call
    exits as soon as that last line parses as the six-field JSON summary,
-   or as soon as the recorded pid is gone:
+   or as soon as the recorded pid is gone. Replace the `D=` line with the
+   `RUN_DIR` the launch printed before running:
 ```bash
+D="<the RUN_DIR printed at launch>"
+LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"
 until [ -s "$LOG" ] && tail -n 1 "$LOG" | jq -e 'has("status") and has("verdict") and has("rounds") and has("total_pi_calls") and has("findings") and has("raw_output")' 2>/dev/null; do
   kill -0 "$(cat "$PID_FILE")" 2>/dev/null || break
   sleep 15
@@ -95,7 +107,8 @@ done
    tail of log:" and `tail -n 20 "$LOG"`, and report the run as **failed**
    with that tail (see step 4). If one wait call is instead killed at its
    10-minute ceiling, start the next: the loop is detached and survives,
-   and the wait resumes from the same `$LOG`/`$PID_FILE`.
+   and the wait resumes from the same `$LOG`/`$PID_FILE` (re-deriving them
+   from the launch's `RUN_DIR`).
 3. **Do not end the turn until the loop is done.** Do not reply to the
    user — no "the loop is running, I'll report when it finishes" —
    before the final JSON line has been read (or the process is confirmed
@@ -117,29 +130,41 @@ leave pi children behind). On macOS (no `setsid`, no guaranteed
 process-group primitives from a plain pid), kill the pid and then walk
 its child tree level by level:
 ```bash
+D="<the RUN_DIR printed at launch>"
+PID_FILE="$D/review-loop.pid"
 PID="$(cat "$PID_FILE")"
-front="$PID"
-all="$PID"
-for _ in 1 2 3 4 5; do
-  next=""
-  for p in $front; do
-    next="$next $(ps -axo pid,ppid | awk -v r="$p" '$2 == r { print $1 }')"
+# Pid-reuse guard: only proceed if the recorded pid still belongs to the pi
+# process (a plain `kill` on a recycled pid would hit an unrelated process).
+cmd="$(ps -o command= -p "$PID" 2>/dev/null || true)"
+if ! [[ "$cmd" == *orchestrate.sh* ]]; then
+  echo "pid $PID no longer runs orchestrate.sh — skipping kill"
+else
+  front="$PID"
+  all="$PID"
+  for _ in 1 2 3 4 5; do
+    next=""
+    for p in $front; do
+      next="${next}$(ps -axo pid,ppid | awk -v r="$p" '$2 == r { print $1 }')"
+    done
+    [ -n "$next" ] || break
+    all="$all $next"
+    front="$next"
   done
-  [ -n "$next" ] || break
-  all="$all $next"
-  front="$next"
-done
-for p in $all; do
-  kill "$p" 2>/dev/null || true
-done
-sleep 5
-for p in $all; do
-  kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null || true
-done
+  for p in $all; do
+    kill "$p" 2>/dev/null || true
+  done
+  sleep 5
+  for p in $all; do
+    kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null || true
+  done
+fi
 ```
 
 This was verified on macOS against a three-level tree (loop → pi → child):
-all processes die.
+all processes die, and a recycled pid is skipped. The same block, with the
+pi binary in place of `orchestrate.sh` in the guard, is what `pi-oneshot`
+documents (and the authoritative copy with both guards is
+`docs/configuration.md`, **Long runs → Stop / abort**).
 
 - **Quote `$ARGUMENTS`.** An unquoted `$ARGUMENTS` still performs command
   substitution: `bash orchestrate.sh $ARGUMENTS` with a request containing
