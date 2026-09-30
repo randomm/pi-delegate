@@ -679,18 +679,7 @@ EOF
   # CLI's stdout/stderr is captured in plugin-install.log (both steps).
   local cfg="$run_dir/claude-config"
   [ -f "$run_dir/plugin-install.log" ]
-  # On failure, dump the log and run output for diagnosis.
-  if ! grep -q "marketplace" "$run_dir/plugin-install.log"; then
-    echo "DIAG: plugin-install.log contents:" >&2
-    cat "$run_dir/plugin-install.log" >&2
-    echo "DIAG: runarm-b.out tail:" >&2
-    tail -20 "$BENCH_OUT/runarm-b.out" >&2
-  fi
   grep -q -i "marketplace" "$run_dir/plugin-install.log"
-  if ! grep -q -i "install" "$run_dir/plugin-install.log"; then
-    echo "DIAG: 'install' not found in plugin-install.log:" >&2
-    cat "$run_dir/plugin-install.log" >&2
-  fi
   grep -q -i "install" "$run_dir/plugin-install.log"
 }
 
@@ -804,11 +793,6 @@ CLAUDE
   local rc=0
   PATH="$stub_dir:$binonly:/usr/bin:/bin:/usr/sbin:/sbin" PI_DELEGATE_REPO="$fake_pd" PI_DELEGATE_SHA="$pd_sha" \
     bash "$BENCH_DIR/run-arm.sh" "$TASK_ID" B 11 > "$BENCH_OUT/runarm-b5.out" 2>&1 || rc=$?
-  # On failure, dump for diagnosis.
-  if [ "$rc" -ne 2 ]; then
-    echo "DIAG: rc=$rc (expected 2); runarm-b5.out:" >&2
-    cat "$BENCH_OUT/runarm-b5.out" >&2
-  fi
   [ "$rc" -eq 2 ]
   grep -q "ABORT" "$BENCH_OUT/runarm-b5.out"
 }
