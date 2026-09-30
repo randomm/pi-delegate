@@ -189,13 +189,19 @@ bench/collect.sh    <task> <arm> <run>  # one JSON line per run, jq-validated
 
 - Creates a per-run `CLAUDE_CONFIG_DIR` (isolation).
 - Arm B only: clones the pinned pi-delegate commit (`PI_DELEGATE_SHA`,
-  resolved from `PI_DELEGATE_REPO`, default
-  `https://github.com/randomm/pi-delegate.git`) into
+  resolved from `PI_DELEGATE_REPO`, default: the **local** pi-delegate repo
+  root derived from the harness location — the pi-delegate repo is **private**
+  and arm B never depends on GitHub access) into
   `$BENCH_OUT/pin/pi-delegate-<sha>` (keyed by SHA only, shared by all runs
   and arms), verifies `git rev-parse HEAD == PI_DELEGATE_SHA` and the
-  presence of `.claude-plugin/marketplace.json`, then seeds the marketplace
-  catalog + installs the plugin into the config dir. A plugin install
-  failure ABORTS arm B (exit 2).
+  presence of `.claude-plugin/marketplace.json`, then installs the plugin
+  into the config dir via the supported CLI — `claude plugin marketplace add
+  <pin_dir>` (from the **local** pin directory, never a remote URL) then
+  `claude plugin install pi-delegate@pi-delegate` — and verifies with
+  `claude plugin list --json`. The CLI's stdout/stderr is captured in
+  `<run-dir>/plugin-install.log` and printed on failure. A plugin install
+  failure ABORTS arm B (exit 2). Arm B also ABORTS (exit 2) if `pi` is not
+  found on PATH; arm A may proceed without a shim.
 - Installs the **pi shim** (`<run-dir>/bin/pi`) and prepends `<run-dir>/bin`
   to `PATH` for the claude invocation.
 - Builds the prompt (task body + arm-B delegation suffix).
@@ -321,7 +327,9 @@ bench/collect.sh    click-sentinel-pickle A 1
 
 Environment overrides: `BENCH_OUT`, `CLAUDE_MODEL` (default: the literal
 id `claude-sonnet-5-5`), `CLAUDE_PERM_MODE`, `PI_DELEGATE_REPO` (default:
-`https://github.com/randomm/pi-delegate.git`; a local repo path also works),
+the local pi-delegate repo root derived from the harness location — the repo
+is private, so arm B never touches GitHub; a remote URL is only an explicit
+override),
 `PI_DELEGATE_SHA`, `CLAUDE_TIMEOUT`, `PI_TIMEOUT`, `PI_KILL_AFTER`.
 
 ## How to read results

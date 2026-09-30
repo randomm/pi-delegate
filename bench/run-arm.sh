@@ -14,9 +14,11 @@
 #   BENCH_OUT        Output root (default /tmp/pi-bench; must be absolute)
 #   CLAUDE_MODEL     Claude model id (default: the literal id claude-sonnet-5-5)
 #   CLAUDE_PERM_MODE Permission mode (default: auto)
-#   PI_DELEGATE_REPO pi-delegate source for the arm-B pin (default:
-#                    https://github.com/randomm/pi-delegate.git; a local
-#                    repo path also works). NEVER the task REPO.
+#   PI_DELEGATE_REPO pi-delegate source for the arm-B pin (default: the local
+#                    pi-delegate repo root derived from the harness location —
+#                    the repo is private, arm B never touches GitHub; a
+#                    remote URL is only an explicit override; a local repo
+#                    path also works). NEVER the task REPO.
 #   PI_DELEGATE_SHA  Pinned pi-delegate commit to measure (default: the
 #                    remote's default-branch HEAD at the first pin)
 #   CLAUDE_TIMEOUT   Claude wall-clock seconds (default: 10800)
@@ -98,9 +100,17 @@ command -v claude >/dev/null 2>&1 || {
 # reproducible and claude's JSON reports usage against the exact id.
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-5-5}"
 CLAUDE_PERM_MODE="${CLAUDE_PERM_MODE:-auto}"
-# The pi-delegate pin comes from the pi-delegate repo itself (PI_DELEGATE_REPO),
-# never from the task REPO.
-PI_DELEGATE_REPO="${PI_DELEGATE_REPO:-https://github.com/randomm/pi-delegate.git}"
+# The pi-delegate pin comes from the pi-delegate repo itself
+# (PI_DELEGATE_REPO), never from the task REPO. The default is the LOCAL
+# pi-delegate repo root (derived from the harness location): the repo is
+# private and arm B must never depend on GitHub access — the marketplace is
+# added from the local pin directory, never from a remote URL. A remote URL
+# may only be supplied as an explicit PI_DELEGATE_REPO override.
+PI_DELEGATE_REPO="${PI_DELEGATE_REPO:-$(git -C "$BENCH_DIR" rev-parse --show-toplevel 2>/dev/null)}"
+if [ -z "$PI_DELEGATE_REPO" ] || [ ! -d "$PI_DELEGATE_REPO" ]; then
+  echo "run-arm: PI_DELEGATE_REPO is not a local directory ('$PI_DELEGATE_REPO'); set PI_DELEGATE_REPO explicitly (the pi-delegate repo is private; a remote URL is only an explicit override)" >&2
+  exit 2
+fi
 PI_DELEGATE_SHA="${PI_DELEGATE_SHA:-}"
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-${BENCH_CLAUDE_TIMEOUT:-10800}}"
 CLAUDE_KILL_AFTER="${CLAUDE_KILL_AFTER:-60}"
@@ -151,9 +161,11 @@ if [ "$arm" = "B" ]; then
     exit 2
   fi
   # Install the plugin; a failure ABORTS arm B (the prompt asserts the
-  # plugin is installed; a run without it is unmeasurable).
-  if ! install_pi_delegate_plugin "$config_dir" "$pin_dir"; then
-    echo "run-arm: ABORT — pi-delegate plugin install failed (arm B is unmeasurable without the plugin)" >&2
+  # plugin is installed; a run without it is unmeasurable). The CLI's
+  # stdout/stderr is captured in <run-dir>/plugin-install.log and printed
+  # on failure.
+  if ! install_pi_delegate_plugin "$config_dir" "$pin_dir" "$run_dir/plugin-install.log"; then
+    echo "run-arm: ABORT — pi-delegate plugin install failed (arm B is unmeasurable without the plugin); see $run_dir/plugin-install.log" >&2
     exit 2
   fi
 fi
@@ -164,11 +176,15 @@ fi
 # For arm A the shim will cause pi's preflight to run; if pi is invoked on a
 # default branch or in a repo with secret files, it will refuse (exit 3),
 # which is the expected and correct behaviour.
-if command -v pi >/dev/null 2>&1; then
-  install_pi_shim "$run_dir"
-else
-  echo "run-arm: WARNING — pi not found on PATH; the shim will not be installed" >&2
-  echo "run-arm:          arm B delegation will fail (no pi available)." >&2
+# install_pi_shim returns 1 when pi is not found on PATH (outside the shim
+# dir) or resolves to a harness shim; arm B must abort (the delegation
+# target would be missing), arm A may proceed without a shim.
+if ! install_pi_shim "$run_dir"; then
+  if [ "$arm" = "B" ]; then
+    echo "run-arm: ABORT — arm B requires pi on PATH (pi shim install failed)" >&2
+    exit 2
+  fi
+  echo "run-arm: WARNING — pi not found on PATH (or a shim was resolved); the shim will not be installed; arm A may proceed" >&2
 fi
 
 # --- Build the prompt ----------------------------------------------------------
