@@ -185,10 +185,21 @@ skill_section() {
   printf '%s' "$model_section" | grep -qF -- 'printf '"'"'%s'"'"' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates --model'
 }
 
+# Extract the FIRST ```bash block of the SKILL.md section named $1 (the
+# invocation block in the Invocation section, not a later section's block —
+# the previous single-awk form kept collecting past the next ##/### heading
+# and concatenated blocks from Model, Long runs, etc. into one file).
+first_skill_block() {
+  local s
+  s=$(skill_section "$1")
+  printf '%s\n' "$s" | awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}'
+}
+
 @test "pi-oneshot SKILL.md invocation block passes bash -n and shellcheck" {
   local block
-  block=$(skill_section "## Invocation" | awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}')
+  block=$(first_skill_block "## Invocation")
   [[ -n "$block" ]]
+
   local tmp
   tmp="$(mktemp)"
   printf '%s\n' "$block" > "$tmp"
