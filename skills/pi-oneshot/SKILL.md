@@ -145,13 +145,26 @@ last-resort guardrail, not a substitute.
 ## Invocation
 
 Run the task as a single one-shot, stateless call, passing the user's
-request through as `$ARGUMENTS` (the full task description). The call is
-wrapped in `timeout` exactly the way `orchestrate.sh` wraps its pi calls
-(`PI_TIMEOUT` default 1800 s, `PI_KILL_AFTER` default 30 s, `timeout`
-preferred with a `gtimeout` fallback, and a probe that treats a missing
-`--kill-after` flag as "no timeout binary at all"). Run this single block —
-it is complete and covers both wrapper states (wrapped and unbounded):
+request through as `$ARGUMENTS` (the full task description). The block is
+self-contained — it re-resolves the pi binary (`PI_BIN`, per `## Locating
+the pi binary`) and re-runs the timeout-wrapper resolution (mirroring
+`orchestrate.sh`: `PI_TIMEOUT` default 1800 s, `PI_KILL_AFTER` default 30 s,
+`timeout` preferred with a `gtimeout` fallback, and a probe that treats a
+missing `--kill-after` flag as "no timeout binary at all"), because nothing
+persists between Bash tool calls. Run this single block — it is complete
+and covers both wrapper states (wrapped and unbounded):
 ```bash
+# Re-resolve the pi binary (nothing from an earlier Bash call persists).
+PI_BIN=""
+for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HOME/.local/bin/pi"; do
+  [ -n "$candidate" ] || continue
+  if [ -x "$candidate" ]; then
+    PI_BIN="$candidate"
+    break
+  fi
+done
+[ -n "$PI_BIN" ] || { echo "pi not found (PATH, ~/.bun/bin/pi, ~/.local/bin/pi) — install it and re-run"; exit 1; }
+
 # NOTE: the `--kill-after=1 1 true` probe is GNU-timeout-specific by design —
 # non-GNU shims fail it and fall back to the unbounded path on purpose.
 # Discover the timeout binary and probe --kill-after support; if the probe
@@ -231,8 +244,12 @@ foreground bounded calls (`run_in_background` is NOT safe — see
 `docs/configuration.md`):
 
 1. **Prepare, remove stale files, then launch detached** in one foreground
-   Bash call. The helper files MUST live **outside the target repo** — for
-   example in a temp directory made with `mktemp -d` (untracked files
+   Bash call. The block below is self-contained: state does not persist
+   between Bash tool calls, so it re-resolves the pi binary (`PI_BIN`) and
+   re-runs the timeout-wrapper resolution (`TIMEOUT_CMD` + `wrap`) itself
+   rather than reusing the `## Invocation` block's variables. The helper
+   files MUST live **outside the target repo** — for example in a temp
+   directory made with `mktemp -d` (untracked files
    inside the repo enter the reviewed diff). Remove any stale files from a
    previous run so a leftover `$RC_FILE` cannot look like a completed run,
    then redirect the pi call's output to `$LOG`, the wrapper's exit code to
@@ -243,21 +260,50 @@ foreground bounded calls (`run_in_background` is NOT safe — see
 ```bash
 D=$(mktemp -d); LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"
 rm -f "$LOG" "$PID_FILE" "$RC_FILE"
+# Re-resolve the pi binary (nothing from an earlier Bash call persists).
+PI_BIN=""
+for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HOME/.local/bin/pi"; do
+  [ -n "$candidate" ] || continue
+  if [ -x "$candidate" ]; then
+    PI_BIN="$candidate"
+    break
+  fi
+done
+[ -n "$PI_BIN" ] || { echo "pi not found (PATH, ~/.bun/bin/pi, ~/.local/bin/pi) — install it and re-run"; exit 1; }
+# Re-run the timeout-wrapper resolution (timeout preferred, gtimeout
+# fallback; the --kill-after probe treats a missing flag as "no timeout
+# binary at all" → unbounded + warning, mirroring orchestrate.sh).
+TIMEOUT_CMD=""
+for tcand in timeout gtimeout; do
+  if command -v "$tcand" >/dev/null 2>&1 && "$tcand" --kill-after=1 1 true >/dev/null 2>&1; then
+    TIMEOUT_CMD="$tcand"
+    break
+  fi
+done
+if [ -z "$TIMEOUT_CMD" ]; then
+  echo "WARNING: no GNU timeout/gtimeout found — pi runs without a time limit" >&2
+fi
+wrap=()
+if [ -n "$TIMEOUT_CMD" ]; then
+  wrap=("$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}")
+fi
 # --- Safety preflight (skip if PI_DELEGATE_UNSAFE=1) — SAME call as the
 # detached launch below: the push-neutralising exports below only live in
 # THIS shell process and must reach the pi process as its environment.
 <the verbatim ## Safety preflight block: from `if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then` down to `fi`, including the `# --- End safety preflight ---` marker line>
-# `wrap` is reused from the ## Invocation block above (do not reset it to
-# wrap=() here); PI_BIN is resolved in the ## Locating the pi binary block.
+# The prompt goes on pi's stdin (the wrapper wraps pi only; the pipe feeds
+# pi's stdin, the timeout command is never piped) so long task descriptions
+# cannot hit E2BIG.
 set -m
 ( printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates > "$LOG" 2>&1; echo $? > "$RC_FILE" ) &
 echo "$!" > "$PID_FILE"
 echo "RUN_DIR=$D"
 ```
 
-   The block above is the complete, verbatim launch — `wrap` is reused
-   from the `## Invocation` block above (do not reset it to `wrap=()`
-   here), and the prompt goes to pi's stdin via `printf`. If the user
+   The block above is the complete, verbatim launch — `PI_BIN`,
+   `TIMEOUT_CMD` and `wrap` are all re-resolved INSIDE the block (nothing
+   from an earlier Bash call persists), and the prompt goes to pi's stdin
+   via `printf`. If the user
    explicitly named a model, the only variant is the same block with
    `--model "MODEL"` appended to the pi flags (before the `>` redirect);
    otherwise omit `--model` — pi uses its configured default.
@@ -320,16 +366,28 @@ fi
    authoritative copy is `docs/configuration.md`, **Long runs → Stop /
    abort**). The launch block ran `set -m` before backgrounding, so the
    recorded pid leads its own process group (PGID == pid); killing that
-   group kills the run and all its children in one shot. A recycled pid
-   almost never leads its own group, so the group-leader check is the
-   safety guard. Replace the `D=` line with the `RUN_DIR` the launch
-   printed before running:
+   group kills the run and all its children in one shot. The guard is two-factor:
+   a recycled pid almost never leads its own group, but the group-leader check
+   alone would still be fooled by a recycled pid that happens to lead one, so
+   the block also checks the recorded process's command line — it must be the
+   resolved pi path (or a pi invocation, matched as ` pi ` with surrounding
+   whitespace to keep it self-contained) before any kill is attempted:
 ```bash
 D="<the RUN_DIR printed at launch>"
 PID_FILE="$D/pi-oneshot.pid"
 PID="$(cat "$PID_FILE")"
-if [ "$(ps -o pgid= -p "$PID" | tr -d ' ')" = "$PID" ]; then
-  kill -TERM -- "-$PID" 2>/dev/null
+# Re-resolve the pi path (nothing persists between Bash tool calls).
+PI_BIN=""
+for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HOME/.local/bin/pi"; do
+  [ -n "$candidate" ] || continue
+  if [ -x "$candidate" ]; then
+    PI_BIN="$candidate"
+    break
+  fi
+done
+pi_cmd="${PI_BIN:-pi}"
+if [ "$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ')" = "$PID" ] && ps -o command= -p "$PID" 2>/dev/null | grep -qF "$pi_cmd"; then
+  kill -TERM -- "-$PID" 2>/dev/null || true
   sleep 5
   kill -KILL -- "-$PID" 2>/dev/null || true
 else

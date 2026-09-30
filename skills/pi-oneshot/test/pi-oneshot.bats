@@ -23,11 +23,18 @@ setup() {
   [ -f "$SKILL_FILE" ] || { echo "setup: missing $SKILL_FILE" >&2; return 1; }
   [ -f "$README_FILE" ] || { echo "setup: missing $README_FILE" >&2; return 1; }
   [ -f "$CONFIG_FILE" ] || { echo "setup: missing $CONFIG_FILE" >&2; return 1; }
+  # Shared doc-block extraction helper (must not mask a missing file —
+  # an empty section_block result would make the doc-drift tests pass
+  # silently on a drifted doc).
+  local _lib
+  _lib="$root/test/lib/blocks.bash"
+  [ -f "$_lib" ] || { echo "setup: missing test lib: $_lib" >&2; return 1; }
+  source "$_lib"
 }
 
 # Extract the SKILL.md section named $1 (heading to the next ##/### boundary).
 skill_section() {
-  awk -v h="$1" 'BEGIN{s=0} $0 == h {s=1; next} s && /^##(#[^#]|[^# ])/ {s=0} s {print}' "$SKILL_FILE"
+  section_text "$SKILL_FILE" "$1"
 }
 
 # --- docs/configuration.md is the single source of truth for the timeout
@@ -178,7 +185,7 @@ skill_section() {
 
 @test "pi-oneshot SKILL.md uses the single stdin transport (no positional variant)" {
   local block
-  block=$(skill_section "## Invocation" | awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}')
+  block=$(section_block "$SKILL_FILE" "## Invocation" 1)
   printf '%s' "$block" | grep -qF -- 'printf '"'"'%s'"'"' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates'
   # The old positional variant must not remain as live code.
   ! printf '%s' "$block" | grep -qE '^\$\{wrap\[@\]\+.*"\$ARGUMENTS"$'
@@ -186,7 +193,7 @@ skill_section() {
 
 @test "pi-oneshot SKILL.md prints the missing-timeout warning as live code" {
   local block
-  block=$(skill_section "## Invocation" | awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}')
+  block=$(section_block "$SKILL_FILE" "## Invocation" 1)
   printf '%s' "$block" | grep -qE '^if \[ -z "\$TIMEOUT_CMD" \]'
   printf '%s' "$block" | grep -q 'WARNING: no GNU timeout/gtimeout found'
 }
@@ -224,12 +231,11 @@ skill_section() {
 
 # Extract the FIRST ```bash block of the SKILL.md section named $1 (the
 # invocation block in the Invocation section, not a later section's block —
-# the previous single-awk form kept collecting past the next ##/### heading
-# and concatenated blocks from Model, Long runs, etc. into one file).
+# a single-awk form without the section stop kept collecting past the next
+# ##/### heading and concatenated blocks from Model, Long runs, etc. into
+# one file).
 first_skill_block() {
-  local s
-  s=$(skill_section "$1")
-  printf '%s\n' "$s" | awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}'
+  section_block "$SKILL_FILE" "$1" 1
 }
 
 @test "pi-oneshot SKILL.md invocation block passes bash -n and shellcheck" {
@@ -259,8 +265,7 @@ first_skill_block() {
 # --- Issue #30: safety preflight doc-drift ---
 
 oneshot_preflight_block() {
-  awk '/^## Safety preflight/,/^## Invocation$/' "$SKILL_FILE" |
-    awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}'
+  section_block "$SKILL_FILE" "## Safety preflight (issue #30)" 1
 }
 
 # Reconstruct a launch block with the preflight placeholder replaced by the
@@ -273,9 +278,7 @@ preflight_in_launch_block() {
   local preflight launch preflight_file launch_file
   preflight="$(oneshot_preflight_block)"
   if [ "$1" = "fg" ]; then
-    local s
-    s=$(skill_section "## Invocation")
-    launch=$(printf '%s\n' "$s" | awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}')
+    launch=$(first_skill_block "## Invocation")
   else
     launch="$(long_runs_block 1)"
   fi
@@ -339,15 +342,7 @@ preflight_in_launch_block() {
 
 # The three Long-runs blocks (launch, wait, abort) by fence number.
 long_runs_block() {
-  local s
-  s="$(awk '/^### Long runs under/{s=1; next} s && /^##(#[^#]|[^# ])/{s=0} s' "$SKILL_FILE")"
-  if [ "$1" = "1" ]; then
-    # The launch block reuses `wrap` (built in the ## Invocation block) and
-    # `$PI_BIN` (resolved in ## Locating the pi binary); seed both for lint.
-    printf '%s\n%s\n%s\n' 'wrap=()' 'PI_BIN=pi' "$(printf '%s\n' "$s" | awk 'BEGIN{c=0} /^```bash$/{c++; f=(c==1); next} f && /^```$/{f=0} f{print}')"
-  else
-    printf '%s\n' "$s" | awk -v n="$1" 'BEGIN{c=0} /^```bash$/{c++; f=(c==n); next} f && /^```$/{f=0} f{print}'
-  fi
+  section_block "$SKILL_FILE" "### Long runs under Claude Code's Bash tool" "$1"
 }
 
 @test "pi-oneshot launch block prints RUN_DIR= as its last line" {

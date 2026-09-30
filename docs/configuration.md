@@ -154,20 +154,25 @@ detached, record the pid, wait with foreground bounded calls.**
   run **and its children**. The launch block ran `set -m` before
   backgrounding, so the recorded pid is the leader of its own process
   group (PGID == pid); `kill -- -$PID` kills the group and every member
-  in one shot. A recycled pid almost never leads its own group, so the
-  group-leader check is the safety guard. **State does not persist
+  in one shot. The guard is two-factor: a recycled pid almost never leads
+  its own group, but the group-leader check alone would still be fooled by
+  a recycled pid that happens to lead one, so the block also checks the
+  recorded process's command line — it must be the run itself (for the loop,
+  `orchestrate.sh`; for the oneshot, the resolved pi path) before any kill is
+  attempted. **State does not persist
   between Bash tool calls**: start the block with `D=` set to the
   `RUN_DIR` the launch call printed (the `D=$(mktemp -d)` directory),
   derive the pid file from `$D`. Children that start their own session
   or process group (`setsid`, daemons) escape the group kill — the same
   limit already documented for the in-script timeout. The verbatim block
-  (identical in both skills, differing only in the pid-file basename):
+  (identical in both skills, differing only in the pid-file basename and
+  the command-line token):
 ```bash
 D="<the RUN_DIR printed at launch>"
 PID_FILE="$D/review-loop.pid"
 PID="$(cat "$PID_FILE")"
-if [ "$(ps -o pgid= -p "$PID" | tr -d ' ')" = "$PID" ]; then
-  kill -TERM -- "-$PID" 2>/dev/null
+if [ "$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ')" = "$PID" ] && ps -o command= -p "$PID" 2>/dev/null | grep -qF 'orchestrate.sh'; then
+  kill -TERM -- "-$PID" 2>/dev/null || true
   sleep 5
   kill -KILL -- "-$PID" 2>/dev/null || true
 else
@@ -176,7 +181,10 @@ fi
 ```
 
 Both SKILL.md files carry a verbatim copy of this block (each skill must
-be self-contained); the BATS suites assert the copies are identical.
-This was verified on macOS (bash 3.2 and bash 5) against a stub tree
+be self-contained; the oneshot copy resolves `PI_BIN` first and checks the
+resolved pi path instead of `orchestrate.sh`); the BATS suites assert the
+copies are identical modulo the normalised tokens. This was verified on
+macOS (bash 3.2 and bash 5) against a stub tree
 (root → child → grandchild): the whole group dies, a bystander process
-survives, and a pid that is not a group leader is skipped.
+survives, a pid that is not a group leader is skipped, and a group leader
+whose command line does not match the expected token is skipped.

@@ -99,7 +99,11 @@ echo "RUN_DIR=$D"
    Read the pid file **once** (`PID=...`): an unreadable pid file is a
    distinct failure ("PID FILE UNREADABLE") from a dead pid ("LOOP DIED"),
    because re-reading it on every loop iteration would loop forever on a
-   missing file:
+   missing file. The block itself reports the outcome in CODE after the
+   wait loop ends: the last line of `$LOG` re-parsed as a valid six-field
+   summary means the loop finished ("SUMMARY:"); a dead pid with no valid
+   summary on the last line means the loop died before completing ("LOOP
+   DIED" + log tail, exit 1):
 ```bash
 D="<the RUN_DIR printed at launch>"
 LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"
@@ -113,15 +117,21 @@ until [ -s "$LOG" ] && tail -n 1 "$LOG" | jq -e 'has("status") and has("verdict"
   kill -0 "$PID" 2>/dev/null || break
   sleep 15
 done
+if [ -s "$LOG" ] && tail -n 1 "$LOG" | jq -e 'has("status") and has("verdict") and has("rounds") and has("total_pi_calls") and has("findings") and has("raw_output")' 2>/dev/null; then
+  echo "SUMMARY:"
+  tail -n 1 "$LOG"
+else
+  echo "LOOP DIED — no summary; tail of log:"
+  tail -n 20 "$LOG"
+  exit 1
+fi
 ```
 
    If the pid file was unreadable, the block already stopped with "PID
    FILE UNREADABLE — check RUN_DIR" (a state/setup problem, not a dead run
-   — do NOT report it as "LOOP DIED"). If the wait ends with the pid gone
-   and no valid summary on the last
-   line, the loop died before completing — print "LOOP DIED — no summary;
-   tail of log:" and `tail -n 20 "$LOG"`, and report the run as **failed**
-   with that tail (see step 4). If one wait call is instead killed at its
+   — do NOT report it as "LOOP DIED"). The "LOOP DIED" leg above is the
+   loop dying before completing — the run is **failed**; relay the tail it
+   prints (see step 4). If one wait call is instead killed at its
    10-minute ceiling, start the next: the loop is detached and survives,
    and the wait resumes from the same `$LOG`/`$PID_FILE` (re-deriving them
    from the launch's `RUN_DIR`).
@@ -138,19 +148,24 @@ done
    **failed** with the log tail — **never** present a summary that is
    not there.
 
-**Stop / abort (before ending the turn).** If the user aborts, or a
-round hangs with no progress and you decide to stop, use the recorded
-pid file to kill the loop **and every process it spawned**. The launch
-block runs `set -m` before backgrounding, so the recorded pid is the
-leader of its own process group (PGID == pid); killing that group kills
-the loop and all its children in one shot. A recycled pid almost never
-leads its own group, so the group-leader check is the safety guard:
+4. **Stop / abort (before ending the turn).** On abort, kill the recorded
+   pid and its children with the recipe below — the same recipe (kept
+   identical across both skills and `docs/configuration.md`; the
+   authoritative copy is `docs/configuration.md`, **Long runs → Stop /
+   abort**). The launch block ran `set -m` before backgrounding, so the
+   recorded pid leads its own process group (PGID == pid); killing that
+   group kills the run and all its children in one shot. The guard is
+   two-factor: a recycled pid almost never leads its own group, but the
+   group-leader check alone would still be fooled by a recycled pid that
+   happens to lead one, so the block also checks the recorded process's
+   command line — it must be this script (`orchestrate.sh`) before any
+   kill is attempted:
 ```bash
 D="<the RUN_DIR printed at launch>"
 PID_FILE="$D/review-loop.pid"
 PID="$(cat "$PID_FILE")"
-if [ "$(ps -o pgid= -p "$PID" | tr -d ' ')" = "$PID" ]; then
-  kill -TERM -- "-$PID" 2>/dev/null
+if [ "$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ')" = "$PID" ] && ps -o command= -p "$PID" 2>/dev/null | grep -qF 'orchestrate.sh'; then
+  kill -TERM -- "-$PID" 2>/dev/null || true
   sleep 5
   kill -KILL -- "-$PID" 2>/dev/null || true
 else
@@ -161,8 +176,9 @@ fi
 Note: children that start their own session or process group (`setsid`,
 daemons) escape the group kill — the same limit already documented for
 the in-script timeout. The same recipe (with the pi-oneshot pid file
-name in place of `review-loop.pid`) is what `pi-oneshot` documents; the
-authoritative copy is `docs/configuration.md`, **Long runs → Stop / abort**.
+name in place of `review-loop.pid` and the resolved pi path in place of
+`orchestrate.sh`) is what `pi-oneshot` documents; the authoritative copy
+is `docs/configuration.md`, **Long runs → Stop / abort**.
 
 - **Quote `$ARGUMENTS`.** An unquoted `$ARGUMENTS` still performs command
   substitution: `bash orchestrate.sh $ARGUMENTS` with a request containing
