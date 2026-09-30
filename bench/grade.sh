@@ -9,8 +9,9 @@
 #   1. Loads task.env (REPO, BASE_SHA, FIX_COMMIT, TEST_CMD, GRADING_PATCH).
 #   2. cd's into <run-dir>/repo (the fresh clone from setup-run.sh).
 #   3. Restores every file the grading patch touches to its BASE version
-#      (tracked files the patch modifies → `git checkout HEAD -- <path>`;
-#      files the patch creates → deleted if present). The agent's edits to
+#      (tracked files the patch modifies → `git checkout <base> -- <path>`
+#      where <base> is the recorded BASE_SHA; files the patch creates →
+#      deleted if present). The agent's edits to
 #      those files are the only thing that can block `git apply`, and they
 #      are irrelevant to grading (the grading tests are the ground truth),
 #      so the harness normalises them away instead of failing the run.
@@ -26,7 +27,8 @@
 # Exit codes:
 #   0  tests passed
 #   1  tests failed (grading patch applied, but TEST_CMD returned non-zero)
-#   2  setup error (missing run dir, missing grading patch, git apply failed)
+#   2  setup error (missing run dir, missing grading patch, git apply failed,
+#      or the run repo's HEAD is not the recorded BASE_SHA)
 #   3  grading patch could not be applied (conflict / already applied)
 #
 # NOTE: Before applying the patch, every file the patch touches is restored
@@ -90,14 +92,38 @@ patch_path="$(cd "$(dirname "$patch_path")" && pwd)/$(basename "$patch_path")"
 
 cd "$repo_dir"
 
+# --- Pin the restore base ------------------------------------------------------
+# Every restore below must target the recorded BASE_SHA, NOT `HEAD`.
+# Normally HEAD == BASE_SHA (setup-run.sh fetches only BASE_SHA and the
+# agent is instructed not to commit), but an agent that commits its work
+# moves HEAD, and `git checkout HEAD -- <file>` would restore the agent's
+# own version instead of the base — the wrong source for grading. The base
+# is read from setup.json (written by setup-run.sh) and verified: a run
+# whose HEAD is not the base is refused with exit 2 (a loud, clean failure
+# rather than a silently-wrong restore or an ungradeable exit 3).
+base_sha="$(jq -r '.base_sha // empty' "$run_dir/setup.json" 2>/dev/null)" || base_sha=""
+if [ -z "$base_sha" ]; then
+  base_sha="${BASE_SHA:-}"
+fi
+[ -n "$base_sha" ] || {
+  echo "grade: cannot determine base sha (no setup.json base_sha, no BASE_SHA in task.env)" >&2
+  exit 2
+}
+head_sha="$(git rev-parse HEAD 2>/dev/null)" || head_sha=""
+if [ -z "$head_sha" ] || [ "$head_sha" != "$base_sha" ]; then
+  echo "grade: HEAD ('$head_sha') is not the recorded base '$base_sha' — refusing to grade (a committed run cannot be restored to base)" >&2
+  exit 2
+fi
+
 # --- Restore the patch's files to BASE ----------------------------------------
 # The grading patch is a test-only diff. If the agent edited any of the files
 # it touches, `git apply` fails and the run is ungradeable. Those edits carry
 # no grading signal (the graded test files are the ground truth), so we
 # normalise the tree first: restore every file the patch MODIFIES to its BASE
-# version and delete every file the patch CREATES (if present). This makes
-# grading robust to agent test-file edits (issue #71) while leaving the
-# agent's non-test changes — the change under test — untouched.
+# version (`git checkout <base> -- <path>`) and delete every file the patch
+# CREATES (if present). This makes grading robust to agent test-file edits
+# (issue #71) while leaving the agent's non-test changes — the change under
+# test — untouched.
 #
 # The file list is derived from the patch itself: a `diff --git a/<old> b/<new>`
 # line (old/new relative to the repo root) with the old path empty (/dev/null)
@@ -117,15 +143,17 @@ if [ -n "$_h" ]; then
 fi
 # For each file the patch modifies: if the working tree differs from BASE
 # (agent modified it) or it is absent, restore it from BASE and record it.
-# `git diff --quiet HEAD -- <file>` is empty when the tree matches BASE.
+# `git diff --quiet <base> -- <file>` is empty when the tree matches BASE.
+# The base is a commit object, so a bare rev (no refname ambiguity): it is
+# the fetched commit that exists in this repo's object database.
 while IFS= read -r p; do
   [ -n "$p" ] || continue
-  if ! timeout 60 git diff --quiet HEAD -- "$p" 2>/dev/null; then
-    timeout 60 git checkout HEAD -- "$p" >/dev/null 2>&1 || true
+  if ! timeout 60 git diff --quiet "$base_sha" -- "$p" 2>/dev/null; then
+    timeout 60 git checkout "$base_sha" -- "$p" >/dev/null 2>&1 || true
     restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" || true
   elif [ ! -f "$p" ]; then
     # File was deleted by the agent (tracked at BASE, missing in the tree).
-    timeout 60 git checkout HEAD -- "$p" >/dev/null 2>&1 || true
+    timeout 60 git checkout "$base_sha" -- "$p" >/dev/null 2>&1 || true
     restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" || true
   fi
 done < <(jq -r '.[]' <<< "$patch_files_json" 2>/dev/null)

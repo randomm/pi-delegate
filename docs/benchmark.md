@@ -418,9 +418,12 @@ override),
   against the historical fix (that would require the non-test diff, which is
   intentionally withheld from the agent to avoid leakage). Before applying
   the patch, `grade.sh` restores every file the patch touches to its BASE
-  version (tracked files → `git checkout HEAD -- <path>`; patch-created files
-  → deleted if present) and records the affected files in
-  `restored_test_files` in `grade.json`. This makes grading robust to agent
+  version (tracked files → `git checkout <base-sha> -- <path>`, where the
+  base sha is the recorded `BASE_SHA` from `setup.json`/`task.env`; patch-
+  created files → deleted if present) and records the affected files in
+  `restored_test_files` in `grade.json`. A run whose repo HEAD is not that
+  recorded base (e.g. the agent committed its work) is refused with exit 2 —
+  such a run cannot be restored to base and is not graded. This makes grading robust to agent
   test-file edits (issue #71 dry-run 4) without leaking the fix to the agent.
 - The contamination guard relies on `git fetch --depth=1` not fetching
   additional objects. A future git version change could alter this

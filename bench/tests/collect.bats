@@ -569,6 +569,54 @@ EOF
   [ "$status" -eq 2 ]
 }
 
+# --- grade.sh: agent committed → HEAD != base → refused (exit 2) ----------------
+# Adversarial finding #1: an agent that commits its work moves HEAD; the
+# restore must target the recorded base sha, not HEAD. A run whose HEAD is
+# not the base is refused with exit 2 (loud, not a silent wrong-restore).
+@test "grade.sh: agent committed its work → exit 2 (HEAD not base)" {
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 8
+  [ "$status" -eq 0 ]
+  local run_dir="$BENCH_OUT/$TASK_ID/A/8"
+  local repo_dir="$run_dir/repo"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  echo "hacked" > "$repo_dir/hello.txt"
+  git -C "$repo_dir" add hello.txt
+  git -C "$repo_dir" commit -qm "agent committed its work"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 8
+  [ "$status" -eq 2 ]
+  [ ! -f "$run_dir/grade.json" ]
+}
+
+# --- grade.sh: agent edited a patched file → restored from BASE ----------------
+# The restore must come from the recorded base: after grade.sh runs, the
+# agent's edit is gone, the patch is applied (hello.txt = base content with
+# the patch hunk applied), and the file is recorded in restored_test_files.
+@test "grade.sh: agent edit restored from BASE sha, patch applied" {
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 9
+  [ "$status" -eq 0 ]
+  local run_dir="$BENCH_OUT/$TASK_ID/A/9"
+  local repo_dir="$run_dir/repo"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  echo "agent tamper" > "$repo_dir/hello.txt"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 9
+  [ "$status" -eq 0 ]
+  local grade_file="$run_dir/grade.json"
+  jq -e '.restored_test_files == ["hello.txt"]' "$grade_file" >/dev/null
+  [ "$(cat "$repo_dir/hello.txt")" = "hello modified" ]
+}
+
 # --- run-arm.sh: arm A does NOT get a pi shim -----------------------------------
 
 @test "run-arm.sh: arm A does not install pi shim" {
