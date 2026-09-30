@@ -187,14 +187,34 @@ skill_section() {
   local block
   block=$(section_block "$SKILL_FILE" "## Invocation" 1)
   # The request is read from a task file (a quoted-heredoc write in its own
-  # call): the block carries the task-file read (as $TASK_FILE after
-  # extraction) piped into the wrapped pi invocation with the full flag set.
-  printf '%s' "$block" | grep -qF -- '$TASK_FILE'
-  printf '%s' "$block" | grep -qF -- '| ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates'
-  # The raw (unextracted) block must carry the task-file read.
-  printf '%s' "$(section_text "$SKILL_FILE" "## Invocation")" | grep -qF -- '$(cat <the task file from the call above>)'
+  # call): the block carries the task-file read (anchored to the literal
+  # TASK_FILE after extraction) piped into the wrapped pi invocation with
+  # the full flag set, and fails fast if the task file is missing or empty.
+  printf '%s' "$block" | grep -qF -- 'TASK_FILE="<the task file from the call above>"'
+  printf '%s' "$block" | grep -qF 'ERROR: task file missing or empty: $TASK_FILE'
+  printf '%s' "$block" | grep -qF '| ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates'
+  # The raw (unextracted) block must carry the literal task-file read.
+  printf '%s' "$(section_text "$SKILL_FILE" "## Invocation")" | grep -qF -- '$(cat "$TASK_FILE")'
   # The old positional variant must not remain as live code.
   ! printf '%s' "$block" | grep -qE '^\$\{wrap\[@\]\+.*"\$ARGUMENTS"$'
+}
+
+@test "pi-oneshot detached launch block carries the task-file guard and literal read" {
+  local block
+  block="$(long_runs_block 1)"
+  printf '%s' "$block" | grep -qF 'TASK_FILE="<the task file from the call above>"'
+  printf '%s' "$block" | grep -qF 'ERROR: task file missing or empty: $TASK_FILE'
+  printf '%s' "$block" | grep -qF '$(cat "$TASK_FILE")'
+}
+
+@test "pi-oneshot SKILL.md abort exits 3 when pi cannot be resolved" {
+  local block
+  block="$(long_runs_block 3)"
+  # The "cannot resolve pi" leg must exit 3 (NOT performed), not 0.
+  printf '%s' "$block" | grep -qF 'kill NOT performed'
+  printf '%s' "$block" | grep -qF 'kill -0 <pid>'
+  # The guard must not silently succeed when the kill was skipped.
+  printf '%s' "$block" | grep -qF 'exit 3'
 }
 
 @test "pi-oneshot SKILL.md prints the missing-timeout warning as live code" {
@@ -242,40 +262,111 @@ skill_section() {
 }
 
 @test "pi-oneshot detached launch block validates PI_TIMEOUT=0 -> ERROR, exit 2, no RUN_DIR" {
-  local dir block script out rc=0
+  local dir block script out rc=0 taskf
   dir="$(mktemp -d)"
   block="$(long_runs_block 1)"
+  # Point the task-file placeholder at a file with content so the -s guard
+  # passes and the block reaches the PI_TIMEOUT validation.
+  taskf="$(mktemp)"
+  printf 'do it' > "$taskf"
   script="$dir/launch.sh"
-  printf '%s\n' "$block" > "$script"
+  printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$taskf\"|" > "$script"
   out="$(HOME="$dir" PI_TIMEOUT=0 bash "$script" 2>&1)" || rc=$?
   [ "$rc" -eq 2 ]
   grep -qF 'PI_TIMEOUT must be a positive integer' <<<"$out"
   ! grep -qF 'RUN_DIR=' <<<"$out"
-  rm -rf "$dir"
+  rm -f "$taskf"; rm -rf "$dir"
 }
 
 @test "pi-oneshot foreground invocation block validates PI_TIMEOUT=abc -> ERROR, exit 2, no pi call" {
   local dir block script out rc=0
   dir="$(mktemp -d)"
   block="$(section_block "$SKILL_FILE" "## Invocation" 1)"
-  # Point the task-file placeholder at an empty file; the block must refuse
-  # on PI_TIMEOUT before any pi launch.
+  # Point the task-file placeholder at a file with content (the -s guard
+  # passes); the block must refuse on PI_TIMEOUT before any pi launch.
   local taskf; taskf="$(mktemp)"
   printf 'do it' > "$taskf"
   script="$dir/inv.sh"
-  printf '%s\n' "$block" | sed "s|\$(cat <the task file from the call above>)|$(cat \"$taskf\")|g" > "$script"
+  printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$taskf\"|" > "$script"
   out="$(HOME="$dir" PI_TIMEOUT=abc bash "$script" 2>&1)" || rc=$?
   [ "$rc" -eq 2 ]
   grep -qF 'PI_TIMEOUT must be a positive integer' <<<"$out"
   rm -f "$taskf"; rm -rf "$dir"
 }
 
-@test "pi-oneshot SKILL.md abort skips the kill when pi cannot be resolved" {
+@test "pi-oneshot foreground invocation: missing task file -> exit 2, no pi call" {
+  local dir block script out rc=0
+  dir="$(mktemp -d)"
+  block="$(section_block "$SKILL_FILE" "## Invocation" 1)"
+  # Point the task-file placeholder at a nonexistent path so the -s guard
+  # fires before any pi launch; PATH is restricted so the stub pi (if any)
+  # is unreachable.
+  script="$dir/inv.sh"
+  printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$dir/does-not-exist.txt\"|" > "$script"
+  out="$(HOME="$dir" bash "$script" 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ]
+  grep -qF 'ERROR: task file missing or empty: /' <<<"$out"
+  ! grep -qF 'pi not found' <<<"$out"
+  rm -rf "$dir"
+}
+
+@test "pi-oneshot detached launch: missing task file -> exit 2, no RUN_DIR, no pi stub" {
+  local dir block script out rc=0
+  dir="$(mktemp -d)"
+  block="$(long_runs_block 1)"
+  script="$dir/launch.sh"
+  printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$dir/nope.txt\"|" > "$script"
+  out="$(HOME="$dir" bash "$script" 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ]
+  grep -qF 'ERROR: task file missing or empty: /' <<<"$out"
+  ! grep -qF 'RUN_DIR=' <<<"$out"
+  rm -rf "$dir"
+}
+
+@test "pi-oneshot detached launch: empty task file -> exit 2, no RUN_DIR" {
+  local dir block script out rc=0
+  dir="$(mktemp -d)"
+  block="$(long_runs_block 1)"
+  : > "$dir/empty.txt"
+  script="$dir/launch.sh"
+  printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$dir/empty.txt\"|" > "$script"
+  out="$(HOME="$dir" bash "$script" 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ]
+  grep -qF 'ERROR: task file missing or empty: /' <<<"$out"
+  ! grep -qF 'RUN_DIR=' <<<"$out"
+  rm -rf "$dir"
+}
+
+@test "pi-oneshot SKILL.md abort skips the kill when pi cannot be resolved (exit 3)" {
   local block
   block="$(long_runs_block 3)"
   grep -qF 'cannot verify command line' <<<"$block"
+  # A non-zero exit signals the kill was NOT performed; the prose tells the
+  # reader to verify liveness with kill -0.
+  grep -qF 'kill NOT performed' <<<"$block"
+  grep -qF 'kill -0 <pid>' <<<"$block"
   # The bare-"pi" match is gone: the guard greps the resolved path only.
   ! printf '%s' "$block" | grep -qF 'pi_cmd='
+}
+
+@test "oneshot abort: pi unresolvable -> message + exit 3 (kill NOT performed)" {
+  local dir block script out rc=0
+  dir="$(mktemp -d)"
+  block="$(long_runs_block 3)"
+  # Point the RUN_DIR placeholder at a scratch dir with a dead pid so the
+  # abort block reads a (missing) pid file and reaches the pi-resolution
+  # leg; HOME is emptied of any pi so PI_BIN stays empty.
+  : > "$dir/pi-oneshot.pid"
+  printf '99999\n' > "$dir/pi-oneshot.pid"
+  script="$dir/abort.sh"
+  printf '%s\n' "$block" | sed "s|^D=.*|D=\"$dir\"|" > "$script"
+  # Force PI_BIN to be empty by shadowing `command` so the pi-resolution
+  # loop finds no executable pi binary.
+  out="$(HOME="$dir" bash -c 'unset -f command 2>/dev/null; command() { return 1; }; export -f command; source "$1"' _ "$script" 2>&1)" || rc=$?
+  [ "$rc" -eq 3 ]
+  grep -qF 'cannot verify command line' <<<"$out"
+  grep -qF 'kill NOT performed' <<<"$out"
+  rm -rf "$dir"
 }
 
 @test "pi-oneshot SKILL.md Model variant keeps the timeout wrapper" {

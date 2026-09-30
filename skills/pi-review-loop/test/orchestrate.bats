@@ -2036,8 +2036,8 @@ abort_block_normalise() {
   grep -qF "bash <<'PI_DELEGATE_BLOCK'" <<<"$inv"
   grep -qF "bash <<'PI_DELEGATE_BLOCK'" <<<"$pre"
   # The launch blocks read the task from a file.
-  grep -qF '$(cat <the task file from the call above>)' <<<"$inv"
-  grep -qF '$(cat <the task file from the call above>)' <<<"$section"
+  grep -qF '$(cat "$TASK_FILE")' <<<"$inv"
+  grep -qF '$(cat "$TASK_FILE")' <<<"$section"
 }
 
 # run_block_zsh <dir> <block-text>: run an extracted block (wrapper

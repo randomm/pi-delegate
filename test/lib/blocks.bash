@@ -22,14 +22,15 @@
 #   functional tests substitute their own task text or files.
 strip_heredoc_wrapper() {
   # The wrapper lines themselves are dropped. Inside the wrapper, a line
-  # that calls `$(cat <...>)` is caller-supplied content (the task file or
-  # RUN_DIR, substituted literally at use time): it is replaced with a
-  # single $TASK_FILE token, which is valid bash in its own right and what
+  # that reads the task file (`$(cat <the task file from the call above>)`)
+  # is caller-supplied content (substituted literally at use time): it is
+  # rewritten to `$(cat "$TASK_FILE")` — an anchored, exact-literal match,
+  # never a greedy pattern — which is valid bash in its own right and what
   # the functional tests substitute their own file into.
   awk '
     /^bash <<[^ ]*$/ { inblk = 1; next }
     inblk && /^PI_DELEGATE_[A-Z]+$/ { inblk = 0; next }
-    inblk && /\$\(cat </ { sub(/\$\(cat <[^)]*>\)/, "$TASK_FILE"); print; next }
+    inblk && /\$\(cat / { gsub(/\$\(cat <the task file from the call above>\)/, "$(cat \"$TASK_FILE\")"); print; next }
     { print }
   '
 }

@@ -161,7 +161,7 @@ PI_DELEGATE_BLOCK
    FILE UNREADABLE — check RUN_DIR" (a state/setup problem, not a dead run
    — do NOT report it as "LOOP DIED"). The "LOOP DIED" leg above is the
    loop dying before completing — the run is **failed**; relay the tail it
-   prints (see step 4). If one wait call is instead killed at its
+   prints (see step 5). If one wait call is instead killed at its
    10-minute ceiling, start the next: the loop is detached and survives,
    and the wait resumes from the same `$LOG`/`$PID_FILE` (re-deriving them
    from the launch's `RUN_DIR`).
@@ -177,7 +177,6 @@ PI_DELEGATE_BLOCK
    without a valid summary (the step 2 failure), report the run as
    **failed** with the log tail — **never** present a summary that is
    not there.
-
 5. **Stop / abort (before ending the turn).** A preflight `REFUSED` at
    launch means the run already failed fast (exit 3, no pid) — no wait
    and no abort are needed; relay the `REFUSED:` line and stop.
@@ -254,7 +253,7 @@ is `docs/configuration.md`, **Long runs → Stop / abort**.
 to 3 reviews + 2 fixes) can easily exceed the Bash tool's foreground
   ceiling, so a single foreground call cannot cover a whole loop. Use the
   detached-launch + bounded-foreground-wait strategy from Invocation
-  steps 1–4; `docs/configuration.md` is the single owner of why
+  steps 1–5; `docs/configuration.md` is the single owner of why
   `run_in_background` is unsafe and of the ceiling values.
 
 ### Model passthrough

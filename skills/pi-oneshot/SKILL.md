@@ -163,6 +163,10 @@ Bash call; this block reads it back, so no quoting of the request is needed
 in this call:
 ```bash
 bash <<'PI_DELEGATE_BLOCK'
+# The task file is a caller-provided path: substitute <the task file from the call above> literally.
+TASK_FILE="<the task file from the call above>"
+[ -s "$TASK_FILE" ] || { echo "ERROR: task file missing or empty: $TASK_FILE" >&2; exit 2; }
+
 # Re-resolve the pi binary (nothing from an earlier Bash call persists).
 PI_BIN=""
 for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HOME/.local/bin/pi"; do
@@ -224,7 +228,7 @@ fi
 # command is never piped), and stdin has no argv size limit, so long task
 # descriptions cannot hit E2BIG (a single argv element is capped at 128 KiB
 # on Linux).
-printf '%s' "$(cat <the task file from the call above>)" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates
+printf '%s' "$(cat "$TASK_FILE")" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates
 PI_DELEGATE_BLOCK
 ```
 
@@ -287,6 +291,9 @@ foreground bounded calls (`run_in_background` is NOT safe — see
 bash <<'PI_DELEGATE_BLOCK'
 D=$(mktemp -d); LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"
 rm -f "$LOG" "$PID_FILE" "$RC_FILE"
+# The task file is a caller-provided path: substitute <the task file from the call above> literally.
+TASK_FILE="<the task file from the call above>"
+[ -s "$TASK_FILE" ] || { echo "ERROR: task file missing or empty: $TASK_FILE" >&2; exit 2; }
 # Re-resolve the pi binary (nothing from an earlier Bash call persists).
 PI_BIN=""
 for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HOME/.local/bin/pi"; do
@@ -335,7 +342,7 @@ fi
 # pi's stdin, the timeout command is never piped) so long task descriptions
 # cannot hit E2BIG.
 set -m
-( printf '%s' "$(cat <the task file from the call above>)" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates > "$LOG" 2>&1; echo $? > "$RC_FILE" ) &
+( printf '%s' "$(cat "$TASK_FILE")" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates > "$LOG" 2>&1; echo $? > "$RC_FILE" ) &
 echo "$!" > "$PID_FILE"
 echo "RUN_DIR=$D"
 PI_DELEGATE_BLOCK
@@ -344,8 +351,10 @@ PI_DELEGATE_BLOCK
    The block above is the complete, verbatim launch — `PI_BIN`,
    `TIMEOUT_CMD` and `wrap` are all re-resolved INSIDE the block (nothing
    from an earlier Bash call persists), and the prompt goes to pi's stdin
-   via `printf` (the task file content, `$(cat <the task file from the
-call above>)` — substitute the path literally). If the user
+   via `printf` (the task file content, `$(cat "$TASK_FILE")` — the block's
+   leading `TASK_FILE=` line carries the literal path you substituted for
+   the task-file placeholder, and the block fails fast if it is missing or
+   empty). If the user
    explicitly named a model, the only variant is the same block with
    `--model "MODEL"` appended to the pi flags (before the `>` redirect);
    otherwise omit `--model` — pi uses its configured default.
@@ -415,7 +424,11 @@ PI_DELEGATE_BLOCK
    alone would still be fooled by a recycled pid that happens to lead one, so
    the block also checks the recorded process's command line — it must be the
    resolved pi path (or a pi invocation, matched as ` pi ` with surrounding
-   whitespace to keep it self-contained) before any kill is attempted:
+   whitespace to keep it self-contained) before any kill is attempted.
+   A non-zero exit from the abort block means the kill was **NOT**
+   performed (e.g. the pi path could not be resolved) and the run may
+   still be alive — check with `kill -0 <pid>` before reporting the
+   abort as done:
 ```bash
 bash <<'PI_DELEGATE_BLOCK'
 D="<the RUN_DIR printed at launch>"
@@ -431,8 +444,8 @@ for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HO
   fi
 done
 if [ -z "$PI_BIN" ]; then
-  echo "pi path could not be resolved — cannot verify command line, skipping the kill"
-  exit 0
+  echo "pi path could not be resolved — cannot verify command line, kill NOT performed (the run may still be alive — check with: kill -0 <pid>)"
+  exit 3
 fi
 if [ "$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ')" = "$PID" ] && ps -o command= -p "$PID" 2>/dev/null | grep -qF "$PI_BIN"; then
   kill -TERM -- "-$PID" 2>/dev/null || true
