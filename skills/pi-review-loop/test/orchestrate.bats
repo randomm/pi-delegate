@@ -13,10 +13,17 @@ setup() {
     *) test_file="$PWD/$test_file" ;;
   esac
   local skill_dir
-  skill_dir="$(cd "$(dirname "$test_file")/.." && pwd)"   # skills/pi-review-loop
-  REPO_ROOT="$(cd "$skill_dir/../.." && pwd)"   # repo root
+  skill_dir="$(cd "$(dirname "$test_file")/../.." && pwd)"   # skills/
+  REPO_ROOT="$(cd "$skill_dir/.." && pwd)"   # repo root
   SCRIPT="$REPO_ROOT/skills/pi-review-loop/orchestrate.sh"
   FIXTURES="$REPO_ROOT/skills/pi-review-loop/test/fixtures"
+  # Shared doc-block extraction helper (must not mask a missing file —
+  # an empty section_block result would make the doc-drift tests pass
+  # silently on a drifted doc).
+  local _lib
+  _lib="$REPO_ROOT/test/lib/blocks.bash"
+  [ -f "$_lib" ] || { echo "missing test lib: $_lib"; return 1; }
+  source "$_lib"
 
   command -v jq >/dev/null 2>&1 || { skip "jq is not installed"; }
 
@@ -1276,11 +1283,16 @@ long_runs_section() {
   awk '/^## Long runs under/{s=1; next} s && /^##/{s=0} s {print}' "$config"
 }
 
-@test "docs/configuration.md owns the long-run guidance (run_in_background + Read polling)" {
+@test "docs/configuration.md owns the long-run guidance (detached launch + foreground wait)" {
   local section
   section="$(long_runs_section)"
-  printf '%s\n' "$section" | grep -q 'run_in_background'
-  printf '%s\n' "$section" | grep -q 'Read'
+  printf '%s\n' "$section" | grep -q 'detached'
+  printf '%s\n' "$section" | grep -q 'pid'
+  # The old unsafe strategy (run_in_background + poll) must be gone from
+  # the owning section (issue #69: it orphans/kills the run when the
+  # headless session ends).
+  run grep -q 'run_in_background' <<<"$section"
+  [ "$status" -ne 0 ]
   # Exactly the Long runs section: starts at its heading, no leak from the
   # Flags or Environment variables sections. The awk helper skips the
   # Long runs heading line itself (s=1; next), so assert the heading is
@@ -1861,4 +1873,702 @@ WRAP
   out="$(bash "$SCRIPT" "do it" </dev/null 2>&1)" || rc=$?
   [ "$rc" -ne 3 ]
   [[ "$out" != *"REFUSED:"* ]]
+}
+
+# --- Issue #69: cross-call RUN_DIR state + single abort recipe --------------
+# Claude runs the launch and each wait/abort as SEPARATE Bash tool calls, so
+# shell variables do not persist: the launch block must print RUN_DIR and
+# every later block must re-derive LOG/PID_FILE from D. Block extraction
+# goes through the shared helper (test/lib/blocks.bash, sourced in setup)
+# so both skill suites use the same awk logic.
+
+# loop_launch_block: the detached-launch block inside the loop's long-runs
+# guidance (the 2nd ```bash block after the "the only strategy to use" note,
+# the first being the task-file heredoc) — NOT the short ## Invocation
+# example at the top.
+loop_launch_block() {
+  section_block "$REPO_ROOT/skills/pi-review-loop/SKILL.md" "Instead — the only strategy to use:" 2
+}
+
+# review_wait_block: the wait block is the first ```bash block after the
+# "State does not persist" note in step 1 (step 2's text and block follow
+# it, still before the next ## heading).
+review_wait_block() {
+  section_block "$REPO_ROOT/skills/pi-review-loop/SKILL.md" "   **State does not persist between Bash tool calls.** Each of the steps" 1
+}
+
+# abort_block_of <file>: the ```bash block after the "Stop / abort" prose
+# in <file>. Anchored on the numbered step 4 in both SKILL.md files
+# (identical line); configuration.md's abort recipe is extracted by its
+# "- **Stop / abort" bullet in the identity test below.
+abort_block_of() {
+  # The loop's abort step is numbered 5 (after the renumber); the oneshot's
+  # is 4. Anchor by line prefix (avoids quoting the full line).
+  section_block_prefix "$1" '**Stop / abort (before ending the turn).**'
+}
+
+@test "review-loop launch block prints RUN_DIR= as its last line" {
+  local block
+  block="$(loop_launch_block)"
+  [[ -n "$block" ]]
+  [[ "$(printf '%s\n' "$block" | tail -n 1)" = 'echo "RUN_DIR=$D"' ]]
+  grep -q 'mktemp -d' <<<"$block"
+}
+
+@test "review-loop SKILL.md states RUN_DIR must be copied into every later call" {
+  local skill
+  skill="$REPO_ROOT/skills/pi-review-loop/SKILL.md"
+  grep -q 'State does not persist between Bash tool calls' "$skill"
+  grep -q 'every later call' "$skill"
+}
+
+@test "review-loop wait block starts with the D placeholder and re-derives LOG/PID_FILE" {
+  local block
+  block="$(review_wait_block)"
+  [[ -n "$block" ]]
+  [[ "$(printf '%s\n' "$block" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
+  grep -qF 'LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"' <<<"$block"
+  # jq is checked up front and an unreadable pid file stops the wait with a
+  # message distinct from "LOOP DIED" (a dead pid, not a missing file).
+  grep -qF 'command -v jq' <<<"$block"
+  grep -qF 'jq required' <<<"$block"
+  grep -qF 'PID="$(cat "$PID_FILE" 2>/dev/null)"' <<<"$block"
+  grep -qF 'PID FILE UNREADABLE — check RUN_DIR' <<<"$block"
+}
+
+@test "review-loop abort block starts with the D placeholder and re-derives PID_FILE" {
+  local block
+  block="$(abort_block_of "$REPO_ROOT/skills/pi-review-loop/SKILL.md" 1)"
+  [[ -n "$block" ]]
+  [[ "$(printf '%s\n' "$block" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
+  grep -qF 'PID_FILE="$D/review-loop.pid"' <<<"$block"
+  # The group-leader guard checks pgid == pid before killing.
+  grep -qF 'ps -o pgid= -p' <<<"$block"
+  grep -qF 'kill -TERM -- "-$PID"' <<<"$block"
+  grep -qF 'kill -KILL -- "-$PID"' <<<"$block"
+}
+
+@test "pi-oneshot launch block prints RUN_DIR= as its last line" {
+  local skill launch
+  skill="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  [ -f "$skill" ]
+  launch="$(section_block "$skill" "### Long runs under Claude Code's Bash tool" 1)"
+  [[ -n "$launch" ]]
+  [[ "$(printf '%s\n' "$launch" | tail -n 1)" = 'echo "RUN_DIR=$D"' ]]
+}
+
+@test "pi-oneshot wait and abort blocks start with the D placeholder and re-derive from D" {
+  local skill
+  skill="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  [ -f "$skill" ]
+  local waitblock abortblock
+  waitblock="$(section_block "$skill" "### Long runs under Claude Code's Bash tool" 2)"
+  [[ -n "$waitblock" ]]
+  [[ "$(printf '%s\n' "$waitblock" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
+  grep -qF 'LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"' <<<"$waitblock"
+  abortblock="$(section_block "$skill" "### Long runs under Claude Code's Bash tool" 3)"
+  [[ -n "$abortblock" ]]
+  [[ "$(printf '%s\n' "$abortblock" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
+  grep -qF 'PID_FILE="$D/pi-oneshot.pid"' <<<"$abortblock"
+  grep -qF 'ps -o pgid= -p' <<<"$abortblock"
+}
+
+# Abort-block normaliser for the identity test: collapses the normalised
+# tokens away so the three copies (loop SKILL, oneshot SKILL,
+# configuration.md) diff identically. The oneshot copy's pi-locate lines
+# are collapsed into a single __LOCATE__ token.
+abort_block_normalise() {
+  local raw="$1" token="$2"
+  local sedexpr
+  sedexpr="s/pi-oneshot\\.pid/__PID__/g;s/review-loop\\.pid/__PID__/g;s/orchestrate\\.sh/$token/g"
+  # Also normalise the double-quoted pi_cmd reference to the same token.
+  # The oneshot copy has two extra legs the canonical recipe does not:
+  # the pi-path re-resolution block and the "pi could not be resolved" skip
+  # leg — both are collapsed away so the three copies diff identically.
+  printf '%s\n' "$raw" | awk '
+    /^# Re-resolve the pi path/ { skip = 1; next }
+    skip == 1 { if (/^done$/) skip = 0; next }
+    /^if \[ -z "\$PI_BIN" \]/ { leg = 1; next }
+    leg { if (/^fi$/) leg = 0; next }
+    { print }
+  ' | sed -e "$sedexpr" -e "s/\"\$pi_cmd\"/\"$token\"/g" -e "s/\"\$PI_BIN\"/\"$token\"/g" -e "s/\"$token\"/'"$token"'/g"
+}
+
+@test "abort recipe doc-drift: configuration.md, both SKILL.md copies are identical" {
+  local config loop_skill oneshot_skill
+  config="$REPO_ROOT/docs/configuration.md"
+  loop_skill="$REPO_ROOT/skills/pi-review-loop/SKILL.md"
+  oneshot_skill="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  [ -f "$config" ] && [ -f "$loop_skill" ] && [ -f "$oneshot_skill" ]
+  local a b
+  a="$(abort_block_of "$loop_skill")"
+  b="$(abort_block_of "$oneshot_skill")"
+  local canon
+  canon="$(section_block "$config" "- **Stop / abort (before ending the turn)**: use the pid file to kill the" 1)"
+  [[ -n "$canon" ]]
+  [[ -n "$a" ]] && [[ -n "$b" ]]
+  local norm_a norm_b norm_canon
+  norm_a="$(abort_block_normalise "$a" __CMD__)"
+  norm_b="$(abort_block_normalise "$b" __CMD__)"
+  norm_canon="$(abort_block_normalise "$canon" __CMD__)"
+  diff <(printf '%s\n' "$norm_a") <(printf '%s\n' "$norm_canon")
+  diff <(printf '%s\n' "$norm_b") <(printf '%s\n' "$norm_canon")
+}
+
+@test "review-loop SKILL.md invocation blocks are wrapped in a quoted bash heredoc" {
+  local inv
+  inv="$(section_text "$REPO_ROOT/skills/pi-review-loop/SKILL.md" "## Invocation")"
+  grep -qF "bash <<'PI_DELEGATE_BLOCK'" <<<"$inv"
+  # The loop launch must pass the task through a task file, never inline.
+  grep -qF 'PI_DELEGATE_TASK' <<<"$inv"
+}
+
+@test "oneshot SKILL.md launch/wait/abort blocks are wrapped in quoted bash heredocs" {
+  local skill
+  skill="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  local section
+  section="$(section_text "$skill" "### Long runs under Claude Code's Bash tool")"
+  [ "$(grep -cF "bash <<'PI_DELEGATE_BLOCK'" <<<"$section")" -eq 3 ]
+  # And the preflight + invocation blocks too.
+  local inv pre
+  inv="$(section_text "$skill" "## Invocation")"
+  pre="$(section_text "$skill" "## Safety preflight (issue #30)")"
+  grep -qF "bash <<'PI_DELEGATE_BLOCK'" <<<"$inv"
+  grep -qF "bash <<'PI_DELEGATE_BLOCK'" <<<"$pre"
+  # The launch blocks read the task from a file.
+  grep -qF '$(cat "$TASK_FILE")' <<<"$inv"
+  grep -qF '$(cat "$TASK_FILE")' <<<"$section"
+}
+
+# run_block_zsh <dir> <block-text>: run an extracted block (wrapper
+# stripped by section_block) under zsh, exactly as Claude Code's Bash tool
+# would: the block body is executed by zsh, which must hand the bash-specific
+# constructs (set -m, [[ =~ ]) to the inner `bash <<heredoc` without erroring
+# on its own. The block is written to $dir/run.sh with the D placeholder
+# pointed at $dir. Prints the combined output in out_zsh; sets RUN_ZSH_RC.
+run_block_zsh() {
+  local dir="$1" block="$2" script
+  script="$dir/run.sh"
+  {
+    printf 'bash <<%s\n' "'PI_DELEGATE_BLOCK'"
+    printf '%s\n' "$block"
+    printf 'PI_DELEGATE_BLOCK\n'
+  } > "$script"
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.tmp"
+  mv "$script.tmp" "$script"
+  out_zsh="$(zsh "$script" 2>&1)" || RUN_ZSH_RC=$?
+  RUN_ZSH_RC=${RUN_ZSH_RC:-0}
+}
+
+@test "zsh-safe: oneshot launch block (set -m, subshell launch) runs under zsh" {
+  command -v zsh >/dev/null 2>&1 || skip "zsh is not installed"
+  local skill block bin out_zsh RUN_ZSH_RC
+  skill="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  # Extract the launch block and splice in the preflight (the placeholder
+  # line is not valid bash). The task-file read is $TASK_FILE after
+  # extraction.
+  local preflight launch_file preflight_file
+  preflight="$(section_block "$skill" "## Safety preflight (issue #30)" 1)"
+  preflight_file="$(mktemp)"
+  printf '%s\n' "$preflight" > "$preflight_file"
+  launch_file="$(mktemp)"
+  printf '%s\n' "$(section_block "$skill" "### Long runs under Claude Code's Bash tool" 1)" > "$launch_file"
+  # Remove the preflight placeholder line (the block runs with
+  # PI_DELEGATE_UNSAFE=1 so the preflight is skipped; the placeholder is
+  # not valid bash).
+  sed '/<the verbatim ## Safety preflight block:/d' "$launch_file" > "${launch_file}.out"
+  block="$(cat "${launch_file}.out")"
+  rm -f "$preflight_file" "$launch_file" "${launch_file}.out"
+  # Stub pi (the block re-resolves it from PATH).
+  bin="$(mktemp -d)"
+  cat > "$bin/pi" <<'PI'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 0
+PI
+  chmod +x "$bin/pi"
+  local script taskf
+  script="$(mktemp)"
+  printf '%s\n' "$block" > "$script"
+  taskf="$(mktemp)"; printf 'do it' > "$taskf"
+  sed "s|\$TASK_FILE|$taskf|g" "$script" > "${launch_file}.sub"
+  # Re-wrap in the bash heredoc (section_block stripped the wrapper).
+  {
+    printf 'bash <<%s\n' "'PI_DELEGATE_BLOCK'"
+    cat "${launch_file}.sub"
+    printf 'PI_DELEGATE_BLOCK\n'
+  } > "${launch_file}.run"
+  out_zsh="$(PATH="$bin:/usr/bin:/bin" PI_DELEGATE_UNSAFE=1 zsh "${launch_file}.run" 2>&1)" || RUN_ZSH_RC=$?
+  ! grep -q "can't change option" <<<"$out_zsh"
+  local run_dir
+  run_dir="$(sed -n 's/^RUN_DIR=//p' <<<"$out_zsh" | head -1)"
+  [ -n "$run_dir" ]
+  [ -f "$run_dir/pi-oneshot.pid" ]
+  sleep 1
+  ! pgrep -f "$bin/pi$" >/dev/null
+  rm -f "$taskf" "$script" "$script.run"; rm -rf "$bin" "$run_dir"
+}
+
+@test "zsh-safe: loop launch block (set -m, nohup) runs under zsh" {
+  command -v zsh >/dev/null 2>&1 || skip "zsh is not installed"
+  local skill block stubdir out_zsh RUN_ZSH_RC
+  skill="$REPO_ROOT/skills/pi-review-loop/SKILL.md"
+  block="$(loop_launch_block)"
+  stubdir="$(mktemp -d)"
+  cat > "$stubdir/orchestrate.sh" <<'DR'
+#!/usr/bin/env bash
+sleep 1
+exit 0
+DR
+  chmod +x "$stubdir/orchestrate.sh"
+  local script taskf
+  script="$(mktemp)"
+  printf '%s\n' "$block" > "$script"
+  taskf="$(mktemp)"; printf 'do it' > "$taskf"
+  sed "s|\${CLAUDE_SKILL_DIR}|$stubdir|g; s|\$TASK_FILE|$taskf|g" "$script" > "$script.sub"
+  # Re-wrap in the bash heredoc (section_block stripped the wrapper).
+  {
+    printf 'bash <<%s\n' "'PI_DELEGATE_BLOCK'"
+    cat "$script.sub"
+    printf 'PI_DELEGATE_BLOCK\n'
+  } > "$script.run"
+  out_zsh="$(PI_DELEGATE_UNSAFE=1 zsh "$script.run" 2>&1)" || RUN_ZSH_RC=$?
+  ! grep -q "can't change option" <<<"$out_zsh"
+  local run_dir
+  run_dir="$(sed -n 's/^RUN_DIR=//p' <<<"$out_zsh" | head -1)"
+  [ -n "$run_dir" ]
+  [ -f "$run_dir/review-loop.pid" ]
+  sleep 2
+  ! pgrep -f "$stubdir/orchestrate.sh" >/dev/null
+  rm -f "$taskf" "$script" "$script.run"; rm -rf "$stubdir" "$run_dir"
+}
+
+@test "zsh-safe: oneshot wait block under zsh reports EXIT CODE and RUN DIED (stubs)" {
+  command -v zsh >/dev/null 2>&1 || skip "zsh is not installed"
+  local skill block tmp out_zsh RUN_ZSH_RC dead_pid
+  skill="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  block="$(section_block "$skill" "### Long runs under Claude Code's Bash tool" 2)"
+  # EXIT CODE path: a non-empty RC_FILE.
+  tmp="$(mktemp -d)"
+  printf '7\n' > "$tmp/pi-oneshot.rc"
+  printf 'log line\n' > "$tmp/pi-oneshot.log"
+  ( true ) &
+  dead_pid=$!
+  wait "$dead_pid" 2>/dev/null
+  printf '%s\n' "$dead_pid" > "$tmp/pi-oneshot.pid"
+  run_block_zsh "$tmp" "$block"
+  [ "$RUN_ZSH_RC" -eq 0 ]
+  grep -qF 'EXIT CODE: 7' <<<"$out_zsh"
+  rm -rf "$tmp"
+  # RUN DIED path: empty RC_FILE, dead pid.
+  tmp="$(mktemp -d)"
+  : > "$tmp/pi-oneshot.rc"
+  printf 'log line\n' > "$tmp/pi-oneshot.log"
+  ( true ) &
+  dead_pid=$!
+  wait "$dead_pid" 2>/dev/null
+  printf '%s\n' "$dead_pid" > "$tmp/pi-oneshot.pid"
+  run_block_zsh "$tmp" "$block"
+  [ "$RUN_ZSH_RC" -eq 1 ]
+  grep -qF 'RUN DIED' <<<"$out_zsh"
+  rm -rf "$tmp"
+}
+
+@test "zsh-safe: loop wait block under zsh reports SUMMARY and LOOP DIED (stubs)" {
+  command -v zsh >/dev/null 2>&1 || skip "zsh is not installed"
+  local skill block tmp out_zsh RUN_ZSH_RC dead_pid
+  skill="$REPO_ROOT/skills/pi-review-loop/SKILL.md"
+  block="$(review_wait_block)"
+  # SUMMARY path: a valid six-field summary on the last line.
+  tmp="$(mktemp -d)"
+  printf '{"status":"PASS","verdict":"APPROVED","rounds":1,"total_pi_calls":2,"findings":[],"raw_output":"ok"}\n' > "$tmp/review-loop.log"
+  ( true ) &
+  dead_pid=$!
+  wait "$dead_pid" 2>/dev/null
+  printf '%s\n' "$dead_pid" > "$tmp/review-loop.pid"
+  run_block_zsh "$tmp" "$block"
+  [ "$RUN_ZSH_RC" -eq 0 ]
+  grep -qF 'SUMMARY:' <<<"$out_zsh"
+  rm -rf "$tmp"
+  # LOOP DIED path: no valid summary.
+  tmp="$(mktemp -d)"
+  printf 'log line\n' > "$tmp/review-loop.log"
+  ( true ) &
+  dead_pid=$!
+  wait "$dead_pid" 2>/dev/null
+  printf '%s\n' "$dead_pid" > "$tmp/review-loop.pid"
+  run_block_zsh "$tmp" "$block"
+  [ "$RUN_ZSH_RC" -eq 1 ]
+  grep -qF 'LOOP DIED' <<<"$out_zsh"
+  rm -rf "$tmp"
+}
+
+@test "zsh-safe: abort blocks under zsh kill the run group and skip when the guard fails" {
+  command -v zsh >/dev/null 2>&1 || skip "zsh is not installed"
+  local dir block script out root_pid out_zsh
+  # Review-loop abort: a stub driver tree (root + child) must die.
+  dir="$(mktemp -d)"
+  cat > "$dir/orchestrate.sh" <<'ROOT'
+#!/usr/bin/env bash
+sleep 300 &
+wait
+ROOT
+  chmod +x "$dir/orchestrate.sh"
+  set -m
+  "$dir/orchestrate.sh" &
+  root_pid=$!
+  set +m
+  sleep 1
+  kill -0 "$root_pid" 2>/dev/null || { rm -rf "$dir"; return 1; }
+  echo "$root_pid" > "$dir/review-loop.pid"
+  block="$(abort_block_of "$REPO_ROOT/skills/pi-review-loop/SKILL.md")"
+  script="$dir/abort.sh"
+  printf '%s\n' "$block" > "$script"
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.run"
+  out_zsh="$(zsh "$script.run" 2>&1)" || true
+  sleep 6
+  if kill -0 "$root_pid" 2>/dev/null; then
+    kill -9 -- "-$root_pid" 2>/dev/null || true
+    kill -9 "$root_pid" 2>/dev/null || true
+    rm -rf "$dir"
+    return 1
+  fi
+  rm -rf "$dir"
+  # Oneshot abort with a RESOLVABLE pi (stub on PATH): the group dies.
+  dir="$(mktemp -d)"
+  cat > "$dir/pi" <<'ROOT'
+#!/usr/bin/env bash
+sleep 300 &
+wait
+ROOT
+  chmod +x "$dir/pi"
+  set -m
+  "$dir/pi" -p &
+  root_pid=$!
+  set +m
+  sleep 1
+  kill -0 "$root_pid" 2>/dev/null || { rm -rf "$dir"; return 1; }
+  echo "$root_pid" > "$dir/pi-oneshot.pid"
+  block="$(section_block "$REPO_ROOT/skills/pi-oneshot/SKILL.md" "### Long runs under Claude Code's Bash tool" 3)"
+  script="$dir/abort.sh"
+  printf '%s\n' "$block" > "$script"
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.run"
+  out_zsh="$(PATH="$dir:$PATH" zsh "$script.run" 2>&1)" || true
+  sleep 6
+  if kill -0 "$root_pid" 2>/dev/null; then
+    kill -9 -- "-$root_pid" 2>/dev/null || true
+    kill -9 "$root_pid" 2>/dev/null || true
+    rm -rf "$dir"
+    return 1
+  fi
+  rm -rf "$dir"
+  # Oneshot abort, UNRESOLVABLE pi (HOME + PATH with no pi): the group must
+  # survive and the skip message must be printed (the old code would have
+  # matched a bare "pi" and killed it).
+  dir="$(mktemp -d)"
+  cat > "$dir/other.sh" <<'ROOT'
+#!/usr/bin/env bash
+sleep 300 &
+wait
+ROOT
+  chmod +x "$dir/other.sh"
+  set -m
+  "$dir/other.sh" &
+  root_pid=$!
+  set +m
+  sleep 1
+  kill -0 "$root_pid" 2>/dev/null || { rm -rf "$dir"; return 1; }
+  echo "$root_pid" > "$dir/pi-oneshot.pid"
+  block="$(section_block "$REPO_ROOT/skills/pi-oneshot/SKILL.md" "### Long runs under Claude Code's Bash tool" 3)"
+  script="$dir/abort.sh"
+  printf '%s\n' "$block" > "$script"
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.sub"
+  { printf 'bash <<%s\n' "'PI_DELEGATE_BLOCK'"; cat "$script.sub"; printf 'PI_DELEGATE_BLOCK\n'; } > "$script.run"
+  out_zsh="$(HOME="$dir" PATH="$dir:/bin" /bin/zsh "$script.run" 2>&1)" || true
+  grep -q "cannot verify command line" <<<"$out_zsh"
+  kill -0 "$root_pid" 2>/dev/null
+  kill -9 -- "-$root_pid" 2>/dev/null || true
+  kill -9 "$root_pid" 2>/dev/null || true
+  rm -rf "$dir"
+}
+
+@test "lint: launch, wait and abort blocks pass bash -n and shellcheck (review-loop)" {
+  local tmp
+  tmp="$(mktemp)"
+  printf '%s\n' "$(loop_launch_block)" > "$tmp"
+  bash -n "$tmp"
+  shellcheck --norc --severity=warning -s bash "$tmp"
+  rm -f "$tmp"
+  local w
+  w="$(review_wait_block)"
+  local wtmp
+  wtmp="$(mktemp)"
+  printf '%s\n' "$w" > "$wtmp"
+  bash -n "$wtmp"
+  shellcheck --norc --severity=warning -s bash "$wtmp"
+  rm -f "$wtmp"
+  local ab
+  ab="$(abort_block_of "$REPO_ROOT/skills/pi-review-loop/SKILL.md")"
+  local abtmp
+  abtmp="$(mktemp)"
+  printf '%s\n' "$ab" > "$abtmp"
+  bash -n "$abtmp"
+  shellcheck --norc --severity=warning -s bash "$abtmp"
+  rm -f "$abtmp"
+}
+
+# --- Issue #69: pgid abort recipe functional tests ---------------------------
+# Every process-spawning test below uses a test-unique orchestrate.sh stub
+# path (so the two-factor command-line guard matches) and cleanup is by pid
+# (and pgid where the launch is `set -m`) only. No host-wide pkill.
+
+@test "abort pgid: stub tree (root+child) is killed end to end" {
+  local dir block script root_pid
+  dir="$(mktemp -d)"
+  cat > "$dir/orchestrate.sh" <<'ROOT'
+#!/usr/bin/env bash
+sleep 300 &
+wait
+ROOT
+  chmod +x "$dir/orchestrate.sh"
+  set -m
+  "$dir/orchestrate.sh" &
+  root_pid=$!
+  set +m
+  sleep 1
+  [[ -n "$root_pid" ]]
+  kill -0 "$root_pid" 2>/dev/null || { rm -rf "$dir"; return 1; }
+  echo "$root_pid" > "$dir/review-loop.pid"
+  block="$(abort_block_of "$REPO_ROOT/skills/pi-review-loop/SKILL.md")"
+  script="$dir/abort.sh"
+  printf '%s\n' "$block" > "$script"
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.run"
+  bash "$script.run" >/dev/null 2>&1
+  sleep 6
+  # Root must be gone; if not, scoped safety-net by pgid, then fail.
+  if kill -0 "$root_pid" 2>/dev/null; then
+    kill -9 -- "-$root_pid" 2>/dev/null || true
+    kill -9 "$root_pid" 2>/dev/null || true
+    rm -rf "$dir"
+    return 1
+  fi
+  rm -rf "$dir"
+}
+
+@test "abort pgid: an unrelated sleep 300 survives the group kill" {
+  local dir block script root_pid bystander
+  dir="$(mktemp -d)"
+  cat > "$dir/orchestrate.sh" <<'ROOT'
+#!/usr/bin/env bash
+sleep 300 &
+wait
+ROOT
+  chmod +x "$dir/orchestrate.sh"
+  set -m
+  "$dir/orchestrate.sh" &
+  root_pid=$!
+  set +m
+  sleep 1
+  [[ -n "$root_pid" ]]
+  # Launch a bystander that is NOT in the run's process group.
+  # Run it in a new session so it's a different pgid.
+  ( sleep 300 ) &
+  bystander=$!
+  sleep 0.5
+  kill -0 "$bystander" 2>/dev/null || { rm -rf "$dir"; return 1; }
+  echo "$root_pid" > "$dir/review-loop.pid"
+  block="$(abort_block_of "$REPO_ROOT/skills/pi-review-loop/SKILL.md")"
+  script="$dir/abort.sh"
+  printf '%s\n' "$block" > "$script"
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.run"
+  bash "$script.run" >/dev/null 2>&1
+  sleep 6
+  # Root must be gone.
+  if kill -0 "$root_pid" 2>/dev/null; then
+    kill -9 -- "-$root_pid" 2>/dev/null || true
+    kill -9 "$root_pid" 2>/dev/null || true
+    kill -9 "$bystander" 2>/dev/null
+    rm -rf "$dir"
+    return 1
+  fi
+  # Bystander must survive (it's in its own session/group).
+  if ! kill -0 "$bystander" 2>/dev/null; then
+    kill -9 "$bystander" 2>/dev/null
+    rm -rf "$dir"
+    return 1
+  fi
+  kill -9 "$bystander" 2>/dev/null
+  rm -rf "$dir"
+}
+
+@test "abort pgid: guard skips when pid is not a group leader" {
+  local dir block script out rc=0 nonleader
+  dir="$(mktemp -d)"
+  # Launch a process that is NOT a group leader (plain backgrounding, no set -m).
+  sleep 300 &
+  nonleader=$!
+  sleep 0.5
+  kill -0 "$nonleader" 2>/dev/null || { kill -9 "$nonleader" 2>/dev/null; rm -rf "$dir"; return 1; }
+  echo "$nonleader" > "$dir/review-loop.pid"
+  block="$(abort_block_of "$REPO_ROOT/skills/pi-review-loop/SKILL.md")"
+  script="$dir/abort.sh"
+  printf '%s\n' "$block" > "$script"
+  out="$(sed "s|^D=.*|D=\"$dir\"|" "$script" | bash 2>&1)" || rc=$?
+  [[ "$out" == *"not a pi-delegate run group"* ]]
+  # The process must still be alive.
+  if ! kill -0 "$nonleader" 2>/dev/null; then
+    kill -9 "$nonleader" 2>/dev/null
+    rm -rf "$dir"
+    return 1
+  fi
+  kill -9 "$nonleader" 2>/dev/null
+  rm -rf "$dir"
+}
+
+@test "abort pgid: guard skips a group leader whose command line does not match" {
+  local dir block script root_pid
+  dir="$(mktemp -d)"
+  # The stub file is NOT named orchestrate.sh — the command-line check
+  # (grep -qF 'orchestrate.sh') must fail even though the pid IS a group
+  # leader. The process must survive the abort.
+  cat > "$dir/other.sh" <<'ROOT'
+#!/usr/bin/env bash
+sleep 300 &
+wait
+ROOT
+  chmod +x "$dir/other.sh"
+  set -m
+  "$dir/other.sh" &
+  root_pid=$!
+  set +m
+  sleep 1
+  kill -0 "$root_pid" 2>/dev/null || { rm -rf "$dir"; return 1; }
+  echo "$root_pid" > "$dir/review-loop.pid"
+  block="$(abort_block_of "$REPO_ROOT/skills/pi-review-loop/SKILL.md")"
+  script="$dir/abort.sh"
+  printf '%s\n' "$block" > "$script"
+  local out rc=0
+  out="$(sed "s|^D=.*|D=\"$dir\"|" "$script" | bash 2>&1)" || rc=$?
+  [[ "$out" == *"not a pi-delegate run group"* ]]
+  # The process must still be alive (the guard skipped it).
+  if ! kill -0 "$root_pid" 2>/dev/null; then
+    kill -9 -- "-$root_pid" 2>/dev/null || true
+    kill -9 "$root_pid" 2>/dev/null || true
+    rm -rf "$dir"
+    return 1
+  fi
+  kill -9 -- "-$root_pid" 2>/dev/null || true
+  rm -rf "$dir"
+}
+
+@test "abort pgid: oneshot copy skips a group leader whose command line does not match" {
+  local dir block script root_pid
+  dir="$(mktemp -d)"
+  # The stub file is NOT the resolved pi path — the oneshot guard resolves
+  # PI_BIN and greps its path, so a group leader running something else is
+  # skipped. The process must survive.
+  cat > "$dir/notpi.sh" <<'ROOT'
+#!/usr/bin/env bash
+sleep 300 &
+wait
+ROOT
+  chmod +x "$dir/notpi.sh"
+  set -m
+  "$dir/notpi.sh" &
+  root_pid=$!
+  set +m
+  sleep 1
+  kill -0 "$root_pid" 2>/dev/null || { rm -rf "$dir"; return 1; }
+  echo "$root_pid" > "$dir/pi-oneshot.pid"
+  block="$(abort_block_of "$REPO_ROOT/skills/pi-oneshot/SKILL.md")"
+  script="$dir/abort.sh"
+  printf '%s\n' "$block" > "$script"
+  local out rc=0
+  out="$(sed "s|^D=.*|D=\"$dir\"|" "$script" | bash 2>&1)" || rc=$?
+  [[ "$out" == *"not a pi-delegate run group"* ]]
+  if ! kill -0 "$root_pid" 2>/dev/null; then
+    kill -9 -- "-$root_pid" 2>/dev/null || true
+    kill -9 "$root_pid" 2>/dev/null || true
+    rm -rf "$dir"
+    return 1
+  fi
+  kill -9 -- "-$root_pid" 2>/dev/null || true
+  rm -rf "$dir"
+}
+
+@test "wait loop: valid summary on last line -> SUMMARY printed, exit 0" {
+  local dir block script out rc=0 dead_pid
+  dir="$(mktemp -d)"
+  block="$(review_wait_block)"
+  script="$dir/wait.sh"
+  printf '%s\n' "$block" > "$script"
+  # A valid six-field summary on the last line.
+  printf '{"status":"PASS","verdict":"APPROVED","rounds":1,"total_pi_calls":2,"findings":[],"raw_output":"ok"}\n' > "$dir/review-loop.log"
+  # A dead pid (the until loop should exit immediately because the last
+  # line already parses; but seed a pid so the loop does not infinite-loop).
+  ( true ) &
+  dead_pid=$!
+  wait "$dead_pid" 2>/dev/null
+  printf '%s\n' "$dead_pid" > "$dir/review-loop.pid"
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.run"
+  out="$(timeout 30 bash "$script.run" 2>&1)" || rc=$?
+  [ "$rc" -eq 0 ]
+  grep -qF 'SUMMARY:' <<<"$out"
+  grep -qF '"status":"PASS"' <<<"$out"
+  rm -rf "$dir"
+}
+
+@test "wait loop: dead pid and no valid summary -> LOOP DIED and exit 1" {
+  local dir block script out rc=0 dead_pid
+  dir="$(mktemp -d)"
+  block="$(review_wait_block)"
+  script="$dir/wait.sh"
+  printf '%s\n' "$block" > "$script"
+  printf 'some log line\n' > "$dir/review-loop.log"
+  ( true ) &
+  dead_pid=$!
+  wait "$dead_pid" 2>/dev/null
+  printf '%s\n' "$dead_pid" > "$dir/review-loop.pid"
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.run"
+  out="$(timeout 30 bash "$script.run" 2>&1)" || rc=$?
+  [ "$rc" -eq 1 ]
+  grep -qF 'LOOP DIED' <<<"$out"
+  rm -rf "$dir"
+}
+
+@test "wait loop: unreadable pid file -> PID FILE UNREADABLE and exit 1" {
+  local dir block script out rc=0
+  dir="$(mktemp -d)"
+  block="$(review_wait_block)"
+  script="$dir/wait.sh"
+  printf '%s\n' "$block" > "$script"
+  printf 'log\n' > "$dir/review-loop.log"
+  # No pid file at all.
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.run"
+  out="$(timeout 30 bash "$script.run" 2>&1)" || rc=$?
+  [ "$rc" -eq 1 ]
+  grep -qF 'PID FILE UNREADABLE' <<<"$out"
+  rm -rf "$dir"
+}
+
+@test "oneshot wait: unreadable pid file -> PID FILE UNREADABLE and exit 1" {
+  local dir block script out rc=0
+  dir="$(mktemp -d)"
+  local skill="$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  block="$(section_block "$skill" "### Long runs under Claude Code's Bash tool" 2)"
+  script="$dir/wait.sh"
+  printf '%s\n' "$block" > "$script"
+  printf 'log\n' > "$dir/pi-oneshot.log"
+  # No pid file at all.
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.run"
+  out="$(timeout 30 bash "$script.run" 2>&1)" || rc=$?
+  [ "$rc" -eq 1 ]
+  grep -qF 'PID FILE UNREADABLE' <<<"$out"
+  rm -rf "$dir"
+}
+
+@test "launch block: set -m is present in both skill launch blocks" {
+  grep -qF 'set -m' "$REPO_ROOT/skills/pi-review-loop/SKILL.md"
+  grep -qF 'set -m' "$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  grep -qF 'set -m' "$REPO_ROOT/docs/configuration.md"
 }

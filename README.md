@@ -102,7 +102,8 @@ develop round, up to 3 read-only adversarial review rounds, up to 2 fix rounds
 (hard cap 6 pi calls). All progress goes to stderr; exactly one JSON summary
 is the last line of stdout (`status`, `verdict`, `rounds`, `total_pi_calls`,
 `findings`, `raw_output`). Long runs exceed the Bash tool's foreground
-ceiling: run in the background and poll — see
+ceiling: launch the run detached, record its pid, and wait with bounded
+foreground calls — see
 [configuration → Long runs](docs/configuration.md#long-runs-under-claude-codes-bash-tool).
 
 Both skills are packaged as Claude Code skills, but `orchestrate.sh` is plain

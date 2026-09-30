@@ -39,36 +39,180 @@ preflight is a last-resort guardrail. To opt out of all three guards, set
 
 Run the loop with the user's request as the task, passed as a **single
 shell argument**:
-
 ```bash
-bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"
+bash <<'PI_DELEGATE_BLOCK'
+bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "<the user's request, verbatim>"
+PI_DELEGATE_BLOCK
 ```
 
-**Run in background and poll.** Claude Code's Bash tool imposes a
-per-foreground-call timeout: `BASH_DEFAULT_TIMEOUT_MS` defaults to
-`120000` ms (2 minutes) and `BASH_MAX_TIMEOUT_MS` defaults to `600000` ms
-(10 minutes); `timeout` values above the max are silently clamped to the
-max (values were verified against the Claude Code tools-reference at the
-time of writing — re-verify before relying on them if the limits look
-stale). The loop's worst-case wall clock is `6 × (PI_TIMEOUT + PI_KILL_AFTER)`
-— at the defaults, `6 × (1800 + 30) = 10980` s ≈ 183 min (~3 h) — which
-exceeds even the 10-minute foreground ceiling, so a foreground invocation
-will always be killed mid-loop.
+Every executable block in this skill is wrapped in a quoted
+`bash <<'PI_DELEGATE_BLOCK'` heredoc: Claude Code's Bash tool runs blocks
+in the user's shell, which may be **zsh** (non-interactive), where
+bash-specific constructs such as `set -m` fail ("can't change
+option: -m"). The wrapper forces bash to run the block; the quoted
+heredoc delimiter means the caller's shell performs no expansion, so
+substitute caller-provided values (the request text, `RUN_DIR`) **
+literally** into the block before running.
 
-Instead, launch the invocation in the background and poll its output:
+**Detach, record the pid, then wait in foreground.** Claude Code's Bash
+tool imposes a per-foreground-call timeout: `BASH_DEFAULT_TIMEOUT_MS`
+defaults to `120000` ms (2 minutes) and `BASH_MAX_TIMEOUT_MS` defaults to
+`600000` ms (10 minutes); `timeout` values above the max are silently
+clamped to the max (values were verified against the Claude Code
+tools-reference at the time of writing — re-verify before relying on
+them if the limits look stale). The loop's worst-case wall clock is
+`6 × (PI_TIMEOUT + PI_KILL_AFTER)` — at the defaults, `6 × (1800 + 30) =
+10980` s ≈ 183 min (~3 h) — which exceeds even the 10-minute foreground
+ceiling, so a single foreground invocation cannot cover a whole loop.
 
-1. Run the `bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"` command
-   with the Bash tool's `run_in_background` set to `true`.
-2. Poll by reading the background task's output file with the `Read`
-   tool, at an interval of a few minutes, until the last non-empty line
-   parses as the six-field JSON summary — stop polling as soon as it
-   does; do not keep polling after the summary appears.
-3. When the process exits, parse the last line of the output as the JSON
-   summary and report per the "Interpreting the JSON summary" and
-   "Reporting the verdict" sections below.
+A verified real-claude experiment (issue #69) showed that the Bash tool's
+`run_in_background` is NOT a safe strategy for this run (the headless
+session kills it when the turn ends — see `docs/configuration.md`). Do
+**not** claim the loop is "running in the background" and end the turn.
 
-Background tasks are not subject to the foreground `BASH_MAX_TIMEOUT_MS`
-ceiling, so the full `6 × (PI_TIMEOUT + PI_KILL_AFTER)` budget is honored.
+Instead — the only strategy to use:
+
+1. **Prepare, remove stale files, then launch detached** in a single
+   foreground Bash call. The helper files MUST live **outside the target
+   repo** — for example in a temp directory made with `mktemp -d` (untracked
+   files inside the repo enter the reviewed diff). Remove any stale files
+   from a previous run so leftovers cannot look like a completed run, then
+   redirect both stdout and stderr to `$LOG` so the file is available no
+   matter what, and record the process pid to `$PID_FILE`:
+Write the request to a file first (a quoted heredoc, so quoting problems
+and command substitution in the request text cannot occur), then launch
+from the file — do not embed the request text in the launch line:
+```bash
+cat > "$(mktemp -d)/task.txt" <<'PI_DELEGATE_TASK'
+<the user's request, verbatim>
+PI_DELEGATE_TASK
+```
+
+Then launch in a second foreground Bash call, substituting the printed
+path and the request file literally:
+```bash
+bash <<'PI_DELEGATE_BLOCK'
+D=$(mktemp -d); LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"
+rm -f "$LOG" "$PID_FILE"
+set -m
+nohup bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$(cat <the task file from the call above>)" > "$LOG" 2>&1 &
+echo "$!" > "$PID_FILE"
+echo "RUN_DIR=$D"
+PI_DELEGATE_BLOCK
+```
+
+   Note that `$LOG` grows as pi streams output and can be deleted after
+   the run.
+
+   **State does not persist between Bash tool calls.** Each of the steps
+   above runs in a separate `bash` process, so shell variables (`D`,
+   `LOG`, `PID_FILE`) do not carry over. Copy the `RUN_DIR=...` line the
+   launch call printed into every later call: each wait/abort block below
+   starts with `D=<the RUN_DIR printed at launch>` (replacing the
+   placeholder with the actual path) and derives `$LOG`/`$PID_FILE` from
+   `$D`.
+
+   **A preflight `REFUSED` at launch** means the run already failed fast
+   (exit 3, no pid recorded) — no wait and no abort are needed; relay the
+   `REFUSED:` line and stop.
+2. **Wait in foreground, bounded calls.** Repeatedly run a foreground
+   Bash call with `timeout` just under the 600000 ms ceiling (the Bash
+   tool's `timeout` parameter, e.g. 595000). Check only the LAST line of
+   `$LOG` — it is the JSON summary when the loop has finished. Each call
+   exits as soon as that last line parses as the six-field JSON summary,
+   or as soon as the recorded pid is gone. Replace the `D=` line with the
+   `RUN_DIR` the launch printed before running. Check `command -v jq`
+   first — the summary check needs it, and a missing jq must stop the wait
+   with a clear message rather than loop on the never-parseable last line.
+   Read the pid file **once** (`PID=...`): an unreadable pid file is a
+   distinct failure ("PID FILE UNREADABLE") from a dead pid ("LOOP DIED"),
+   because re-reading it on every loop iteration would loop forever on a
+   missing file. The block itself reports the outcome in CODE after the
+   wait loop ends: the last line of `$LOG` re-parsed as a valid six-field
+   summary means the loop finished ("SUMMARY:"); a dead pid with no valid
+   summary on the last line means the loop died before completing ("LOOP
+   DIED" + log tail, exit 1):
+```bash
+bash <<'PI_DELEGATE_BLOCK'
+D="<the RUN_DIR printed at launch>"
+LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"
+command -v jq >/dev/null 2>&1 || { echo "jq required — cannot validate the loop summary"; exit 1; }
+PID="$(cat "$PID_FILE" 2>/dev/null)"
+if [ -z "$PID" ]; then
+  echo "PID FILE UNREADABLE — check RUN_DIR"
+  exit 1
+fi
+until [ -s "$LOG" ] && tail -n 1 "$LOG" | jq -e 'has("status") and has("verdict") and has("rounds") and has("total_pi_calls") and has("findings") and has("raw_output")' 2>/dev/null; do
+  kill -0 "$PID" 2>/dev/null || break
+  sleep 15
+done
+if [ -s "$LOG" ] && tail -n 1 "$LOG" | jq -e 'has("status") and has("verdict") and has("rounds") and has("total_pi_calls") and has("findings") and has("raw_output")' 2>/dev/null; then
+  echo "SUMMARY:"
+  tail -n 1 "$LOG"
+else
+  echo "LOOP DIED — no summary; tail of log:"
+  tail -n 20 "$LOG"
+  exit 1
+fi
+PI_DELEGATE_BLOCK
+```
+
+   If the pid file was unreadable, the block already stopped with "PID
+   FILE UNREADABLE — check RUN_DIR" (a state/setup problem, not a dead run
+   — do NOT report it as "LOOP DIED"). The "LOOP DIED" leg above is the
+   loop dying before completing — the run is **failed**; relay the tail it
+   prints (see step 5). If one wait call is instead killed at its
+   10-minute ceiling, start the next: the loop is detached and survives,
+   and the wait resumes from the same `$LOG`/`$PID_FILE` (re-deriving them
+   from the launch's `RUN_DIR`).
+3. **Do not end the turn until the loop is done.** Do not reply to the
+   user — no "the loop is running, I'll report when it finishes" —
+   before the final JSON line has been read (or the process is confirmed
+   dead). Repeat step 2 until the final JSON line appears or the pid is
+   gone.
+4. **Read the summary.** When the loop exits, the last line of `$LOG`
+   is the JSON summary (or stderr-only output on a CLI usage error —
+   see below); parse it and report per the "Interpreting the JSON
+   summary" and "Reporting the verdict" sections. If the loop died
+   without a valid summary (the step 2 failure), report the run as
+   **failed** with the log tail — **never** present a summary that is
+   not there.
+5. **Stop / abort (before ending the turn).** A preflight `REFUSED` at
+   launch means the run already failed fast (exit 3, no pid) — no wait
+   and no abort are needed; relay the `REFUSED:` line and stop.
+   On abort, kill the recorded pid and its children with the recipe below
+   — the same recipe (kept identical across both skills and
+   `docs/configuration.md`; the authoritative copy is `docs/configuration.md`,
+   **Long runs → Stop / abort**). The launch block ran `set -m` before
+   backgrounding, so the recorded pid leads its own process group (PGID ==
+   pid); killing that
+   group kills the run and all its children in one shot. The guard is
+   two-factor: a recycled pid almost never leads its own group, but the
+   group-leader check alone would still be fooled by a recycled pid that
+   happens to lead one, so the block also checks the recorded process's
+   command line — it must be this script (`orchestrate.sh`) before any
+   kill is attempted:
+```bash
+bash <<'PI_DELEGATE_BLOCK'
+D="<the RUN_DIR printed at launch>"
+PID_FILE="$D/review-loop.pid"
+PID="$(cat "$PID_FILE")"
+if [ "$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ')" = "$PID" ] && ps -o command= -p "$PID" 2>/dev/null | grep -qF 'orchestrate.sh'; then
+  kill -TERM -- "-$PID" 2>/dev/null || true
+  sleep 5
+  kill -KILL -- "-$PID" 2>/dev/null || true
+else
+  echo "not a pi-delegate run group — skipping"
+fi
+PI_DELEGATE_BLOCK
+```
+
+Note: children that start their own session or process group (`setsid`,
+daemons) escape the group kill — the same limit already documented for
+the in-script timeout. The same recipe (with the pi-oneshot pid file
+name in place of `review-loop.pid` and the resolved pi path in place of
+`orchestrate.sh`) is what `pi-oneshot` documents; the authoritative copy
+is `docs/configuration.md`, **Long runs → Stop / abort**.
 
 - **Quote `$ARGUMENTS`.** An unquoted `$ARGUMENTS` still performs command
   substitution: `bash orchestrate.sh $ARGUMENTS` with a request containing
@@ -105,15 +249,12 @@ ceiling, so the full `6 × (PI_TIMEOUT + PI_KILL_AFTER)` budget is honored.
   the entire script produces no output for an extended period, check that
   the pi binary and git are available and that a develop round is running (or
   could run); a run with no progress is safe to interrupt and re-run.
-- **Long runs — background + poll:** a full loop (develop + up to 3 reviews
-  + 2 fixes) can easily exceed the Bash tool's foreground ceiling (default
-  **120000 ms** = 2 min, max **600000 ms** = 10 min; values above the max are
-  silently clamped; configurable via `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS`
-  env vars — re-verify current values before relying on them). If the run may
-  exceed 10 minutes, pass `run_in_background: true` to the Bash tool and poll
-  by reading the background task's output file (via `Read`) until the final
-  JSON line (the summary) appears. Do **not** try to pass a larger foreground
-  `timeout` — it will be clamped to the ceiling and the run killed.
+- **Long runs — detached + foreground wait:** a full loop (develop + up
+to 3 reviews + 2 fixes) can easily exceed the Bash tool's foreground
+  ceiling, so a single foreground call cannot cover a whole loop. Use the
+  detached-launch + bounded-foreground-wait strategy from Invocation
+  steps 1–5; `docs/configuration.md` is the single owner of why
+  `run_in_background` is unsafe and of the ceiling values.
 
 ### Model passthrough
 

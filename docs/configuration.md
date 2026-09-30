@@ -110,17 +110,98 @@ Claude Code's Bash tool imposes a per-foreground-call timeout
 (`BASH_DEFAULT_TIMEOUT_MS` defaults to 120000 ms / 2 minutes;
 `BASH_MAX_TIMEOUT_MS` defaults to 600000 ms / 10 minutes; values above the
 max are silently clamped). A full loop's worst-case wall clock is
-`6 × (PI_TIMEOUT + PI_KILL_AFTER)` — at the defaults ≈ 183 min (~3 h) — and
-a single pi-oneshot task can legitimately run far longer than the 10-minute
-foreground ceiling, so a foreground invocation is killed mid-run.
+`6 × (PI_TIMEOUT + PI_KILL_AFTER)` — at the defaults `6 × (1800 + 30)` s =
+10980 s ≈ 183 min (~3 h) — and a single pi-oneshot task can legitimately
+run far longer than the 10-minute foreground ceiling, so one foreground
+call cannot cover the run.
 
-Therefore:
+Strategy (verified by the issue #69 real-claude experiments): **launch
+detached, record the pid, wait with foreground bounded calls.**
 
+- **Do not** use the Bash tool's background-task mode: in headless
+  `claude -p` the session ends its turn and the background task is killed
+  (the task's output file ends with `[killed]`), so the run dies with the
+  session. The agent must also **never end the turn or reply** before the
+  completion signal has been read.
 - **Do not** try to fix long runs by passing a larger foreground `timeout` —
   values above the ceiling are silently clamped.
-- Run the invocation with the Bash tool's `run_in_background: true` and poll
-  the background task's output file with the `Read` tool until the final JSON
-  summary line (the last line of stdout) appears. Background tasks are not
-  subject to the foreground ceiling, so the full per-call budget is honored.
-  Worst case at the defaults: `6 × (1800 + 30)` s = 10980 s ≈ **183 min**
-  (~3 h).
+- **Launch detached** in one foreground Bash call: first remove stale
+  helper files from a previous run (`rm -f "$LOG" "$PID_FILE" "$RC_FILE"`)
+  so a leftover completion signal cannot look like a completed run, then
+  run `set -m` (so the backgrounded command gets its own process group
+  whose PGID equals its pid), redirect the invocation's output to a log
+  file (`$LOG`) and record the process pid to a file (`$PID_FILE`). The
+  helper files must live **outside the target repo** (e.g. a `mktemp -d`
+  directory under the system temp dir) — untracked files inside the repo
+  enter the reviewed diff. For `pi-review-loop` the completion signal is
+  the final JSON summary line in `$LOG` (check the last line with
+  `tail -n 1`); for `pi-oneshot` (no JSON summary) the invocation is
+  wrapped so its exit code is written to an exit-code file (`$RC_FILE`).
+  $LOG grows as pi streams output and can be deleted after the run.
+- **Wait in foreground, bounded calls**: repeat a foreground Bash call
+  with `timeout` just under the 600000 ms ceiling (the Bash tool's
+  `timeout` parameter, e.g. 595000); each call exits as soon as the
+  completion signal appears (JSON summary line / exit-code file) or the
+  recorded pid is gone. If the pid is gone and no valid completion signal
+  exists, the run died without completing — report it as **failed** with
+  the log tail (e.g. `tail -n 20 "$LOG"`), and never present a result as
+  if the run had completed. If a wait call is killed at
+  the ceiling, start the next — the detached run survives and the wait
+  resumes from the same files. Worst case at the defaults:
+  `6 × (1800 + 30)` s = 10980 s ≈ **183 min** (~3 h), covered by enough
+  10-minute wait calls.
+- **Stop / abort (before ending the turn)**: use the pid file to kill the
+  run **and its children**. The launch block ran `set -m` before
+  backgrounding, so the recorded pid is the leader of its own process
+  group (PGID == pid); `kill -- -$PID` kills the group and every member
+  in one shot. The guard is two-factor: a recycled pid almost never leads
+  its own group, but the group-leader check alone would still be fooled by
+  a recycled pid that happens to lead one, so the block also checks the
+  recorded process's command line — it must be the run itself (for the loop,
+  `orchestrate.sh`; for the oneshot, the resolved pi path) before any kill is
+  attempted. **State does not persist
+  between Bash tool calls**: start the block with `D=` set to the
+  `RUN_DIR` the launch call printed (the `D=$(mktemp -d)` directory),
+  derive the pid file from `$D`. Children that start their own session
+  or process group (`setsid`, daemons) escape the group kill — the same
+  limit already documented for the in-script timeout.
+
+**Run every executable block under bash explicitly.** Claude Code's Bash
+tool runs a block in the user's shell, which may be **zsh** (non-interactive
+on macOS); bash-specific constructs — above all `set -m`, without which the
+aborts below cannot kill by process group — abort there (zsh: "can't change
+option: -m"). So every block in both skills and in this section is wrapped
+in a quoted `bash <<'PI_DELEGATE_BLOCK'` heredoc (the quoted delimiter means
+the caller's shell does no expansion), and caller-provided values (the task
+text, the `RUN_DIR`) are substituted **literally** into the block. The task
+text itself goes through a separate quoted heredoc task file (see the
+skills' launch guidance), never inline.
+
+The verbatim block (identical in both skills, differing only in the
+pid-file basename and the command-line token):
+```bash
+bash <<'PI_DELEGATE_BLOCK'
+D="<the RUN_DIR printed at launch>"
+PID_FILE="$D/review-loop.pid"
+PID="$(cat "$PID_FILE")"
+if [ "$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ')" = "$PID" ] && ps -o command= -p "$PID" 2>/dev/null | grep -qF 'orchestrate.sh'; then
+  kill -TERM -- "-$PID" 2>/dev/null || true
+  sleep 5
+  kill -KILL -- "-$PID" 2>/dev/null || true
+else
+  echo "not a pi-delegate run group — skipping"
+fi
+PI_DELEGATE_BLOCK
+```
+
+Both SKILL.md files carry a verbatim copy of this block (each skill must
+be self-contained; the oneshot copy resolves `PI_BIN` first, and if `pi`
+cannot be resolved it **exits 3** with "cannot verify command line —
+kill NOT performed" rather than matching a bare `pi` token — and the
+caller must then check liveness with `kill -0 <pid>` before reporting
+the abort as done); the BATS suites assert the
+copies are identical modulo the normalised tokens. This was verified on
+macOS (bash 3.2 and bash 5) against a stub tree
+(root → child → grandchild): the whole group dies, a bystander process
+survives, a pid that is not a group leader is skipped, and a group leader
+whose command line does not match the expected token is skipped.
