@@ -417,6 +417,56 @@ EOF
   "
   [ $? -eq 0 ]
   [ -f "$run_dir/bin/pi" ]
+  # The generated shim carries the harness-shim marker line.
+  grep -q "pi-delegate-bench-shim" "$run_dir/bin/pi"
+}
+
+# --- lib.sh: install_pi_shim marker-based shim detection ---------------------
+
+# A genuine pi that lives in */bin/pi (e.g. ~/.bun/bin/pi) must be ACCEPTED:
+# shim detection is by the marker line, not by the path shape.
+@test "lib.sh: install_pi_shim accepts a real pi in a */bin/pi path (e.g. <tmp>/.bun/bin/pi)" {
+  local run_dir="$BENCH_OUT/shim-bun"
+  local real_bin="$BENCH_OUT/fake-home/.bun/bin"
+  mkdir -p "$run_dir" "$real_bin"
+  cat > "$real_bin/pi" <<'EOF'
+#!/usr/bin/env bash
+echo "genuine pi"
+exit 0
+EOF
+  chmod +x "$real_bin/pi"
+  local rc=0
+  PATH="$real_bin:/usr/bin:/bin:/opt/homebrew/bin" bash -c "source '$BENCH_DIR/lib.sh'; install_pi_shim '$run_dir'" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ]
+  [ -x "$run_dir/bin/pi" ]
+  # The baked-in REAL_PI must be the genuine pi, not refused.
+  grep -q "REAL_PI=\"$real_bin/pi\"" "$run_dir/bin/pi"
+}
+
+# A pi that IS a generated harness shim (another run's bin/pi on PATH) must be
+# REFUSED — the marker line is the discriminator.
+@test "lib.sh: install_pi_shim refuses a generated harness shim as the real pi" {
+  local run_dir="$BENCH_OUT/shim-nest"
+  local prior_bin="$BENCH_OUT/prior-run/bin"
+  local prior_run="$BENCH_OUT/prior-run"
+  local real_bin="$BENCH_OUT/real-bin"
+  mkdir -p "$run_dir" "$prior_run" "$real_bin"
+  cat > "$real_bin/pi" <<'EOF'
+#!/usr/bin/env bash
+echo "genuine pi"
+exit 0
+EOF
+  chmod +x "$real_bin/pi"
+  # First install into the prior run (creates a marked shim).
+  PATH="$real_bin:/usr/bin:/bin:/opt/homebrew/bin" bash -c "source '$BENCH_DIR/lib.sh'; install_pi_shim '$prior_run'"
+  [ -x "$prior_run/bin/pi" ]
+  grep -q "pi-delegate-bench-shim" "$prior_run/bin/pi"
+  # Second install with the prior shim first on PATH and NO genuine pi
+  # anywhere else: resolution finds the prior shim → refused.
+  local rc=0
+  PATH="$prior_bin:/usr/bin:/bin:/opt/homebrew/bin" bash -c "source '$BENCH_DIR/lib.sh'; install_pi_shim '$run_dir'" 2>/dev/null || rc=$?
+  [ "$rc" -eq 1 ]
+  [ ! -f "$run_dir/bin/pi" ]
 }
 
 # --- lib.sh: install_pi_shim generates a valid shim -----------------------------
@@ -583,16 +633,22 @@ EOF
   local pd_sha
   pd_sha="$(git -C "$fake_pd" rev-parse HEAD)"
 
-  # Stub claude: plugin install succeeds; plugin list reports the plugin.
+  # Stub claude: the supported CLI flow — marketplace add, install,
+  # list --json — all succeed.
   local stub_dir="$BENCH_OUT/stub-claude"
   mkdir -p "$stub_dir"
   cat > "$stub_dir/claude" <<'CLAUDE'
 #!/usr/bin/env bash
+if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ]; then
+  echo "Adding marketplace: pi-delegate"
+  exit 0
+fi
 if [ "$1" = "plugin" ] && [ "$2" = "install" ]; then
+  echo "Installing plugin: pi-delegate@pi-delegate"
   exit 0
 fi
 if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
-  echo '[{"name":"pi-delegate","source":"pi-delegate","enabled":true}]'
+  echo '[{"id":"pi-delegate@pi-delegate","enabled":true}]'
   exit 0
 fi
 # claude -p run: emit a minimal valid JSON result.
@@ -619,9 +675,126 @@ EOF
   local pin_dir="$BENCH_OUT/pin/pi-delegate-$pd_sha"
   [ -d "$pin_dir" ]
   [ "$(git -C "$pin_dir" rev-parse HEAD)" = "$pd_sha" ]
-  # Plugin installed into the run's config dir.
+  # Plugin installed via the supported CLI into the run's config dir: the
+  # CLI's stdout/stderr is captured in plugin-install.log (both steps).
   local cfg="$run_dir/claude-config"
-  [ -f "$cfg/plugins/known_marketplaces.json" ]
+  [ -f "$run_dir/plugin-install.log" ]
+  grep -q -i "marketplace" "$run_dir/plugin-install.log"
+  grep -q -i "install" "$run_dir/plugin-install.log"
+}
+
+# --- run-arm.sh: arm B plugin install failure captures the CLI output --------
+
+@test "run-arm.sh: arm B plugin install failure prints the captured CLI output and aborts" {
+  local run_dir="$BENCH_OUT/$TASK_ID/B/10"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" B 10
+  [ "$status" -eq 0 ]
+
+  local fake_pd="$BENCH_OUT/fake-pd-abort2"
+  git init -q -b main "$fake_pd"
+  git -C "$fake_pd" config user.email t@t.t
+  git -C "$fake_pd" config user.name t
+  mkdir -p "$fake_pd/.claude-plugin"
+  echo '{"name":"pi-delegate"}' > "$fake_pd/.claude-plugin/marketplace.json"
+  git -C "$fake_pd" add -A
+  git -C "$fake_pd" commit -qm "pi-delegate"
+  local pd_sha
+  pd_sha="$(git -C "$fake_pd" rev-parse HEAD)"
+
+  local stub_dir="$BENCH_OUT/stub-claude10"
+  mkdir -p "$stub_dir"
+  # claude plugin marketplace add FAILS with a distinctive message → arm B
+  # must abort (exit 2) and the captured output must be printed.
+  cat > "$stub_dir/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ]; then
+  echo "Marketplace configuration file is corrupted: pi-delegate.source.source: Invalid discriminator value"
+  exit 1
+fi
+exit 0
+CLAUDE
+  chmod +x "$stub_dir/claude"
+  cat > "$stub_dir/pi" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$stub_dir/pi"
+
+  PATH="$stub_dir:$PATH" PI_DELEGATE_REPO="$fake_pd" PI_DELEGATE_SHA="$pd_sha" \
+    bash "$BENCH_DIR/run-arm.sh" "$TASK_ID" B 10 > "$BENCH_OUT/runarm-b4.out" 2>&1 || rc=$?
+  [ "$rc" -eq 2 ]
+  grep -q "ABORT" "$BENCH_OUT/runarm-b4.out"
+  # The CLI output was captured in the run dir and printed on failure.
+  [ -f "$run_dir/plugin-install.log" ]
+  grep -q "Invalid discriminator value" "$run_dir/plugin-install.log"
+  grep -q "Invalid discriminator value" "$BENCH_OUT/runarm-b4.out"
+}
+
+# --- run-arm.sh: arm B aborts when pi is not on PATH -------------------------
+
+@test "run-arm.sh: arm B aborts (exit 2) when pi is not on PATH" {
+  local run_dir="$BENCH_OUT/$TASK_ID/B/11"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" B 11
+  [ "$status" -eq 0 ]
+
+  local fake_pd="$BENCH_OUT/fake-pd-no-pi"
+  git init -q -b main "$fake_pd"
+  git -C "$fake_pd" config user.email t@t.t
+  git -C "$fake_pd" config user.name t
+  mkdir -p "$fake_pd/.claude-plugin"
+  echo '{"name":"pi-delegate"}' > "$fake_pd/.claude-plugin/marketplace.json"
+  git -C "$fake_pd" add -A
+  git -C "$fake_pd" commit -qm "pi-delegate"
+  local pd_sha
+  pd_sha="$(git -C "$fake_pd" rev-parse HEAD)"
+
+  # A PATH dir with NO pi binary (binaries are copied in via a separate
+  # step so this directory never contains a pi that would resolve).
+  local binonly="$BENCH_OUT/binonly"
+  mkdir -p "$binonly"
+
+  # Stub claude (plugin flow succeeds); pi is NOT on the restricted PATH
+  # (the shim-install step then fails: no pi found → arm B must abort).
+  local stub_dir="$BENCH_OUT/stub-claude11"
+  mkdir -p "$stub_dir"
+  # PATH isolation: run-arm.sh calls `timeout` (coreutils, e.g.
+  # /opt/homebrew/bin/timeout on macOS) for the pin clone; without a
+  # timeout on the restricted PATH the clone fails with 127 and the test
+  # sees a pin-clone abort instead of the pi-missing abort. Copy the
+  # operator's timeout into the stub dir so the restricted PATH is
+  # claude+timeout + system dirs (no pi anywhere).
+  if command -v timeout >/dev/null 2>&1; then
+    cp "$(command -v timeout)" "$stub_dir/timeout"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    cp "$(command -v gtimeout)" "$stub_dir/timeout"
+  fi
+  cat > "$stub_dir/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ]; then
+  echo "Adding marketplace: pi-delegate"
+  exit 0
+fi
+if [ "$1" = "plugin" ] && [ "$2" = "install" ]; then
+  echo "Installing plugin: pi-delegate@pi-delegate"
+  exit 0
+fi
+if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
+  echo '[{"id":"pi-delegate@pi-delegate","enabled":true}]'
+  exit 0
+fi
+exit 0
+CLAUDE
+  chmod +x "$stub_dir/claude"
+
+  # Restricted PATH: stub_dir (claude only) + system dirs; the pi shim's own
+  # bin dir is stripped before resolution, so no `pi` resolves. Run with
+  # `sh -c`-style isolation is unavailable (no pipes allowed), so rely on
+  # the stub dir containing no pi.
+  local rc=0
+  PATH="$stub_dir:$binonly:/usr/bin:/bin:/usr/sbin:/sbin" PI_DELEGATE_REPO="$fake_pd" PI_DELEGATE_SHA="$pd_sha" \
+    bash "$BENCH_DIR/run-arm.sh" "$TASK_ID" B 11 > "$BENCH_OUT/runarm-b5.out" 2>&1 || rc=$?
+  [ "$rc" -eq 2 ]
+  grep -q "ABORT" "$BENCH_OUT/runarm-b5.out"
 }
 
 @test "run-arm.sh: arm B pin verification fails → exit 2 (missing marketplace.json)" {
