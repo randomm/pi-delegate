@@ -542,6 +542,10 @@ run_pi() {
   [ "$tools" != "-" ] && args+=(--tools "$tools")
   [ -n "$model_arg" ] && args+=(--model "$model_arg")
 
+  # Reset pi_stderr before any early return: the prompt-size-limit return
+  # below must not surface a prior call's stderr (issue #50).
+  pi_stderr=""
+
   # Total byte budget check: sum of all argv elements + prompt (stdin).
   # This catches cases where the system prompt, tools, or other args are
   # large enough to push the total over MAX_ARG_STRLEN even after the
@@ -565,17 +569,29 @@ run_pi() {
 
   local rc=0
   local output
+  # pi's stderr goes to a temp file, not the captured output: pi prints
+  # diagnostics and warnings via console.error, and a single non-JSON line
+  # mixed into the stdout stream would make `jq -s` fail on the whole input
+  # (issue #57). Stdout is parsed only; stderr is surfaced on failure paths.
+  local pi_stderr_file pi_stderr_out
+  # A failed mktemp (full/unwritable temp dir) would leave pi_stderr_file
+  # empty, and `2>"$pi_stderr_file"` (i.e. `2>""`) would make the whole
+  # invocation fail before pi ever runs — reported as a pi crash. Check it.
+  pi_stderr_file="$(mktemp)" || { pi_stderr="mktemp failed while setting up pi stderr capture"; last_transcript=""; return 1; }
+  [ -n "$pi_stderr_file" ] || { pi_stderr="mktemp failed while setting up pi stderr capture"; last_transcript=""; return 1; }
   if [ -n "$TIMEOUT_CMD" ]; then
     # --kill-after escalates to SIGKILL if pi (or its child) ignores the
     # SIGTERM sent at PI_TIMEOUT; that path exits 137 instead of 124.
-    output="$(printf '%s' "$prompt" | "$TIMEOUT_CMD" --kill-after="$PI_KILL_AFTER" "$PI_TIMEOUT" "$PI_BIN" "${args[@]}" 2>&1)" || rc=$?
+    output="$(printf '%s' "$prompt" | "$TIMEOUT_CMD" --kill-after="$PI_KILL_AFTER" "$PI_TIMEOUT" "$PI_BIN" "${args[@]}" 2>"$pi_stderr_file")" || rc=$?
   else
     if [ "$no_timeout_warned" -eq 0 ]; then
       no_timeout_warned=1
       log "WARNING: neither timeout nor gtimeout found on PATH; pi calls run without a time limit"
     fi
-    output="$(printf '%s' "$prompt" | "$PI_BIN" "${args[@]}" 2>&1)" || rc=$?
+    output="$(printf '%s' "$prompt" | "$PI_BIN" "${args[@]}" 2>"$pi_stderr_file")" || rc=$?
   fi
+  pi_stderr_out="$(cat "$pi_stderr_file" 2>/dev/null)" || log "WARNING: pi stderr temp file unreadable: ${pi_stderr_file}"
+  rm -f "$pi_stderr_file"
   total_pi_calls=$((total_pi_calls + 1))
 
   # 124 = timed out (SIGTERM honored); 137 = survived SIGTERM, SIGKILLed
@@ -584,7 +600,15 @@ run_pi() {
   # leaks into pi_stderr. The message names the SIGKILL escalation so the
   # caller knows the second phase exists and its cost (PI_KILL_AFTER).
   if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    # pi_stderr_out is capped before it is relayed: pi (and any child it
+    # spawns) can emit diagnostic lines carrying paths, URLs, or other
+    # working-tree context that would otherwise flow into the JSON summary
+    # (which the /work driver posts to PR bodies).
+    local stderr_tail
+    stderr_tail="$(printf '%s' "$pi_stderr_out" | tail -n 50)"
     pi_stderr="pi timed out after ${PI_TIMEOUT}s (SIGKILL after a further ${PI_KILL_AFTER}s if needed)"
+    [ -n "$stderr_tail" ] && pi_stderr="${pi_stderr}
+${stderr_tail}"
     # The hung run never produced a usable transcript; drop whatever a
     # prior successful call left in $last_transcript so the PI_ERROR
     # summary's raw_output reflects this failed call, not an old one.
@@ -593,7 +617,11 @@ run_pi() {
   fi
 
   if [ "$rc" -ne 0 ]; then
+    local stderr_tail_nonzero
+    stderr_tail_nonzero="$(printf '%s' "$pi_stderr_out" | tail -n 50)"
     pi_stderr="$output"
+    [ -n "$stderr_tail_nonzero" ] && pi_stderr="${pi_stderr}
+${stderr_tail_nonzero}"
     # Same as the timeout branch: a failed call's summary must not carry a
     # previous call's transcript (issue #50).
     last_transcript=""
@@ -601,10 +629,40 @@ run_pi() {
   fi
 
   # Final text: the LAST assistant message_end event whose stopReason is
-  # "stop" (the terminal assistant message). message_end fires for every
-  # message (user, assistant, tool); agent_settled has no text field.
+  # "stop" (the terminal assistant message). Fallback (issue #57): runs that
+  # end on a toolUse/length/error stop have no "stop" message; fall back to
+  # the last assistant message_end with any text content — in practice that
+  # message is the report. message_end fires for every message (user,
+  # assistant, tool); agent_settled has no text field.
+  #
+  # The primary and fallback parses share one filter/join shape; only the
+  # select predicate differs (stopReason == "stop" vs. non-empty text), and
+  # `// []` guards .message.content in both so a missing/odd content field
+  # yields empty rather than a jq error.
   local text
-  text="$(printf '%s' "$output" | jq -s -r '[.[] | select(.type == "message_end") | select(.message.role == "assistant") | select(.message.stopReason == "stop")] | last | (.message.content // [] | map(select(.type == "text") | .text) | join("\n")) // empty' 2>/dev/null)" || text=""
+  text="$(printf '%s' "$output" | jq -s -r '[.[] | select(.type == "message_end") | select(.message.role == "assistant") | select(.message.stopReason == "stop")] | last | ((.message.content // []) | map(select(.type == "text") | .text) | join("\n")) // empty' 2>/dev/null)" || text=""
+  if [ -z "$text" ]; then
+    text="$(printf '%s' "$output" | jq -s -r '[.[] | select(.type == "message_end") | select(.message.role == "assistant") | select((.message.content // []) | map(select(.type == "text") | .text) | join("\n") | length > 0)] | last | ((.message.content // []) | map(select(.type == "text") | .text) | join("\n")) // empty' 2>/dev/null)" || text=""
+  fi
+  # Both parses failed with no text: either the transcript genuinely has no
+  # assistant text, or jq failed to parse the stdout. Distinguish via a
+  # PI_DEBUG-gated log line so an operator can tell "no text" from "jq
+  # failed to parse" without adding noise to the default output.
+  if [ -z "$text" ] && [ -n "${PI_DEBUG:-}" ]; then
+    log "DEBUG: run_pi ${total_pi_calls}: no assistant text extracted (transcript is empty OR jq failed to parse; enable PI_DEBUG and re-run with the transcript to distinguish)"
+  fi
+  # Bounded: the extracted text is untrusted model output; an oversized
+  # message must not dominate the summary's raw_output or the next round's
+  # prompt (same budget concern as the PI_DIFF_MAX_BYTES cap on diffs).
+  local text_max
+  text_max="${PI_DIFF_MAX_BYTES:-90000}"
+  local text_bytes
+  text_bytes="$(printf '%s' "$text" | wc -c | tr -d ' ')"
+  if [ "$text_bytes" -gt "$text_max" ]; then
+    text="$(printf '%s' "$text" | head -c "$text_max")"
+    text="${text}
+[truncated: assistant text exceeded ${text_max} bytes]"
+  fi
   last_transcript="$text"
 
   verify_provider_model "$output" "pi call ${total_pi_calls}"

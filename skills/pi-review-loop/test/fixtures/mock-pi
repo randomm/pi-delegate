@@ -20,6 +20,9 @@
 #     SIGTERM (trap), then spawns `sleep n` in a child process so that
 #     GNU timeout's process-group kill cannot reach the sleep directly.
 #     This exercises the SIGKILL escalation path (--kill-after → rc 137).
+#   - If the fixture starts with "STDERR:<n>" it prints the next n lines to
+#     stderr (simulating pi's console.error diagnostics and warnings), then
+#     emits the remaining lines on stdout and exits 0.
 #   - If the fixture starts with "SYMLINK:<relpath>:<target>" it creates a
 #     symlink at <relpath> (repo-relative, no expansion) pointing to
 #     <target> (taken verbatim; may point outside the repo, e.g.
@@ -100,17 +103,12 @@ if [ -n "${MOCK_PI_FIXTURES_DIR:-}" ] && [ -f "$MOCK_PI_FIXTURES_DIR/$n" ]; then
       sleep "${first#SLEEP-IGNORE-TERM:}"
       tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
       ;;
-    SYMLINK:*)
-      # Create a symlink inside the repo working tree. The fixture line is
-      # SYMLINK:<relpath>:<target>: <relpath> is relative to the driver's
-      # cwd (the repo root, where the driver invokes pi); <target> is taken
-      # verbatim from the fixture — it may point outside the repo. The
-      # -f flag makes the mock idempotent if the link already exists.
-      symlink_spec="${first#SYMLINK:}"
-      symlink_path="${symlink_spec%%:*}"
-      symlink_target="${symlink_spec#*:}"
-      ln -sf "$symlink_target" "$symlink_path" 2>/dev/null || true
-      tail -n +2 "$MOCK_PI_FIXTURES_DIR/$n"
+    STDERR:*)
+      # Emit the next <n> lines to stderr (pi's console.error diagnostics
+      # and warnings), then the remaining lines to stdout.
+      stderr_n="${first#STDERR:}"
+      tail -n 1 -n "$stderr_n" "$MOCK_PI_FIXTURES_DIR/$n" >&2
+      tail -n +$((stderr_n + 1)) "$MOCK_PI_FIXTURES_DIR/$n"
       ;;
     PUSH:*)
       # Dump the GIT_CONFIG_* env first, so a single PUSH: fixture line gives
