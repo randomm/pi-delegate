@@ -81,7 +81,7 @@ Instead — the only strategy to use:
    recorded pid is gone:
 
    ```bash
-   until [ -s "$LOG" ] && jq -e 'has("status") and has("verdict") and has("rounds") and has("total_pi_calls") and has("findings") and has("raw_output")' < "$LOG" 2>/dev/null; do
+   until [ -s "$LOG" ] && tail -1 "$LOG" | jq -e 'has("status") and has("verdict") and has("rounds") and has("total_pi_calls") and has("findings") and has("raw_output")' 2>/dev/null; do
      kill -0 "$(cat "$PID_FILE")" 2>/dev/null || break
      sleep 15
    done
