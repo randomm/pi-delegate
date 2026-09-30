@@ -280,6 +280,11 @@ skill_section() {
 # A PATH directory with the bare minimum the blocks need — no pi, no GNU
 # timeout/gtimeout — so the functional tests below behave identically on
 # hosts that have a real pi (macOS dev boxes) and hosts that do not (CI).
+# CONTRACT: this list is the shared PATH-restriction contract for ALL
+# PATH-restricted tests (including stub_pi_path, which extends it). When a
+# SKILL.md block gains a new external command, extend this allowlist here
+# and the test fails with "command not found" — that is the intended
+# signal, so keep the two in sync.
 nopy_path() {
   local p b
   p="$(mktemp -d)"
@@ -311,14 +316,34 @@ stub_pi_path() {
   printf '%s\n' 'exit 0' >> "$pi"
   chmod +x "$pi"
   stub_timeout="$p/timeout"
-  # -N means "deadline already passed" — the probe (--kill-after=1 1 true)
-  # and any bounded call return success immediately without running the
-  # command or sleeping.
-  printf '%s\n' 'case "${1}" in -N) exit 0 ;; esac' >> "$stub_timeout"
+  # A pass-through timeout stub: the first argument is consumed either way
+  # — if it is -N (a negative/relative deadline) the stub exits 0
+  # immediately; otherwise it is a plain duration argument and is skipped
+  # the same way. Then every leading flag (--kill-after=...) is dropped and
+  # the remaining command is exec'd directly, so the probe (--kill-after=1
+  # 1 true) and the wrapped pi call both run without a real deadline.
+  printf '%s\n' 'if [ "${1:-}" = "-N" ]; then exit 0; fi' >> "$stub_timeout"
   printf '%s\n' 'shift' >> "$stub_timeout"
   printf '%s\n' 'while [ -n "${1:-}" ]; do case "${1:-}" in --*) shift ;; *) break ;; esac; done' >> "$stub_timeout"
   printf '%s\n' 'exec "$@"' >> "$stub_timeout"
   chmod +x "$stub_timeout"
+  printf '%s' "$p"
+}
+
+# A stub mktemp that records every call (one "called" line per invocation)
+# before exec'ing the real mktemp, so the block's behavior is unchanged.
+# Used to assert that a refused launch allocates NO temp dir (the recording
+# log must be empty) without relying on TMPDIR — macOS mktemp does not
+# honor it. Returns the stub dir; the caller arranges it to be first on
+# PATH (before nopy_path, which carries the real mktemp).
+recording_mktemp_path() {
+  local p logf
+  p="$(mktemp -d)"
+  logf="$p/.mktemp-calls.log"
+  printf '%s\n' '#!/bin/sh' > "$p/mktemp"
+  printf '%s\n' "echo called >> \"$logf\"" >> "$p/mktemp"
+  printf '%s\n' 'exec /usr/bin/mktemp "$@"' >> "$p/mktemp"
+  chmod +x "$p/mktemp"
   printf '%s' "$p"
 }
 
@@ -346,6 +371,36 @@ stub_pi_path() {
   grep -qF 'STUB PI -p --no-session --no-extensions --no-skills --no-prompt-templates' <<<"$out"
   ! grep -qiF 'command not found' <<<"$out"
   rm -rf "$dir" "$nopy" "$stub"
+}
+
+@test "pi-oneshot detached launch: valid launch under stub PATH + recording mktemp DOES record a call (positive control)" {
+  local dir block script out rc=0 stub mpath gitdir taskf
+  dir="$(mktemp -d)"
+  block="$(long_runs_block 1)"
+  # A minimal git repo on a feature branch so the preflight passes (same
+  # setup as the foreground valid-launch test), with a task file.
+  gitdir="$dir/repo"
+  mkdir "$gitdir"
+  git init -q -b feature/issue-69-control "$gitdir" 2>/dev/null || git init -q "$gitdir"
+  git -C "$gitdir" config user.email t@t
+  git -C "$gitdir" config user.name t
+  git -C "$gitdir" commit -q --allow-empty -m init
+  git -C "$gitdir" checkout -q -b feature/issue-69-control 2>/dev/null || true
+  taskf="$dir/task.txt"
+  printf 'do it' > "$taskf"
+  stub="$(stub_pi_path)"
+  mpath="$(recording_mktemp_path)"
+  script="$dir/launch.sh"
+  printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$taskf\"|" > "$script"
+  out="$(cd "$gitdir" && HOME="$dir" PATH="$mpath:$stub" bash "$script" 2>&1)" || rc=$?
+  [ "$rc" -eq 0 ]
+  grep -qF 'RUN_DIR=' <<<"$out"
+  # A valid launch allocates its run dir via mktemp, so the stub MUST have
+  # recorded a call — proving the stub is actually first on PATH (the
+  # refusal tests' empty-log assertions would be vacuous otherwise).
+  [ -s "$mpath/.mktemp-calls.log" ]
+  grep -qF 'called' "$mpath/.mktemp-calls.log"
+  rm -rf "$dir" "$stub" "$mpath"
 }
 
 @test "pi-oneshot detached launch block validates PI_TIMEOUT=0 -> ERROR, exit 2, no RUN_DIR" {
@@ -395,83 +450,89 @@ stub_pi_path() {
   nopy="$(nopy_path)"
   script="$dir/inv.sh"
   printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$dir/does-not-exist.txt\"|" > "$script"
-  out="$(HOME="$dir" PATH="$nopy" bash "$script" 2>&1)" || rc=$?
+  mpath="$(recording_mktemp_path)"
+  out="$(HOME="$dir" PATH="$mpath:$nopy" bash "$script" 2>&1)" || rc=$?
   [ "$rc" -eq 2 ]
   grep -qF 'ERROR: task file missing or empty: /' <<<"$out"
   ! grep -qF 'pi not found' <<<"$out"
-  rm -rf "$dir" "$nopy"
+  # The mktemp stub first on PATH must not have been called: the task-file
+  # guard fires before any temp dir is allocated (no TMPDIR dependence —
+  # macOS mktemp does not honor TMPDIR).
+  [ -z "$(cat "$mpath/.mktemp-calls.log" 2>/dev/null)" ]
+  rm -rf "$dir" "$nopy" "$mpath"
 }
 
 @test "pi-oneshot detached launch: missing task file -> exit 2, no RUN_DIR, no pi stub" {
-  local dir block script out rc=0 nopy tmpd
+  local dir block script out rc=0 nopy mpath
   dir="$(mktemp -d)"
   block="$(long_runs_block 1)"
-  # A restricted PATH (nopy_path: no pi, no timeout) makes "no pi" real, and
-  # a fresh TMPDIR proves a refused launch allocates NO temp dir: every
-  # mktemp in the block (task guard, run dir) would land in $tmpd.
+  # A restricted PATH (nopy_path: no pi, no timeout) makes "no pi" real; the
+  # recording mktemp stub first on PATH records every mktemp the block
+  # performs, so an empty log proves the refusal allocated NO temp dir —
+  # without relying on TMPDIR (macOS mktemp does not honor it).
   nopy="$(nopy_path)"
-  tmpd="$(mktemp -d)"
+  mpath="$(recording_mktemp_path)"
   script="$dir/launch.sh"
   printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$dir/nope.txt\"|" > "$script"
-  out="$(HOME="$dir" PATH="$nopy" TMPDIR="$tmpd" bash "$script" 2>&1)" || rc=$?
+  out="$(HOME="$dir" PATH="$mpath:$nopy" bash "$script" 2>&1)" || rc=$?
   [ "$rc" -eq 2 ]
   grep -qF 'ERROR: task file missing or empty: /' <<<"$out"
   ! grep -qF 'RUN_DIR=' <<<"$out"
-  [ -z "$(ls -A "$tmpd")" ]
-  rm -rf "$dir" "$nopy" "$tmpd"
+  [ -z "$(cat "$mpath/.mktemp-calls.log" 2>/dev/null)" ]
+  rm -rf "$dir" "$nopy" "$mpath"
 }
 
 @test "pi-oneshot detached launch: empty task file -> exit 2, no RUN_DIR" {
-  local dir block script out rc=0 nopy tmpd
+  local dir block script out rc=0 nopy mpath
   dir="$(mktemp -d)"
   block="$(long_runs_block 1)"
   nopy="$(nopy_path)"
-  tmpd="$(mktemp -d)"
+  mpath="$(recording_mktemp_path)"
   : > "$dir/empty.txt"
   script="$dir/launch.sh"
   printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$dir/empty.txt\"|" > "$script"
-  out="$(HOME="$dir" PATH="$nopy" TMPDIR="$tmpd" bash "$script" 2>&1)" || rc=$?
+  out="$(HOME="$dir" PATH="$mpath:$nopy" bash "$script" 2>&1)" || rc=$?
   [ "$rc" -eq 2 ]
   grep -qF 'ERROR: task file missing or empty: /' <<<"$out"
   ! grep -qF 'RUN_DIR=' <<<"$out"
-  [ -z "$(ls -A "$tmpd")" ]
-  rm -rf "$dir" "$nopy" "$tmpd"
+  [ -z "$(cat "$mpath/.mktemp-calls.log" 2>/dev/null)" ]
+  rm -rf "$dir" "$nopy" "$mpath"
 }
 
 @test "pi-oneshot detached launch: bad PI_KILL_AFTER -> exit 2, no RUN_DIR, no temp dir" {
-  local dir block script out rc=0 nopy tmpd taskf
+  local dir block script out rc=0 nopy mpath taskf
   dir="$(mktemp -d)"
   block="$(long_runs_block 1)"
   nopy="$(nopy_path)"
-  tmpd="$(mktemp -d)"
+  mpath="$(recording_mktemp_path)"
   taskf="$(mktemp)"
   printf 'do it' > "$taskf"
   script="$dir/launch.sh"
   printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$taskf\"|" > "$script"
-  out="$(HOME="$dir" PATH="$nopy" TMPDIR="$tmpd" PI_KILL_AFTER=0 bash "$script" 2>&1)" || rc=$?
+  out="$(HOME="$dir" PATH="$mpath:$nopy" PI_KILL_AFTER=0 bash "$script" 2>&1)" || rc=$?
   [ "$rc" -eq 2 ]
   grep -qF 'PI_KILL_AFTER must be a positive integer' <<<"$out"
   ! grep -qF 'RUN_DIR=' <<<"$out"
-  [ -z "$(ls -A "$tmpd")" ]
-  rm -f "$taskf"; rm -rf "$dir" "$nopy" "$tmpd"
+  [ -z "$(cat "$mpath/.mktemp-calls.log" 2>/dev/null)" ]
+  rm -f "$taskf"; rm -rf "$dir" "$nopy" "$mpath"
 }
 
 @test "pi-oneshot detached launch: bad PI_TIMEOUT -> exit 2, no RUN_DIR, no temp dir" {
-  local dir block script out rc=0 nopy tmpd taskf
+  local dir block script out rc=0 nopy mpath taskf
   dir="$(mktemp -d)"
   block="$(long_runs_block 1)"
   nopy="$(nopy_path)"
-  tmpd="$(mktemp -d)"
+  mpath="$(recording_mktemp_path)"
   taskf="$(mktemp)"
   printf 'do it' > "$taskf"
   script="$dir/launch.sh"
   printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$taskf\"|" > "$script"
-  out="$(HOME="$dir" PATH="$nopy" TMPDIR="$tmpd" PI_TIMEOUT=0 bash "$script" 2>&1)" || rc=$?
+  out="$(HOME="$dir" PATH="$mpath:$nopy" PI_TIMEOUT=0 bash "$script" 2>&1)" || rc=$?
   [ "$rc" -eq 2 ]
   grep -qF 'PI_TIMEOUT must be a positive integer' <<<"$out"
   ! grep -qF 'RUN_DIR=' <<<"$out"
-  [ -z "$(ls -A "$tmpd")" ]
-  rm -f "$taskf"; rm -rf "$dir" "$nopy" "$tmpd"
+  [ -z "$(cat "$mpath/.mktemp-calls.log" 2>/dev/null)" ]
+  rm -f "$taskf"; rm -rf "$dir" "$nopy" "$mpath"
 }
 
 @test "pi-oneshot SKILL.md abort skips the kill when pi cannot be resolved (exit 3)" {
