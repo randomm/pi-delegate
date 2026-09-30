@@ -186,7 +186,13 @@ skill_section() {
 @test "pi-oneshot SKILL.md uses the single stdin transport (no positional variant)" {
   local block
   block=$(section_block "$SKILL_FILE" "## Invocation" 1)
-  printf '%s' "$block" | grep -qF -- 'printf '"'"'%s'"'"' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates'
+  # The request is read from a task file (a quoted-heredoc write in its own
+  # call): the block carries the task-file read (as $TASK_FILE after
+  # extraction) piped into the wrapped pi invocation with the full flag set.
+  printf '%s' "$block" | grep -qF -- '$TASK_FILE'
+  printf '%s' "$block" | grep -qF -- '| ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates'
+  # The raw (unextracted) block must carry the task-file read.
+  printf '%s' "$(section_text "$SKILL_FILE" "## Invocation")" | grep -qF -- '$(cat <the task file from the call above>)'
   # The old positional variant must not remain as live code.
   ! printf '%s' "$block" | grep -qE '^\$\{wrap\[@\]\+.*"\$ARGUMENTS"$'
 }
@@ -217,6 +223,61 @@ skill_section() {
   grep -q 'positive integers' "$SKILL_FILE"
 }
 
+@test "pi-oneshot SKILL.md blocks validate PI_TIMEOUT/PI_KILL_AFTER before launch" {
+  # The launch blocks (foreground invocation + detached) must run the same
+  # positive-integer validation orchestrate.sh runs, with the driver's
+  # message, BEFORE the wrap array is built / the pi call is made.
+  local n fg detached
+  fg=$(section_block "$SKILL_FILE" "## Invocation" 1)
+  detached=$(long_runs_block 1)
+  for n in fg detached; do
+    printf '%s' "$fg" | grep -qF 'PI_TIMEOUT must be a positive integer'
+    printf '%s' "$fg" | grep -qF 'PI_KILL_AFTER must be a positive integer'
+    printf '%s' "$detached" | grep -qF 'PI_TIMEOUT must be a positive integer'
+    printf '%s' "$detached" | grep -qF 'PI_KILL_AFTER must be a positive integer'
+    # Validation precedes the wrap-array construction (refuse before launch).
+    [ "$(printf '%s\n' "$fg" | grep -n 'must be a positive integer' | head -n 1 | cut -d: -f1)" -lt "$(printf '%s\n' "$fg" | grep -n 'wrap=' | head -n 1 | cut -d: -f1)" ]
+    [ "$(printf '%s\n' "$detached" | grep -n 'must be a positive integer' | head -n 1 | cut -d: -f1)" -lt "$(printf '%s\n' "$detached" | grep -n 'wrap=' | head -n 1 | cut -d: -f1)" ]
+  done
+}
+
+@test "pi-oneshot detached launch block validates PI_TIMEOUT=0 -> ERROR, exit 2, no RUN_DIR" {
+  local dir block script out rc=0
+  dir="$(mktemp -d)"
+  block="$(long_runs_block 1)"
+  script="$dir/launch.sh"
+  printf '%s\n' "$block" > "$script"
+  out="$(HOME="$dir" PI_TIMEOUT=0 bash "$script" 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ]
+  grep -qF 'PI_TIMEOUT must be a positive integer' <<<"$out"
+  ! grep -qF 'RUN_DIR=' <<<"$out"
+  rm -rf "$dir"
+}
+
+@test "pi-oneshot foreground invocation block validates PI_TIMEOUT=abc -> ERROR, exit 2, no pi call" {
+  local dir block script out rc=0
+  dir="$(mktemp -d)"
+  block="$(section_block "$SKILL_FILE" "## Invocation" 1)"
+  # Point the task-file placeholder at an empty file; the block must refuse
+  # on PI_TIMEOUT before any pi launch.
+  local taskf; taskf="$(mktemp)"
+  printf 'do it' > "$taskf"
+  script="$dir/inv.sh"
+  printf '%s\n' "$block" | sed "s|\$(cat <the task file from the call above>)|$(cat \"$taskf\")|g" > "$script"
+  out="$(HOME="$dir" PI_TIMEOUT=abc bash "$script" 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ]
+  grep -qF 'PI_TIMEOUT must be a positive integer' <<<"$out"
+  rm -f "$taskf"; rm -rf "$dir"
+}
+
+@test "pi-oneshot SKILL.md abort skips the kill when pi cannot be resolved" {
+  local block
+  block="$(long_runs_block 3)"
+  grep -qF 'cannot verify command line' <<<"$block"
+  # The bare-"pi" match is gone: the guard greps the resolved path only.
+  ! printf '%s' "$block" | grep -qF 'pi_cmd='
+}
+
 @test "pi-oneshot SKILL.md Model variant keeps the timeout wrapper" {
   # The Model section (text between "### Model" and the next "## ") must
   # show the wrapped command (or state the wrapper applies) — never a bare
@@ -225,8 +286,8 @@ skill_section() {
   model_section=$(skill_section "### Model")
   [[ -n "$model_section" ]]
   printf '%s' "$model_section" | grep -qF '${wrap[@]+"${wrap[@]}"}'
-  # Same single stdin transport in the Model variant.
-  printf '%s' "$model_section" | grep -qF -- 'printf '"'"'%s'"'"' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates --model'
+  # Same single stdin transport (task file) in the Model variant.
+  printf '%s' "$model_section" | grep -qF -- '${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates --model'
 }
 
 # Extract the FIRST ```bash block of the SKILL.md section named $1 (the

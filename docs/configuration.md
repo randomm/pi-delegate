@@ -164,10 +164,23 @@ detached, record the pid, wait with foreground bounded calls.**
   `RUN_DIR` the launch call printed (the `D=$(mktemp -d)` directory),
   derive the pid file from `$D`. Children that start their own session
   or process group (`setsid`, daemons) escape the group kill — the same
-  limit already documented for the in-script timeout. The verbatim block
-  (identical in both skills, differing only in the pid-file basename and
-  the command-line token):
+  limit already documented for the in-script timeout.
+
+**Run every executable block under bash explicitly.** Claude Code's Bash
+tool runs a block in the user's shell, which may be **zsh** (non-interactive
+on macOS); bash-specific constructs — above all `set -m`, without which the
+aborts below cannot kill by process group — abort there (zsh: "can't change
+option: -m"). So every block in both skills and in this section is wrapped
+in a quoted `bash <<'PI_DELEGATE_BLOCK'` heredoc (the quoted delimiter means
+the caller's shell does no expansion), and caller-provided values (the task
+text, the `RUN_DIR`) are substituted **literally** into the block. The task
+text itself goes through a separate quoted heredoc task file (see the
+skills' launch guidance), never inline.
+
+The verbatim block (identical in both skills, differing only in the
+pid-file basename and the command-line token):
 ```bash
+bash <<'PI_DELEGATE_BLOCK'
 D="<the RUN_DIR printed at launch>"
 PID_FILE="$D/review-loop.pid"
 PID="$(cat "$PID_FILE")"
@@ -178,11 +191,13 @@ if [ "$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ')" = "$PID" ] && ps -o comm
 else
   echo "not a pi-delegate run group — skipping"
 fi
+PI_DELEGATE_BLOCK
 ```
 
 Both SKILL.md files carry a verbatim copy of this block (each skill must
-be self-contained; the oneshot copy resolves `PI_BIN` first and checks the
-resolved pi path instead of `orchestrate.sh`); the BATS suites assert the
+be self-contained; the oneshot copy resolves `PI_BIN` first, and if `pi`
+cannot be resolved it **skips the kill** with "cannot verify command
+line" rather than matching a bare `pi` token); the BATS suites assert the
 copies are identical modulo the normalised tokens. This was verified on
 macOS (bash 3.2 and bash 5) against a stub tree
 (root → child → grandchild): the whole group dies, a bystander process

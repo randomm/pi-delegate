@@ -40,8 +40,19 @@ preflight is a last-resort guardrail. To opt out of all three guards, set
 Run the loop with the user's request as the task, passed as a **single
 shell argument**:
 ```bash
-bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"
+bash <<'PI_DELEGATE_BLOCK'
+bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "<the user's request, verbatim>"
+PI_DELEGATE_BLOCK
 ```
+
+Every executable block in this skill is wrapped in a quoted
+`bash <<'PI_DELEGATE_BLOCK'` heredoc: Claude Code's Bash tool runs blocks
+in the user's shell, which may be **zsh** (non-interactive), where
+bash-specific constructs such as `set -m` fail ("can't change
+option: -m"). The wrapper forces bash to run the block; the quoted
+heredoc delimiter means the caller's shell performs no expansion, so
+substitute caller-provided values (the request text, `RUN_DIR`) **
+literally** into the block before running.
 
 **Detach, record the pid, then wait in foreground.** Claude Code's Bash
 tool imposes a per-foreground-call timeout: `BASH_DEFAULT_TIMEOUT_MS`
@@ -68,13 +79,26 @@ Instead — the only strategy to use:
    from a previous run so leftovers cannot look like a completed run, then
    redirect both stdout and stderr to `$LOG` so the file is available no
    matter what, and record the process pid to `$PID_FILE`:
+Write the request to a file first (a quoted heredoc, so quoting problems
+and command substitution in the request text cannot occur), then launch
+from the file — do not embed the request text in the launch line:
 ```bash
+cat > "$(mktemp -d)/task.txt" <<'PI_DELEGATE_TASK'
+<the user's request, verbatim>
+PI_DELEGATE_TASK
+```
+
+Then launch in a second foreground Bash call, substituting the printed
+path and the request file literally:
+```bash
+bash <<'PI_DELEGATE_BLOCK'
 D=$(mktemp -d); LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"
 rm -f "$LOG" "$PID_FILE"
 set -m
-nohup bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS" > "$LOG" 2>&1 &
+nohup bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$(cat <the task file from the call above>)" > "$LOG" 2>&1 &
 echo "$!" > "$PID_FILE"
 echo "RUN_DIR=$D"
+PI_DELEGATE_BLOCK
 ```
 
    Note that `$LOG` grows as pi streams output and can be deleted after
@@ -87,6 +111,10 @@ echo "RUN_DIR=$D"
    starts with `D=<the RUN_DIR printed at launch>` (replacing the
    placeholder with the actual path) and derives `$LOG`/`$PID_FILE` from
    `$D`.
+
+   **A preflight `REFUSED` at launch** means the run already failed fast
+   (exit 3, no pid recorded) — no wait and no abort are needed; relay the
+   `REFUSED:` line and stop.
 2. **Wait in foreground, bounded calls.** Repeatedly run a foreground
    Bash call with `timeout` just under the 600000 ms ceiling (the Bash
    tool's `timeout` parameter, e.g. 595000). Check only the LAST line of
@@ -105,6 +133,7 @@ echo "RUN_DIR=$D"
    summary on the last line means the loop died before completing ("LOOP
    DIED" + log tail, exit 1):
 ```bash
+bash <<'PI_DELEGATE_BLOCK'
 D="<the RUN_DIR printed at launch>"
 LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"
 command -v jq >/dev/null 2>&1 || { echo "jq required — cannot validate the loop summary"; exit 1; }
@@ -125,6 +154,7 @@ else
   tail -n 20 "$LOG"
   exit 1
 fi
+PI_DELEGATE_BLOCK
 ```
 
    If the pid file was unreadable, the block already stopped with "PID
@@ -148,12 +178,15 @@ fi
    **failed** with the log tail — **never** present a summary that is
    not there.
 
-4. **Stop / abort (before ending the turn).** On abort, kill the recorded
-   pid and its children with the recipe below — the same recipe (kept
-   identical across both skills and `docs/configuration.md`; the
-   authoritative copy is `docs/configuration.md`, **Long runs → Stop /
-   abort**). The launch block ran `set -m` before backgrounding, so the
-   recorded pid leads its own process group (PGID == pid); killing that
+5. **Stop / abort (before ending the turn).** A preflight `REFUSED` at
+   launch means the run already failed fast (exit 3, no pid) — no wait
+   and no abort are needed; relay the `REFUSED:` line and stop.
+   On abort, kill the recorded pid and its children with the recipe below
+   — the same recipe (kept identical across both skills and
+   `docs/configuration.md`; the authoritative copy is `docs/configuration.md`,
+   **Long runs → Stop / abort**). The launch block ran `set -m` before
+   backgrounding, so the recorded pid leads its own process group (PGID ==
+   pid); killing that
    group kills the run and all its children in one shot. The guard is
    two-factor: a recycled pid almost never leads its own group, but the
    group-leader check alone would still be fooled by a recycled pid that
@@ -161,6 +194,7 @@ fi
    command line — it must be this script (`orchestrate.sh`) before any
    kill is attempted:
 ```bash
+bash <<'PI_DELEGATE_BLOCK'
 D="<the RUN_DIR printed at launch>"
 PID_FILE="$D/review-loop.pid"
 PID="$(cat "$PID_FILE")"
@@ -171,6 +205,7 @@ if [ "$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ')" = "$PID" ] && ps -o comm
 else
   echo "not a pi-delegate run group — skipping"
 fi
+PI_DELEGATE_BLOCK
 ```
 
 Note: children that start their own session or process group (`setsid`,

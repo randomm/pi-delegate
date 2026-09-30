@@ -16,6 +16,7 @@ task, read what it says, and relay it.
 Resolve `pi` the same way `orchestrate.sh` does — `command -v pi` on PATH
 first, then the common install locations:
 ```bash
+bash <<'PI_DELEGATE_BLOCK'
 PI_BIN=""
 for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HOME/.local/bin/pi"; do
   [[ -n "$candidate" ]] || continue
@@ -24,6 +25,7 @@ for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HO
     break
   fi
 done
+PI_DELEGATE_BLOCK
 ```
 
 If none is executable, do not try to run pi. Tell the user pi is not
@@ -52,6 +54,7 @@ is included **verbatim at the top** of each launch block — the foreground
 (only the `# --- End safety preflight ---` line and the launch line itself
 differ). Do not run it as a standalone step.
 ```bash
+bash <<'PI_DELEGATE_BLOCK'
 # --- Safety preflight (skip if PI_DELEGATE_UNSAFE=1) -----------------------
 if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
   # 1. Refuse the default branch (or detached HEAD at its tip).
@@ -136,6 +139,7 @@ if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
   unset _gc _r _p
 fi
 # --- End safety preflight ---------------------------------------------------
+PI_DELEGATE_BLOCK
 ```
 
 Then proceed to the `## Invocation` block below. Real isolation (a disposable
@@ -145,15 +149,20 @@ last-resort guardrail, not a substitute.
 ## Invocation
 
 Run the task as a single one-shot, stateless call, passing the user's
-request through as `$ARGUMENTS` (the full task description). The block is
+request (the full task description) to pi. The block is
 self-contained — it re-resolves the pi binary (`PI_BIN`, per `## Locating
 the pi binary`) and re-runs the timeout-wrapper resolution (mirroring
 `orchestrate.sh`: `PI_TIMEOUT` default 1800 s, `PI_KILL_AFTER` default 30 s,
 `timeout` preferred with a `gtimeout` fallback, and a probe that treats a
 missing `--kill-after` flag as "no timeout binary at all"), because nothing
 persists between Bash tool calls. Run this single block — it is complete
-and covers both wrapper states (wrapped and unbounded):
+and covers both wrapper states (wrapped and unbounded). The user's request
+comes in via a task file written with a quoted heredoc (as in the
+`pi-review-loop` launch guidance) — `cat > "$D/task.txt"` style, in its own
+Bash call; this block reads it back, so no quoting of the request is needed
+in this call:
 ```bash
+bash <<'PI_DELEGATE_BLOCK'
 # Re-resolve the pi binary (nothing from an earlier Bash call persists).
 PI_BIN=""
 for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HOME/.local/bin/pi"; do
@@ -187,6 +196,20 @@ fi
 # shell process and must reach the pi process as its environment.
 <the verbatim ## Safety preflight block above: from `if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then` down to `fi`, including the `# --- End safety preflight ---` marker line>
 
+# Validate the timeout knobs the same way orchestrate.sh does (positive
+# integers) before building the wrapper — a bad value must fail the
+# launch with the driver's message, not reach the timeout binary.
+PI_TIMEOUT="${PI_TIMEOUT:-1800}"
+if ! [[ "$PI_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$PI_TIMEOUT" -lt 1 ]; then
+  echo "ERROR: PI_TIMEOUT must be a positive integer (got: $PI_TIMEOUT)"
+  exit 2
+fi
+PI_KILL_AFTER="${PI_KILL_AFTER:-30}"
+if ! [[ "$PI_KILL_AFTER" =~ ^[0-9]+$ ]] || [ "$PI_KILL_AFTER" -lt 1 ]; then
+  echo "ERROR: PI_KILL_AFTER must be a positive integer (got: $PI_KILL_AFTER)"
+  exit 2
+fi
+
 # One wrapper array for every invocation: empty when no usable timeout
 # binary exists. The "${wrap[@]+...}" guard keeps empty-array expansion safe
 # under `set -u` on old bash (where an unset/empty array trips -u), so the
@@ -201,12 +224,13 @@ fi
 # command is never piped), and stdin has no argv size limit, so long task
 # descriptions cannot hit E2BIG (a single argv element is capped at 128 KiB
 # on Linux).
-printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates
+printf '%s' "$(cat <the task file from the call above>)" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates
+PI_DELEGATE_BLOCK
 ```
 
-(`PI_TIMEOUT` and `PI_KILL_AFTER` must be positive integers when set —
-non-positive or non-numeric values make the wrapper fail or behave
-unpredictably.)
+(`PI_TIMEOUT` and `PI_KILL_AFTER` must be positive integers when set — the
+block validates them before launching and refuses with the same message
+`orchestrate.sh` uses, so a bad value cannot reach the wrapper.)
 
 ### Timeout wrapper
 
@@ -244,12 +268,14 @@ foreground bounded calls (`run_in_background` is NOT safe — see
 `docs/configuration.md`):
 
 1. **Prepare, remove stale files, then launch detached** in one foreground
-   Bash call. The block below is self-contained: state does not persist
-   between Bash tool calls, so it re-resolves the pi binary (`PI_BIN`) and
-   re-runs the timeout-wrapper resolution (`TIMEOUT_CMD` + `wrap`) itself
-   rather than reusing the `## Invocation` block's variables. The helper
-   files MUST live **outside the target repo** — for example in a temp
-   directory made with `mktemp -d` (untracked files
+   Bash call. As in the `## Invocation` guidance, first write the request
+   to a task file with a quoted heredoc (its own Bash call); the launch
+   block reads it back. The block below is self-contained: state does not
+   persist between Bash tool calls, so it re-resolves the pi binary
+   (`PI_BIN`) and re-runs the timeout-wrapper resolution (`TIMEOUT_CMD` +
+   `wrap`) itself rather than reusing the `## Invocation` block's
+   variables. The helper files MUST live **outside the target repo** —
+   for example in a temp directory made with `mktemp -d` (untracked files
    inside the repo enter the reviewed diff). Remove any stale files from a
    previous run so a leftover `$RC_FILE` cannot look like a completed run,
    then redirect the pi call's output to `$LOG`, the wrapper's exit code to
@@ -258,6 +284,7 @@ foreground bounded calls (`run_in_background` is NOT safe — see
    `$PID_FILE`. Note that `$LOG` grows as pi streams output and can be
    deleted after the run:
 ```bash
+bash <<'PI_DELEGATE_BLOCK'
 D=$(mktemp -d); LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"
 rm -f "$LOG" "$PID_FILE" "$RC_FILE"
 # Re-resolve the pi binary (nothing from an earlier Bash call persists).
@@ -283,6 +310,19 @@ done
 if [ -z "$TIMEOUT_CMD" ]; then
   echo "WARNING: no GNU timeout/gtimeout found — pi runs without a time limit" >&2
 fi
+# Validate the timeout knobs the same way orchestrate.sh does (positive
+# integers) before building the wrapper — a bad value must fail the
+# launch with the driver's message, not reach the timeout binary.
+PI_TIMEOUT="${PI_TIMEOUT:-1800}"
+if ! [[ "$PI_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$PI_TIMEOUT" -lt 1 ]; then
+  echo "ERROR: PI_TIMEOUT must be a positive integer (got: $PI_TIMEOUT)"
+  exit 2
+fi
+PI_KILL_AFTER="${PI_KILL_AFTER:-30}"
+if ! [[ "$PI_KILL_AFTER" =~ ^[0-9]+$ ]] || [ "$PI_KILL_AFTER" -lt 1 ]; then
+  echo "ERROR: PI_KILL_AFTER must be a positive integer (got: $PI_KILL_AFTER)"
+  exit 2
+fi
 wrap=()
 if [ -n "$TIMEOUT_CMD" ]; then
   wrap=("$TIMEOUT_CMD" --kill-after="${PI_KILL_AFTER:-30}" "${PI_TIMEOUT:-1800}")
@@ -295,15 +335,17 @@ fi
 # pi's stdin, the timeout command is never piped) so long task descriptions
 # cannot hit E2BIG.
 set -m
-( printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates > "$LOG" 2>&1; echo $? > "$RC_FILE" ) &
+( printf '%s' "$(cat <the task file from the call above>)" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates > "$LOG" 2>&1; echo $? > "$RC_FILE" ) &
 echo "$!" > "$PID_FILE"
 echo "RUN_DIR=$D"
+PI_DELEGATE_BLOCK
 ```
 
    The block above is the complete, verbatim launch — `PI_BIN`,
    `TIMEOUT_CMD` and `wrap` are all re-resolved INSIDE the block (nothing
    from an earlier Bash call persists), and the prompt goes to pi's stdin
-   via `printf`. If the user
+   via `printf` (the task file content, `$(cat <the task file from the
+call above>)` — substitute the path literally). If the user
    explicitly named a model, the only variant is the same block with
    `--model "MODEL"` appended to the pi flags (before the `>` redirect);
    otherwise omit `--model` — pi uses its configured default.
@@ -325,6 +367,7 @@ echo "RUN_DIR=$D"
    file. Replace the `D=` line with the `RUN_DIR` the launch printed
    before running:
 ```bash
+bash <<'PI_DELEGATE_BLOCK'
 D="<the RUN_DIR printed at launch>"
 LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"
 PID="$(cat "$PID_FILE" 2>/dev/null)"
@@ -344,6 +387,7 @@ else
   tail -n 20 "$LOG"
   exit 1
 fi
+PI_DELEGATE_BLOCK
 ```
 
    If one wait call is killed at its 10-minute ceiling, start the next: the
@@ -373,6 +417,7 @@ fi
    resolved pi path (or a pi invocation, matched as ` pi ` with surrounding
    whitespace to keep it self-contained) before any kill is attempted:
 ```bash
+bash <<'PI_DELEGATE_BLOCK'
 D="<the RUN_DIR printed at launch>"
 PID_FILE="$D/pi-oneshot.pid"
 PID="$(cat "$PID_FILE")"
@@ -385,14 +430,18 @@ for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HO
     break
   fi
 done
-pi_cmd="${PI_BIN:-pi}"
-if [ "$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ')" = "$PID" ] && ps -o command= -p "$PID" 2>/dev/null | grep -qF "$pi_cmd"; then
+if [ -z "$PI_BIN" ]; then
+  echo "pi path could not be resolved — cannot verify command line, skipping the kill"
+  exit 0
+fi
+if [ "$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ')" = "$PID" ] && ps -o command= -p "$PID" 2>/dev/null | grep -qF "$PI_BIN"; then
   kill -TERM -- "-$PID" 2>/dev/null || true
   sleep 5
   kill -KILL -- "-$PID" 2>/dev/null || true
 else
   echo "not a pi-delegate run group — skipping"
 fi
+PI_DELEGATE_BLOCK
 ```
 
 - `-p` — print mode: pi runs headless and emits its final text on stdout.
@@ -412,7 +461,9 @@ fi
 The same wrapper wraps the **whole** command, model flag included — never
 append `--model` to an un-wrapped call:
 ```bash
-printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates --model "MODEL"
+bash <<'PI_DELEGATE_BLOCK'
+printf '%s' "$(cat <the task file from the call above>)" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates --model "MODEL"
+PI_DELEGATE_BLOCK
 ```
 
 - If the user explicitly named a model, append `--model <model>` to the
