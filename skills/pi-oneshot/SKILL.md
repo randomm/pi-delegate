@@ -290,8 +290,6 @@ foreground bounded calls (`run_in_background` is NOT safe — see
    deleted after the run:
 ```bash
 bash <<'PI_DELEGATE_BLOCK'
-D=$(mktemp -d); LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"
-rm -f "$LOG" "$PID_FILE" "$RC_FILE"
 # The task file is a caller-provided path: substitute <the task file from the call above> literally.
 TASK_FILE="<the task file from the call above>"
 [ -s "$TASK_FILE" ] || { echo "ERROR: task file missing or empty: $TASK_FILE" >&2; exit 2; }
@@ -309,6 +307,10 @@ if ! [[ "$PI_KILL_AFTER" =~ ^[0-9]+$ ]] || [ "$PI_KILL_AFTER" -lt 1 ]; then
   echo "ERROR: PI_KILL_AFTER must be a positive integer (got: $PI_KILL_AFTER)"
   exit 2
 fi
+# Allocate the run directory only after the guards above pass, so a refused
+# launch (missing/empty task file, bad knob) leaves no temp dir behind.
+D=$(mktemp -d); LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"
+rm -f "$LOG" "$PID_FILE" "$RC_FILE"
 # Re-resolve the pi binary (nothing from an earlier Bash call persists).
 PI_BIN=""
 for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HOME/.local/bin/pi"; do

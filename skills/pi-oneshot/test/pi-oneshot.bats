@@ -259,20 +259,21 @@ skill_section() {
   # positive-integer validation orchestrate.sh runs, with the driver's
   # message, BEFORE any pi resolution, preflight or launch — the block must
   # refuse on a bad knob regardless of whether a pi binary is present.
-  local n fg detached
+  local fg detached
   fg=$(section_block "$SKILL_FILE" "## Invocation" 1)
   detached=$(long_runs_block 1)
-  for n in fg detached; do
-    printf '%s' "$fg" | grep -qF 'PI_TIMEOUT must be a positive integer'
-    printf '%s' "$fg" | grep -qF 'PI_KILL_AFTER must be a positive integer'
-    printf '%s' "$detached" | grep -qF 'PI_TIMEOUT must be a positive integer'
-    printf '%s' "$detached" | grep -qF 'PI_KILL_AFTER must be a positive integer'
-    # Validation precedes every later step (pi resolution, preflight, the
-    # wrap-array construction, the pi call) — refuse before launch.
-    for anchor in 'command -v pi' 'PI_DELEGATE_UNSAFE' 'wrap=' 'PI_BIN'; do
-      [ "$(printf '%s\n' "$fg" | grep -n 'must be a positive integer' | head -n 1 | cut -d: -f1)" -lt "$(printf '%s\n' "$fg" | grep -nF "$anchor" | head -n 1 | cut -d: -f1)" ]
-      [ "$(printf '%s\n' "$detached" | grep -n 'must be a positive integer' | head -n 1 | cut -d: -f1)" -lt "$(printf '%s\n' "$detached" | grep -nF "$anchor" | head -n 1 | cut -d: -f1)" ]
-    done
+  printf '%s' "$fg" | grep -qF 'PI_TIMEOUT must be a positive integer'
+  printf '%s' "$fg" | grep -qF 'PI_KILL_AFTER must be a positive integer'
+  printf '%s' "$detached" | grep -qF 'PI_TIMEOUT must be a positive integer'
+  printf '%s' "$detached" | grep -qF 'PI_KILL_AFTER must be a positive integer'
+  # Validation precedes every later step (pi resolution, preflight, the
+  # wrap-array construction, the pi call) — refuse before launch. Anchor the
+  # preflight check on the LIVE if-line (not the comment): a commented-out
+  # line would make the comparison a false pass, and the PI_DELEGATE_UNSAFE
+  # opt-out line is the first live occurrence in both blocks.
+  for anchor in 'command -v pi' 'if [ "${PI_DELEGATE_UNSAFE:-}"' 'wrap=' 'PI_BIN'; do
+    [ "$(printf '%s\n' "$fg" | grep -n 'must be a positive integer' | head -n 1 | cut -d: -f1)" -lt "$(printf '%s\n' "$fg" | grep -nF "$anchor" | head -n 1 | cut -d: -f1)" ]
+    [ "$(printf '%s\n' "$detached" | grep -n 'must be a positive integer' | head -n 1 | cut -d: -f1)" -lt "$(printf '%s\n' "$detached" | grep -nF "$anchor" | head -n 1 | cut -d: -f1)" ]
   done
 }
 
@@ -282,12 +283,69 @@ skill_section() {
 nopy_path() {
   local p b
   p="$(mktemp -d)"
-  for b in bash sh cat sed grep printf head tail sort mktemp mkdir rm echo; do
+  for b in bash sh cat sed grep printf head tail sort mktemp mkdir rm echo tr sleep; do
     local src
     src=$(command -v "$b")
     [ -n "$src" ] && ln -sf "$src" "$p/$b"
   done
   printf '%s' "$p"
+}
+
+# A PATH directory with nopy_path's set PLUS the bare minimum a full valid
+# foreground block needs to run end-to-end: a stub pi (records argv + stdin,
+# exits 0), a stub GNU timeout (passes through, honours a negative deadline
+# as immediate success), and the git/ps/find binaries the safety preflight
+# calls. Used to prove the allowlist is sufficient — a missing allowlist
+# binary would surface as "command not found" in the block's output.
+stub_pi_path() {
+  local p pi stub_timeout
+  p="$(nopy_path)"
+  for b in git ps find; do
+    local src
+    src=$(command -v "$b")
+    [ -n "$src" ] && ln -sf "$src" "$p/$b"
+  done
+  pi="$p/pi"
+  printf '%s\n' 'echo "STUB PI $*"' >> "$pi"
+  printf '%s\n' 'cat > /dev/null' >> "$pi"
+  printf '%s\n' 'exit 0' >> "$pi"
+  chmod +x "$pi"
+  stub_timeout="$p/timeout"
+  # -N means "deadline already passed" — the probe (--kill-after=1 1 true)
+  # and any bounded call return success immediately without running the
+  # command or sleeping.
+  printf '%s\n' 'case "${1}" in -N) exit 0 ;; esac' >> "$stub_timeout"
+  printf '%s\n' 'shift' >> "$stub_timeout"
+  printf '%s\n' 'while [ -n "${1:-}" ]; do case "${1:-}" in --*) shift ;; *) break ;; esac; done' >> "$stub_timeout"
+  printf '%s\n' 'exec "$@"' >> "$stub_timeout"
+  chmod +x "$stub_timeout"
+  printf '%s' "$p"
+}
+
+@test "pi-oneshot foreground invocation: valid launch under stub PATH runs clean (allowlist sufficient)" {
+  local dir block script out rc=0 nopy stub gitdir taskf
+  dir="$(mktemp -d)"
+  block="$(section_block "$SKILL_FILE" "## Invocation" 1)"
+  # A minimal git repo on a feature branch (not the default branch) so the
+  # preflight passes, with a task file to read.
+  gitdir="$dir/repo"
+  mkdir "$gitdir"
+  git init -q -b feature/issue-69-hermetic "$gitdir" 2>/dev/null || git init -q "$gitdir"
+  git -C "$gitdir" config user.email t@t
+  git -C "$gitdir" config user.name t
+  git -C "$gitdir" commit -q --allow-empty -m init
+  git -C "$gitdir" checkout -q -b feature/issue-69-hermetic 2>/dev/null || true
+  taskf="$dir/task.txt"
+  printf 'do it' > "$taskf"
+  nopy="$(nopy_path)"
+  stub="$(stub_pi_path)"
+  script="$dir/inv.sh"
+  printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$taskf\"|" > "$script"
+  out="$(cd "$gitdir" && HOME="$dir" PATH="$stub" bash "$script" 2>&1)" || rc=$?
+  [ "$rc" -eq 0 ]
+  grep -qF 'STUB PI -p --no-session --no-extensions --no-skills --no-prompt-templates' <<<"$out"
+  ! grep -qiF 'command not found' <<<"$out"
+  rm -rf "$dir" "$nopy" "$stub"
 }
 
 @test "pi-oneshot detached launch block validates PI_TIMEOUT=0 -> ERROR, exit 2, no RUN_DIR" {
@@ -328,46 +386,92 @@ nopy_path() {
 }
 
 @test "pi-oneshot foreground invocation: missing task file -> exit 2, no pi call" {
-  local dir block script out rc=0
+  local dir block script out rc=0 nopy
   dir="$(mktemp -d)"
   block="$(section_block "$SKILL_FILE" "## Invocation" 1)"
   # Point the task-file placeholder at a nonexistent path so the -s guard
-  # fires before any pi launch; PATH is restricted so the stub pi (if any)
-  # is unreachable.
+  # fires before any pi launch; PATH is restricted to the nopy_path set so
+  # "no pi" is real, not just unlikely.
+  nopy="$(nopy_path)"
   script="$dir/inv.sh"
   printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$dir/does-not-exist.txt\"|" > "$script"
-  out="$(HOME="$dir" bash "$script" 2>&1)" || rc=$?
+  out="$(HOME="$dir" PATH="$nopy" bash "$script" 2>&1)" || rc=$?
   [ "$rc" -eq 2 ]
   grep -qF 'ERROR: task file missing or empty: /' <<<"$out"
   ! grep -qF 'pi not found' <<<"$out"
-  rm -rf "$dir"
+  rm -rf "$dir" "$nopy"
 }
 
 @test "pi-oneshot detached launch: missing task file -> exit 2, no RUN_DIR, no pi stub" {
-  local dir block script out rc=0
+  local dir block script out rc=0 nopy tmpd
   dir="$(mktemp -d)"
   block="$(long_runs_block 1)"
+  # A restricted PATH (nopy_path: no pi, no timeout) makes "no pi" real, and
+  # a fresh TMPDIR proves a refused launch allocates NO temp dir: every
+  # mktemp in the block (task guard, run dir) would land in $tmpd.
+  nopy="$(nopy_path)"
+  tmpd="$(mktemp -d)"
   script="$dir/launch.sh"
   printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$dir/nope.txt\"|" > "$script"
-  out="$(HOME="$dir" bash "$script" 2>&1)" || rc=$?
+  out="$(HOME="$dir" PATH="$nopy" TMPDIR="$tmpd" bash "$script" 2>&1)" || rc=$?
   [ "$rc" -eq 2 ]
   grep -qF 'ERROR: task file missing or empty: /' <<<"$out"
   ! grep -qF 'RUN_DIR=' <<<"$out"
-  rm -rf "$dir"
+  [ -z "$(ls -A "$tmpd")" ]
+  rm -rf "$dir" "$nopy" "$tmpd"
 }
 
 @test "pi-oneshot detached launch: empty task file -> exit 2, no RUN_DIR" {
-  local dir block script out rc=0
+  local dir block script out rc=0 nopy tmpd
   dir="$(mktemp -d)"
   block="$(long_runs_block 1)"
+  nopy="$(nopy_path)"
+  tmpd="$(mktemp -d)"
   : > "$dir/empty.txt"
   script="$dir/launch.sh"
   printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$dir/empty.txt\"|" > "$script"
-  out="$(HOME="$dir" bash "$script" 2>&1)" || rc=$?
+  out="$(HOME="$dir" PATH="$nopy" TMPDIR="$tmpd" bash "$script" 2>&1)" || rc=$?
   [ "$rc" -eq 2 ]
   grep -qF 'ERROR: task file missing or empty: /' <<<"$out"
   ! grep -qF 'RUN_DIR=' <<<"$out"
-  rm -rf "$dir"
+  [ -z "$(ls -A "$tmpd")" ]
+  rm -rf "$dir" "$nopy" "$tmpd"
+}
+
+@test "pi-oneshot detached launch: bad PI_KILL_AFTER -> exit 2, no RUN_DIR, no temp dir" {
+  local dir block script out rc=0 nopy tmpd taskf
+  dir="$(mktemp -d)"
+  block="$(long_runs_block 1)"
+  nopy="$(nopy_path)"
+  tmpd="$(mktemp -d)"
+  taskf="$(mktemp)"
+  printf 'do it' > "$taskf"
+  script="$dir/launch.sh"
+  printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$taskf\"|" > "$script"
+  out="$(HOME="$dir" PATH="$nopy" TMPDIR="$tmpd" PI_KILL_AFTER=0 bash "$script" 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ]
+  grep -qF 'PI_KILL_AFTER must be a positive integer' <<<"$out"
+  ! grep -qF 'RUN_DIR=' <<<"$out"
+  [ -z "$(ls -A "$tmpd")" ]
+  rm -f "$taskf"; rm -rf "$dir" "$nopy" "$tmpd"
+}
+
+@test "pi-oneshot detached launch: bad PI_TIMEOUT -> exit 2, no RUN_DIR, no temp dir" {
+  local dir block script out rc=0 nopy tmpd taskf
+  dir="$(mktemp -d)"
+  block="$(long_runs_block 1)"
+  nopy="$(nopy_path)"
+  tmpd="$(mktemp -d)"
+  taskf="$(mktemp)"
+  printf 'do it' > "$taskf"
+  script="$dir/launch.sh"
+  printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$taskf\"|" > "$script"
+  out="$(HOME="$dir" PATH="$nopy" TMPDIR="$tmpd" PI_TIMEOUT=0 bash "$script" 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ]
+  grep -qF 'PI_TIMEOUT must be a positive integer' <<<"$out"
+  ! grep -qF 'RUN_DIR=' <<<"$out"
+  [ -z "$(ls -A "$tmpd")" ]
+  rm -f "$taskf"; rm -rf "$dir" "$nopy" "$tmpd"
 }
 
 @test "pi-oneshot SKILL.md abort skips the kill when pi cannot be resolved (exit 3)" {
