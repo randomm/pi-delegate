@@ -974,6 +974,100 @@ F
   [[ "$out" == *"PI_KILL_AFTER"* ]]
 }
 
+# --- Issue #57: stderr separation + stopReason fallback ----------------
+
+@test "STDERR: non-JSON stderr lines do not break stdout JSON parsing" {
+  # Issue #57: pi's stderr (console.error diagnostics/warnings) must not
+  # reach the driver's stdout parse. The fixture sends two non-JSON lines
+  # to stderr and a valid message_end (stopReason: stop) to stdout; the
+  # driver must parse the transcript normally and the verdict must be
+  # extracted (no jq parse error, no INCOMPLETE).
+  cat > "$FIXTURES_DIR/1" <<'F'
+STDERR:2
+pi: warning: provider response was slow
+[warn] non-json diagnostic line
+{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"Developed it."}]}}
+F
+  fixture 2 'Looks fine.' 'VERDICT: APPROVED'
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  [ "$(pi_calls)" -eq 2 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
+}
+
+@test "stopReason toolUse: fallback to last assistant message with text content" {
+  # Issue #57: a run that ends on a toolUse stop has no stopReason=="stop"
+  # message; the driver must fall back to the last assistant message_end
+  # with any text content — in practice the report. The fixture emits an
+  # assistant message that ended on toolUse (no terminal stop) carrying the
+  # verdict, followed by a tool message (not assistant, no text).
+  cat > "$FIXTURES_DIR/2" <<'F'
+{"type":"message_end","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"text","text":"I checked the diff."},{"type":"toolCall","id":"t1"}]}}
+{"type":"message_end","message":{"role":"tool","stopReason":"toolUse","content":[{"type":"toolResult","toolCallId":"t1"}]}}
+{"type":"message_end","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"text","text":"Looks fine overall."},{"type":"text","text":"VERDICT: APPROVED"}]}}
+F
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
+}
+
+@test "stopReason length: fallback picks the LAST assistant message with text, not the first" {
+  # The fallback must be the LAST assistant message with text, so a later
+  # correction supersedes an earlier verdict mention. Two assistant
+  # messages end on "length" (truncated mid-run); the last one carries the
+  # real verdict.
+  cat > "$FIXTURES_DIR/2" <<'F'
+{"type":"message_end","message":{"role":"assistant","stopReason":"length","content":[{"type":"text","text":"Draft: VERDICT: ISSUES_FOUND"}]}}
+{"type":"message_end","message":{"role":"assistant","stopReason":"length","content":[{"type":"text","text":"Correction: the diff is actually fine. VERDICT: APPROVED"}]}}
+F
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
+}
+
+@test "stopReason error: fallback text is captured in raw_output" {
+  # A run that ends on an error stop still produced an assistant message
+  # with text (e.g. the model cut off before finishing). The fallback text
+  # must be available in the JSON summary's raw_output — not empty.
+  cat > "$FIXTURES_DIR/2" <<'F'
+{"type":"message_end","message":{"role":"assistant","stopReason":"error","content":[{"type":"text","text":"UNIQUE-ERROR-STOP-REPORT"}]}}
+F
+  run_driver "do it"
+  # No verdict in the fallback text -> INCOMPLETE, but raw_output carries
+  # the message (the current call's transcript, not an empty string).
+  [ "$status" -eq 2 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .status)" = "INCOMPLETE" ]
+  [ "$(printf '%s' "$out" | jq -r .raw_output)" = "UNIQUE-ERROR-STOP-REPORT" ]
+}
+
+@test "stopReason stop takes precedence over the fallback (terminal message wins)" {
+  # When a terminal stop message exists, the primary parse wins and the
+  # fallback (which would return the LAST text-bearing message) must not
+  # apply. Two messages: the first ends on toolUse with one verdict, the
+  # last ends on stop with the real verdict.
+  cat > "$FIXTURES_DIR/2" <<'F'
+{"type":"message_end","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"text","text":"Early: VERDICT: ISSUES_FOUND"}]}}
+{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"Final: VERDICT: APPROVED"}]}}
+F
+  run_driver "do it"
+  [ "$status" -eq 0 ]
+  local out
+  out="$(tail_json)"
+  [ "$(printf '%s' "$out" | jq -r .verdict)" = "APPROVED" ]
+  [ "$(printf '%s' "$out" | jq -r .status)" = "PASS" ]
+}
+
 # --- Issue #16 coverage: verdict variants, round-cap sentinel, mid-loop INCOMPLETE, JSON shape
 
 # --- Verdict parser: case-insensitive variants --------------------------------
