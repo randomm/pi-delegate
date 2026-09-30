@@ -1363,3 +1363,59 @@ EOF
   jq -e '.restored_test_files == []' "$grade_file" >/dev/null
   jq -e '.pass == true' "$grade_file" >/dev/null
 }
+
+# Adversarial review of #71: the old awk word-split broke paths containing
+# spaces (truncating `src/new file.py` to `src/new`), so a patch touching a
+# space-containing path was mis-parsed and `git apply` failed. The new
+# bash parameter-expansion extractor preserves spaces in paths.
+@test "grade.sh: patch path with spaces is restored and applied" {
+  local run_num=23
+  local run_dir="$BENCH_OUT/$TASK_ID/A/$run_num"
+  local repo_dir="$run_dir/repo"
+
+  # Create a task whose repo has a file with spaces in the path.
+  local space_repo="$BENCH_OUT/space-repo"
+  git init -q -b main "$space_repo"
+  git -C "$space_repo" config user.email t@t.t
+  git -C "$space_repo" config user.name t
+  echo "x" > "$space_repo/src dir b.txt"
+  git -C "$space_repo" add "src dir b.txt"
+  git -C "$space_repo" commit -qm "add space file"
+  local space_base="$(git -C "$space_repo" rev-parse HEAD)"
+
+  # Write the space-path task.env into the shared TASK_DIR (overwriting the
+  # existing grading.patch and task.env) — but save/restore them first so other
+  # tests that use $TASK_ID are unaffected.
+  local saved_task_env="$TASK_DIR/task.env"
+  local saved_patch="$TASK_DIR/grading.patch"
+  cp "$saved_patch" "$BENCH_OUT/saved-grading.patch"
+  cp "$saved_task_env" "$BENCH_OUT/saved-task.env"
+  printf 'diff --git a/src dir b.txt b/src dir b.txt\nindex 1234567..89abcde 100644\n--- a/src dir b.txt\n+++ b/src dir b.txt\n@@ -1 +1 @@\n-x\n+y\n' \
+    > "$TASK_DIR/grading.patch"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$space_repo
+BASE_SHA=$space_base
+FIX_SHA=$space_base
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+
+  # Set up the run and tamper the file (simulating an agent edit).
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A "$run_num"
+  [ "$status" -eq 0 ]
+  echo "tamper" > "$repo_dir/src dir b.txt"
+
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A "$run_num"
+  [ "$status" -eq 0 ]
+  local grade_file="$run_dir/grade.json"
+  [ -f "$grade_file" ]
+  # The full path (with the space) is recorded in restored_test_files.
+  jq -e '.restored_test_files == ["src dir b.txt"]' "$grade_file" >/dev/null
+  # The patch was applied successfully (the file contains the post-patch content).
+  [ "$(cat "$repo_dir/src dir b.txt")" = "y" ]
+  jq -e '.pass == true' "$grade_file" >/dev/null
+
+  # Restore the shared task files.
+  cp "$BENCH_OUT/saved-grading.patch" "$TASK_DIR/grading.patch"
+  cp "$BENCH_OUT/saved-task.env" "$TASK_DIR/task.env"
+}

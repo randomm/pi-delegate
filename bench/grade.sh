@@ -127,20 +127,38 @@ fi
 #
 # The file list is derived from the patch itself: a `diff --git a/<old> b/<new>`
 # line (old/new relative to the repo root) with the old path empty (/dev/null)
-# meaning the patch creates the file.
-# Parse the patch header to extract two lists:
-#   patch_files_json  – files the patch MODIFIES (old path is not /dev/null)
-#   patch_created_json – files the patch CREATES (old path is /dev/null)
+# meaning the patch creates the file. The extractor is anchored and space-safe
+# (adversarial review of #71: an awk word-split broke paths containing spaces,
+# truncating `src/new file.py` to `src/new`): the header is stripped of the
+# `a/` prefix and everything from ` b/` on, leaving the whole old path intact
+# (spaces preserved); the new path is everything after the first ` b/`.
 patch_files_json="[]"
 patch_created_json="[]"
 restored_json="[]"
 _h="$(timeout 60 grep -F -- 'diff --git ' "$patch_path" 2>/dev/null)" || _h=""
 if [ -n "$_h" ]; then
-  # Extract a/<old> b/<new> pairs, strip the a/ and b/ prefixes, then split
-  # into modified (old != /dev/null) and created (old == /dev/null).
-  patch_files_json="$(printf '%s\n' "$_h" | awk '{sub(/^a\//, "", $3); sub(/^b\//, "", $4); if ($3 != "/dev/null") print $3}' | jq -Rn '[inputs]')" || patch_files_json="[]"
-  patch_created_json="$(printf '%s\n' "$_h" | awk '{sub(/^a\//, "", $3); sub(/^b\//, "", $4); if ($3 == "/dev/null") print $4}' | jq -Rn '[inputs]')" || patch_created_json="[]"
+  while IFS= read -r _hdr; do
+    _rest="${_hdr#"diff --git "}"
+    _old_path="${_rest#a/}"
+    _old_path="${_old_path%% b/*}"
+    _new_path="${_rest#* b/}"
+    # The file is CREATED when the old side is /dev/null. (A standard `git diff`
+    # patch writes real paths on both a/ and b/ sides and marks creation in the
+    # `--- /dev/null` line; those files simply do not appear in the patch
+    # header as /dev/null — the created-file case is only reached by patches
+    # explicitly using the /dev/null form, e.g. hand-written or git diff
+    # --no-index style.)
+    if [ -n "$_old_path" ] && [ "$_old_path" != "/dev/null" ]; then
+      patch_files_json="$(jq -cn --argjson acc "$patch_files_json" --arg p "$_old_path" '$acc + [$p]')" || patch_files_json="[]"
+    elif [ -n "$_new_path" ] && [ "$_new_path" != "$_rest" ]; then
+      patch_created_json="$(jq -cn --argjson acc "$patch_created_json" --arg p "$_new_path" '$acc + [$p]')" || patch_created_json="[]"
+    fi
+  done <<< "$_h"
 fi
+# Renames (`diff --git a/old b/new`): the old path is restored to BASE below
+# (it appears in the modified list) and the new path is left as the agent left
+# it — its content ships in the patch hunk, so there is no separate restore.
+
 # For each file the patch modifies: if the working tree differs from BASE
 # (agent modified it) or it is absent, restore it from BASE and record it.
 # `git diff --quiet <base> -- <file>` is empty when the tree matches BASE.
