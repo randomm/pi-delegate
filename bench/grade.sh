@@ -8,10 +8,20 @@
 # What it does:
 #   1. Loads task.env (REPO, BASE_SHA, FIX_COMMIT, TEST_CMD, GRADING_PATCH).
 #   2. cd's into <run-dir>/repo (the fresh clone from setup-run.sh).
-#   3. Applies <task-dir>/<GRADING_PATCH> with `git apply`.
-#   4. Runs TEST_CMD (from task.env) in the repo directory.
-#   5. Writes <run-dir>/grade.json with pass/fail, test_cmd, and the
-#      grading-patch path.
+#   3. Restores every file the grading patch touches to its BASE version
+#      (tracked files the patch modifies → `git checkout HEAD -- <path>`;
+#      files the patch creates → deleted if present). The agent's edits to
+#      those files are the only thing that can block `git apply`, and they
+#      are irrelevant to grading (the grading tests are the ground truth),
+#      so the harness normalises them away instead of failing the run.
+#      Files the agent had modified are recorded as
+#      `restored_test_files: [...]` in grade.json. (Dry-run 4: arm A edited
+#      tests/test_utils/test_sentinel.py and the patch no longer applied;
+#      a manual revert was needed.)
+#   4. Applies <task-dir>/<GRADING_PATCH> with `git apply`.
+#   5. Runs TEST_CMD (from task.env) in the repo directory.
+#   6. Writes <run-dir>/grade.json with pass/fail, test_cmd, the
+#      grading-patch path, and restored_test_files.
 #
 # Exit codes:
 #   0  tests passed
@@ -19,12 +29,13 @@
 #   2  setup error (missing run dir, missing grading patch, git apply failed)
 #   3  grading patch could not be applied (conflict / already applied)
 #
-# NOTE: This script does NOT check out a clean tree before applying the
-# patch. The working tree is whatever the agent (Claude/pi) left behind.
-# This is intentional: the grading patch is a diff of test files only,
-# and `git apply` will fail if the agent modified the same test files
-# (which would be a signal that the agent "cheated" by editing tests —
-# a documented edge case in docs/benchmark.md §grading).
+# NOTE: Before applying the patch, every file the patch touches is restored
+# to its BASE version (see step 3 above). The working tree is otherwise
+# whatever the agent (Claude/pi) left behind: the grading patch is a diff of
+# test files only, and agent edits to non-test files must survive into the
+# test run (that is the actual change under test). Restoring the patch's own
+# files is NOT a cheat signal — it is the grading contract: the graded test
+# files are the ground truth, so the agent's version of them is discarded.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,10 +90,60 @@ patch_path="$(cd "$(dirname "$patch_path")" && pwd)/$(basename "$patch_path")"
 
 cd "$repo_dir"
 
+# --- Restore the patch's files to BASE ----------------------------------------
+# The grading patch is a test-only diff. If the agent edited any of the files
+# it touches, `git apply` fails and the run is ungradeable. Those edits carry
+# no grading signal (the graded test files are the ground truth), so we
+# normalise the tree first: restore every file the patch MODIFIES to its BASE
+# version and delete every file the patch CREATES (if present). This makes
+# grading robust to agent test-file edits (issue #71) while leaving the
+# agent's non-test changes — the change under test — untouched.
+#
+# The file list is derived from the patch itself: a `diff --git a/<old> b/<new>`
+# line (old/new relative to the repo root) with the old path empty (/dev/null)
+# meaning the patch creates the file.
+# Parse the patch header to extract two lists:
+#   patch_files_json  – files the patch MODIFIES (old path is not /dev/null)
+#   patch_created_json – files the patch CREATES (old path is /dev/null)
+patch_files_json="[]"
+patch_created_json="[]"
+restored_json="[]"
+_h="$(timeout 60 grep -F -- 'diff --git ' "$patch_path" 2>/dev/null)" || _h=""
+if [ -n "$_h" ]; then
+  # Extract a/<old> b/<new> pairs, strip the a/ and b/ prefixes, then split
+  # into modified (old != /dev/null) and created (old == /dev/null).
+  patch_files_json="$(printf '%s\n' "$_h" | awk '{sub(/^a\//, "", $3); sub(/^b\//, "", $4); if ($3 != "/dev/null") print $3}' | jq -Rn '[inputs]')" || patch_files_json="[]"
+  patch_created_json="$(printf '%s\n' "$_h" | awk '{sub(/^a\//, "", $3); sub(/^b\//, "", $4); if ($3 == "/dev/null") print $4}' | jq -Rn '[inputs]')" || patch_created_json="[]"
+fi
+# For each file the patch modifies: if the working tree differs from BASE
+# (agent modified it) or it is absent, restore it from BASE and record it.
+# `git diff --quiet HEAD -- <file>` is empty when the tree matches BASE.
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  if ! timeout 60 git diff --quiet HEAD -- "$p" 2>/dev/null; then
+    timeout 60 git checkout HEAD -- "$p" >/dev/null 2>&1 || true
+    restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" || true
+  elif [ ! -f "$p" ]; then
+    # File was deleted by the agent (tracked at BASE, missing in the tree).
+    timeout 60 git checkout HEAD -- "$p" >/dev/null 2>&1 || true
+    restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" || true
+  fi
+done < <(jq -r '.[]' <<< "$patch_files_json" 2>/dev/null)
+# For each file the patch creates: delete it if present (a stray copy of the
+# graded test file left by the agent would break `git apply`).
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  if [ -f "$p" ]; then
+    rm -f -- "$p" || true
+    restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" || true
+  fi
+done < <(jq -r '.[]' <<< "$patch_created_json" 2>/dev/null)
+
 # --- Apply the grading patch ---------------------------------------------------
-# git apply fails if the patch conflicts with the working tree (e.g. the
-# agent edited the same test files). We record that as a failure (exit 3)
-# because the grading contract cannot be verified in that case.
+# git apply fails if the patch conflicts with the working tree. After the
+# restore step above the conflict is expected to be gone; if it still fails
+# we record it as a failure (exit 3) because the grading contract cannot be
+# verified in that case.
 apply_err="$run_dir/apply-err.log"
 if ! timeout 120 git apply --whitespace=nowarn "$patch_path" 2> "$apply_err"; then
   echo "grade: git apply failed (see $apply_err):" >&2
@@ -97,8 +158,10 @@ if ! timeout 120 git apply --whitespace=nowarn "$patch_path" 2> "$apply_err"; th
     --arg test_cmd "$TEST_CMD" \
     --arg patch "$patch_path" \
     --arg error "git apply failed" \
+    --argjson restored "$restored_json" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
+      restored_test_files:$restored,
       pass:false, error:$error, graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2
@@ -127,9 +190,11 @@ if [ "$test_rc" -eq 0 ]; then
     --arg test_cmd "$TEST_CMD" \
     --arg patch "$patch_path" \
     --arg test_log "$test_log" \
+    --argjson restored "$restored_json" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
-      test_log:$test_log, pass:true, error:null, graded_at:$graded_at}' \
+      test_log:$test_log, restored_test_files:$restored,
+      pass:true, error:null, graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2
       exit 2
@@ -145,9 +210,11 @@ else
     --arg patch "$patch_path" \
     --arg test_log "$test_log" \
     --argjson test_rc "$test_rc" \
+    --argjson restored "$restored_json" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
-      test_log:$test_log, test_rc:$test_rc, pass:false, error:"test command exited '"$test_rc"'",
+      test_log:$test_log, restored_test_files:$restored,
+      test_rc:$test_rc, pass:false, error:"test command exited '"$test_rc"'",
       graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2

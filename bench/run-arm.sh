@@ -42,9 +42,17 @@
 #   5. Build the prompt: prompt.md + (arm B) delegation suffix.
 #   6. Run: claude -p <prompt> --output-format json --model <model>
 #          --permission-mode <mode>
-#      with the run's CLAUDE_CONFIG_DIR and PATH prefixed with the shim.
+#      with the run's CLAUDE_CONFIG_DIR, PATH prefixed with the shim, and
+#      **the task checkout as the working directory** (the script cd's into
+#      <run-dir>/repo before launching claude, so the run is independent of
+#      the caller's cwd — Claude Code refuses a task whose source tree is not
+#      the current directory, which bit the dry-run 4 invocation launched
+#      from the pi-delegate repo).
 #      agent_ms (ms-resolution, run-arm start → claude exit) is recorded in
-#      run-meta.json alongside claude's own duration_ms.
+#      run-meta.json alongside claude's own duration_ms, and the claude
+#      wall-clock start/stop are written with millisecond precision
+#      (started_ms/ended_ms) so collect.sh can compute wall_clock_ms without
+#      the second-resolution truncation that read wall_clock_ms to 0.
 #   7. Save claude's raw JSON output to <run-dir>/claude/output.json.
 #
 # Exit codes:
@@ -238,6 +246,13 @@ fi
 # side's figure and includes prompt/stdin setup and wrapper overhead).
 agent_start_ms="$(now_ms)"
 
+# Run claude in the task checkout, not the caller's cwd. Claude Code refuses
+# a task whose source tree is not the current working directory (the dry-run
+# 4 launch from the pi-delegate repo failed this way), so the script cd's
+# into the run's own checkout before the invocation. All claude output paths
+# are absolute, so the cd does not change where output.json is written.
+cd "$repo_dir"
+
 # PATH is prefixed with the shim's bin dir so that Claude's Bash tool
 # resolves `pi` to the shim (the shim then execs the real pi).
 # CLAUDE_CONFIG_DIR isolates this run's plugin/config state.
@@ -285,10 +300,14 @@ jq -cn \
   --argjson agent_ms "$agent_ms" \
   --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg ended_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --argjson started_ms "${agent_start_ms:-null}" \
+  --argjson ended_ms "${agent_end_ms:-null}" \
   '{task:$task, arm:$arm, run:$run, model:$model, perm_mode:$perm_mode,
     pi_delegate_sha:$pi_delegate_sha, config_dir:$config_dir,
     prompt_file:$prompt_file, claude_exit:$claude_exit, agent_ms:$agent_ms,
-    started_at:$started_at, ended_at:$ended_at}' \
+    started_at:$started_at, ended_at:$ended_at,
+    started_ms: (if $started_ms == null then null else $started_ms end),
+    ended_ms: (if $ended_ms == null then null else $ended_ms end)}' \
   > "$run_dir/run-meta.json"
 
 if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then

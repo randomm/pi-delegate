@@ -263,7 +263,7 @@ A `pi` wrapper at `<run-dir>/bin/pi`, prepended to `PATH`, that:
   "pi_delegate_commit": "<pinned sha>",
   "target_commit": "3cbcf9b…",
   "claude": {
-    "cost_usd": 0.42, "duration_ms": 42000,
+    "cost_usd": 0.42, "duration_ms": 42000, "duration_api_ms": 40000,
     "permission_denials": [ … ], "is_error": false,
     "model_usage": { "<model>": { "input_tokens": …, "output_tokens": …,
       "cache_read": …, "cache_creation": …, "cost_usd": … } },
@@ -272,11 +272,18 @@ A `pi` wrapper at `<run-dir>/bin/pi`, prepended to `PATH`, that:
   "pi": [
     { "argv": [ … ], "duration_ms": 5000, "exit": 0, "mode": "json",
       "call_id": "…",
-      "tokens": { "input": …, "output": …, "cache_read": …, "cache_write": …, "total": … } },
+      "tokens": { "input": …, "output": …, "cache_read": …, "cache_write": …, "total": …,
+        "per_model": { "<model>": { "input": …, "output": …, "cache_read": …,
+          "cache_write": …, "total": … } } } },
     { "argv": [ … ], "duration_ms": 2000, "exit": 0, "mode": "text",
       "call_id": "…", "tokens": null }
   ],
+  "pi_call_count": 2,
+  "delegation_exercised": true,
+  "pi_tokens_total": { "<model>": { "input": …, "output": …, "cache_read": …,
+    "cache_write": …, "total": … } },
   "grade": { "pass": true, "test_cmd": "…", "error": null },
+  "agent_ms": 900000,
   "wall_clock_ms": 900000
 }
 ```
@@ -284,10 +291,11 @@ A `pi` wrapper at `<run-dir>/bin/pi`, prepended to `PATH`, that:
 `collect.sh` **validates with a single jq program** before emitting:
 required fields present (`task`, `arm`, `run`, `grade`), a **null grade
 never passes validation**, `grade.pass` boolean, `claude.duration_ms` /
-`claude.cost_usd` numeric-or-null, and `pi[].duration_ms` and `pi[].tokens.*`
-numeric when non-null. A malformed run fails loudly (exit 2) instead of
-polluting the report. Duplicate `task`/`arm`/`run` lines (i.e. duplicate
-pi-call entries in `pi-calls.jsonl`) are refused.
+`claude.duration_api_ms` / `claude.cost_usd` numeric-or-null, `pi_call_count`
+numeric, `pi_tokens_total` object-or-null, and `pi[].duration_ms` and
+`pi[].tokens.*` numeric when non-null. A malformed run fails loudly (exit 2)
+instead of polluting the report. Duplicate `task`/`arm`/`run` lines (i.e.
+duplicate pi-call entries in `pi-calls.jsonl`) are refused.
 
 ### Cost basis
 
@@ -317,7 +325,22 @@ oneshot, which changes the skill's documented behaviour and was ruled out.
 
 ## How to run
 
+The OAuth token must be passed on the command line as an env prefix — never
+as a standalone export (a stray `echo $CLAUDE_CODE_OAUTH_TOKEN` in an error
+path would leak it into a log or terminal history):
+
 ```bash
+CLAUDE_CODE_OAUTH_TOKEN="$(security find-generic-password -s Claude\ Code-credentials -w 2>/dev/null)" \
+  bench/run-arm.sh click-sentinel-pickle A 1
+```
+
+After collecting results, scan the run output for any leaked token:
+
+```bash
+grep -rl 'sk-ant-oat01-' "$BENCH_OUT" && echo "TOKEN LEAKED" || echo "clean"
+```
+
+```
 # MVS, one run per arm on the mechanical task (pipeline dry run)
 bench/setup-run.sh click-sentinel-pickle A 1
 bench/run-arm.sh    click-sentinel-pickle A 1
@@ -327,6 +350,10 @@ bench/collect.sh    click-sentinel-pickle A 1
 
 # Full matrix: loop task × arm × run over the task list above.
 ```
+
+**Disk use:** one run pair (arms A + B for one task) uses ~44 MB of disk
+under `$BENCH_OUT` (the repo checkout, venv, and per-run transcripts).
+After collecting, clean up with `rm -rf "$BENCH_OUT"`.
 
 Environment overrides: `BENCH_OUT`, `CLAUDE_MODEL` (default: the literal
 id `claude-sonnet-5-5`), `CLAUDE_PERM_MODE`, `PI_DELEGATE_REPO` (default:
@@ -342,12 +369,33 @@ override),
 - **Claude cost**: `claude.cost_usd` + `claude.model_usage` (tokens per model).
 - **pi cost**: `pi[].tokens` per call; sum per arm and apply the stated cost
   basis before comparing to arm A.
-- **Wall clock**: `claude.duration_ms` (claude API time — the **comparison
-  metric** between arms) and `wall_clock_ms` (harness-side run time).
-  `run-meta.json` also records `agent_ms` (harness-side start→claude-exit,
-  ms resolution), `setup_ms` and `grade_ms` are recorded separately by the
-  setup/grade scripts, and `claude.duration_ms` is claude's own figure.
-  Use `claude.duration_ms` for the arm-to-arm comparison.
+- **Time comparison**:
+  - `claude.duration_ms` — Claude's **session wall clock** (includes tool
+    execution and any foreground Bash calls waiting on pi). **Not** pure API
+    time; can be smaller or larger than `duration_api_ms`.
+  - `claude.duration_api_ms` — Claude's **API time only** (model inference
+    excluding tool execution). Can exceed `duration_ms` (live evidence:
+    29904 > 20690 in dry-run 4 arm B).
+  - `wall_clock_ms` — run wall clock (Claude start → end), ms resolution.
+    Uses `run-meta.json` `started_ms`/`ended_ms` when present; falls back to
+    second-resolution `started_at`/`ended_at`; then `setup_at`→`graded_at`.
+  - `agent_ms` — harness-side start→claude-exit, ms resolution (from
+    `run-meta.json`). The **primary cross-arm comparison metric** (includes
+    pi wait time for arm B).
+- **Delegation flag** (arm B only):
+  - `pi_call_count` — number of pi calls (0 if `pi-calls.jsonl` absent).
+  - `delegation_exercised` — arm B: `true` iff `pi_call_count > 0`; arm A:
+    `null` (arm A's pi calls are accidental and not a delegation signal).
+  - Arm-B runs with `delegation_exercised == false` are **skill failures**
+    (Claude never invoked pi). Filter them out before computing arm-B
+    averages: `jq 'select(.arm == "B" and .delegation_exercised == true)'`.
+  - The flag does **not** rewrite `grade.pass`; a zero-pi arm-B run that
+    passes the tests is still `grade.pass == true` but must be reported
+    separately.
+- **pi tokens per model**: `pi_tokens_total` — per-model totals summed over
+  all json-mode pi calls (input, output, cache_read, cache_write, total).
+  Null when no json-mode call recorded usage (all text-mode or no
+  transcripts). Use for the pi side of the cost comparison.
 - **Intervention proxy**: `claude.permission_denials` under the fixed
   `auto` permission mode.
 - **Arm B internals**: `pi[]` call list (loop verdict/rounds are in the
@@ -359,11 +407,21 @@ override),
   of the same arm share nothing (each run has its own config dir).
 - The pi shim's `--no-context-files` injection is idempotent but string-based;
   it does not parse `--no-context-files=…` (pi uses the plain form).
-- `collect.sh` wall-clock is setup→grade (includes claude + grading), not
-  claude-only; use `claude.duration_ms` for the claude-only figure.
+- `delegation_exercised` is a proxy: it flags arm-B runs with zero pi calls,
+  which usually mean Claude never invoked pi (a skill failure). A run that
+  delegated but whose pi call produced no transcript (e.g. a crash before
+  the first message) will still have `pi_call_count > 0` and thus
+  `delegation_exercised == true` even though no useful work was done.
+  Cross-check against `pi[]` entries and per-call transcripts for a
+  definitive answer.
 - Grading is test-only patch + TEST_CMD; it does not diff the agent's change
   against the historical fix (that would require the non-test diff, which is
-  intentionally withheld from the agent to avoid leakage).
+  intentionally withheld from the agent to avoid leakage). Before applying
+  the patch, `grade.sh` restores every file the patch touches to its BASE
+  version (tracked files → `git checkout HEAD -- <path>`; patch-created files
+  → deleted if present) and records the affected files in
+  `restored_test_files` in `grade.json`. This makes grading robust to agent
+  test-file edits (issue #71 dry-run 4) without leaking the fix to the agent.
 - The contamination guard relies on `git fetch --depth=1` not fetching
   additional objects. A future git version change could alter this
   behaviour; the BATS test verifies the guard on every run.

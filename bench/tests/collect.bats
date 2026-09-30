@@ -54,11 +54,13 @@ setup() {
   git commit -qm "add world"
   FIX_SHA="$(git rev-parse HEAD)"
   cat > "$TASK_DIR/grading.patch" <<'EOF'
-diff --git a/extra-test.txt b/extra-test.txt
-new file mode 100644
-index 0000000..e69de29
---- /dev/null
-+++ b/extra-test.txt
+diff --git a/hello.txt b/hello.txt
+index 1234567..89abcde 100644
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-hello
++hello modified
 EOF
   cat > "$TASK_DIR/prompt.md" <<'EOF'
 Test prompt for setup-run BATS.
@@ -292,6 +294,185 @@ EOF
   run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 12
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.wall_clock_ms == 10000' >/dev/null
+}
+
+# --- collect.sh: wall clock prefers ms-resolution started_ms/ended_ms (issue #71) -----------
+# The old second-resolution pair read wall_clock_ms to 0 for sub-second runs.
+# With the ms-resolution fields present, the sub-second run must NOT be 0.
+@test "collect.sh: wall clock prefers ms-resolution started_ms/ended_ms over second-resolution" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/30"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # 12 ms wall clock, 36 ms agent. The second-resolution pair would be 0
+  # (both timestamps fall in the same second); the ms pair is the true value.
+  cat > "$run_dir/run-meta.json" <<'EOF'
+{"task":"issue-41-mech","arm":"A","run":30,"model":"claude-sonnet-5-5",
+ "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
+ "claude_exit":0,"agent_ms":36,
+ "started_at":"2026-09-29T12:00:00Z","ended_at":"2026-09-29T12:00:00Z",
+ "started_ms":1761787200000,"ended_ms":1761787200012}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 30
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.wall_clock_ms == 12' >/dev/null
+  echo "$output" | jq -e '.agent_ms == 36' >/dev/null
+}
+
+# --- collect.sh: wall clock falls back to second-resolution when ms absent ---------------
+@test "collect.sh: wall clock falls back to second-resolution when ms fields absent" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/31"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # No started_ms/ended_ms; second-resolution only → 5 s wall clock.
+  cat > "$run_dir/run-meta.json" <<'EOF'
+{"task":"issue-41-mech","arm":"A","run":31,"model":"claude-sonnet-5-5",
+ "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
+ "claude_exit":0,
+ "started_at":"2026-09-29T12:00:00Z","ended_at":"2026-09-29T12:00:05Z"}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 31
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.wall_clock_ms == 5000' >/dev/null
+  echo "$output" | jq -e '.agent_ms == null' >/dev/null
+}
+
+# --- collect.sh: claude.duration_api_ms is recorded (issue #71) -------------------------
+@test "collect.sh: records claude.duration_api_ms from output.json" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/32"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 32
+  [ "$status" -eq 0 ]
+  # The fixture carries duration_ms=42000 and duration_api_ms=40000.
+  echo "$output" | jq -e '.claude.duration_ms == 42000' >/dev/null
+  echo "$output" | jq -e '.claude.duration_api_ms == 40000' >/dev/null
+}
+
+# --- collect.sh: duration_api_ms degrades to null when absent (older runs) ---------------
+@test "collect.sh: claude.duration_api_ms degrades to null when absent" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/33"
+  mkdir -p "$run_dir/claude"
+  # Strip duration_api_ms from the fixture to simulate an older run.
+  jq 'del(.duration_api_ms)' "$FIXTURES/claude-output-armA.json" > "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 33
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.claude.duration_api_ms == null' >/dev/null
+}
+
+# --- collect.sh: pi_call_count and delegation_exercised (arm A + arm B) ----------------
+@test "collect.sh: arm A with pi calls — pi_call_count numeric, delegation_exercised null" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/34"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  cp "$FIXTURES/pi-calls.jsonl"          "$run_dir/pi-calls.jsonl"
+  cp "$FIXTURES/pi-transcript-call1.jsonl" "$run_dir/pi-1700000000000_12345.jsonl"
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 34
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.pi_call_count == 2' >/dev/null
+  echo "$output" | jq -e '.delegation_exercised == null' >/dev/null
+}
+
+@test "collect.sh: arm B with ≥1 pi call → delegation_exercised true" {
+  run_dir="$BENCH_OUT/$MECH_ID/B/1"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  cp "$FIXTURES/pi-calls.jsonl"          "$run_dir/pi-calls.jsonl"
+  cp "$FIXTURES/pi-transcript-call1.jsonl" "$run_dir/pi-1700000000000_12345.jsonl"
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" B 1
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.pi_call_count == 2' >/dev/null
+  echo "$output" | jq -e '.delegation_exercised == true' >/dev/null
+}
+
+# --- collect.sh: zero-pi arm-B run → delegation_exercised false (skill failure) -------------
+# This is the "skill failure" run the docs instruct readers to report separately;
+# the flag is in the collect line, and the grade is NOT rewritten by it.
+@test "collect.sh: arm B with zero pi calls → delegation_exercised false, grade unchanged" {
+  run_dir="$BENCH_OUT/$MECH_ID/B/2"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # No pi-calls.jsonl → zero pi calls.
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" B 2
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.pi_call_count == 0' >/dev/null
+  echo "$output" | jq -e '.delegation_exercised == false' >/dev/null
+  # The flag does not rewrite the grade.
+  echo "$output" | jq -e '.grade.pass == true' >/dev/null
+}
+
+# --- collect.sh: pi_tokens_total per model (summed across calls) -------------------------
+@test "collect.sh: pi_tokens_total aggregates per-model totals across calls" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/35"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # Two json-mode calls, two distinct models.
+  cat > "$run_dir/pi-calls.jsonl" <<'EOF'
+{"argv":["--mode","json"],"duration_ms":1000,"exit":0,"mode":"json","call_id":"200_1"}
+{"argv":["--mode","json"],"duration_ms":2000,"exit":0,"mode":"json","call_id":"200_2"}
+EOF
+  # Call 1: one assistant turn, model-a.
+  cat > "$run_dir/pi-200_1.jsonl" <<'EOF'
+{"type":"message_end","message":{"role":"assistant","usage":{"input":10,"output":20,"cacheRead":30,"cacheWrite":40,"totalTokens":100},"model":"model-a"}}
+EOF
+  # Call 2: one assistant turn, model-b.
+  cat > "$run_dir/pi-200_2.jsonl" <<'EOF'
+{"type":"message_end","message":{"role":"assistant","usage":{"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"totalTokens":10},"model":"model-b"}}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 35
+  [ "$status" -eq 0 ]
+  # Per-model totals should be present, keyed by model.
+  echo "$output" | jq -e '.pi_tokens_total["model-a"].input == 10' >/dev/null
+  echo "$output" | jq -e '.pi_tokens_total["model-a"].total == 100' >/dev/null
+  echo "$output" | jq -e '.pi_tokens_total["model-b"].input == 1' >/dev/null
+  echo "$output" | jq -e '.pi_tokens_total["model-b"].total == 10' >/dev/null
+}
+
+@test "collect.sh: pi_tokens_total is null when no transcript data" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/36"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # A text-mode-only pi call has null tokens.
+  cat > "$run_dir/pi-calls.jsonl" <<'EOF'
+{"argv":["-p","--no-session"],"duration_ms":1000,"exit":0,"mode":"text","call_id":"300_1"}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 36
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.pi_tokens_total == null' >/dev/null
+  echo "$output" | jq -e '.pi_call_count == 1' >/dev/null
 }
 
 # --- setup-run.sh: re-run clears prior run dir ---------------------------------
@@ -683,6 +864,51 @@ EOF
   grep -q -i "install" "$run_dir/plugin-install.log"
 }
 
+# --- run-arm.sh: claude runs in the task checkout, not the caller's cwd (issue #71) ----
+# The stub claude records its own cwd (pwd at launch). The test invokes
+# run-arm.sh from a different directory (the parent of BENCH_OUT) and asserts
+# the claude process's cwd is the run's repo directory, not the caller's cwd.
+@test "run-arm.sh: claude runs in the task checkout (not the caller's cwd)" {
+  local run_dir="$BENCH_OUT/$TASK_ID/A/20"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 20
+  [ "$status" -eq 0 ]
+
+  local stub_dir="$BENCH_OUT/stub-claude-20"
+  mkdir -p "$stub_dir"
+  cat > "$stub_dir/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+# Record the cwd the claude process was launched in (the dry-run 4 failure was
+# a launch from the pi-delegate repo with the click checkout NOT in cwd).
+pwd > "$PWD/.claude-cwd-at-launch"
+echo '{"is_error":false,"result":"ok","duration_ms":10,"total_cost_usd":0}'
+exit 0
+CLAUDE
+  chmod +x "$stub_dir/claude"
+  cat > "$stub_dir/pi" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$stub_dir/pi"
+
+  # Launch from a different directory (the parent of BENCH_OUT), so the
+  # script's cwd is NOT the task checkout. The script must cd into the repo
+  # before launching claude.
+  local caller_dir="$BENCH_OUT"
+  local rc=0
+  ( cd "$caller_dir" && PATH="$stub_dir:$PATH" bash "$BENCH_DIR/run-arm.sh" "$TASK_ID" A 20 >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -eq 0 ]
+
+  # The stub wrote .claude-cwd-at-launch at the cwd at launch. It must be
+  # inside the run's repo directory (i.e. the task checkout), not the caller's.
+  local repo_dir="$BENCH_OUT/$TASK_ID/A/20/repo"
+  local cwd_marker
+  cwd_marker="$(cat "$repo_dir/.claude-cwd-at-launch" 2>/dev/null)"
+  [ -n "$cwd_marker" ]
+  [ "$cwd_marker" = "$repo_dir" ]
+  # The marker must NOT be in the caller's dir (which is BENCH_OUT, a sibling).
+  [ ! -f "$caller_dir/.claude-cwd-at-launch" ]
+}
+
 # --- run-arm.sh: arm B plugin install failure captures the CLI output --------
 
 @test "run-arm.sh: arm B plugin install failure prints the captured CLI output and aborts" {
@@ -1043,3 +1269,49 @@ EOF
   [ "$found" -eq 0 ]
 }
 
+# ================================================================================
+# NEW: issue #71 — grading robustness (restore patch-touched files)
+# ================================================================================
+
+# The grading patch is a test-only diff. If the agent edited the file the patch
+# touches, the old code failed `git apply` (exit 3) and the run was scored as
+# a failure. The new code restores the file to BASE first, records it in
+# `restored_test_files`, and then applies the patch — the run is graded on the
+# grading tests, not on the agent's edits to the graded test files.
+# (Dry-run 4: arm A edited tests/test_utils/test_sentinel.py and the patch no
+# longer applied; a manual revert was needed.)
+@test "grade.sh: restores patch-touched files to BASE and records restored_test_files" {
+  local run_dir="$BENCH_OUT/$TASK_ID/A/21"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 21
+  [ "$status" -eq 0 ]
+  local repo="$BENCH_OUT/$TASK_ID/A/21/repo"
+  local grade_file="$run_dir/grade.json"
+
+  # The setup-created repo has two tracked files: hello.txt (BASE) and world.txt (FIX).
+  # The test grading patch creates extra-test.txt (new file). Simulate an agent
+  # that edited hello.txt AND created extra-test.txt (a stray copy of the graded test file).
+  ( cd "$repo" && echo "agent edit" > hello.txt )
+  # The patch creates extra-test.txt; a stray copy of it would break git apply.
+  ( cd "$repo" && echo "stray copy" > extra-test.txt )
+
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 21
+  # The restore step should let git apply succeed; TEST_CMD=true → pass.
+  [ "$status" -eq 0 ]
+  [ -f "$grade_file" ]
+  # hello.txt was modified by the agent; restored to BASE ("hello") and recorded.
+  jq -e '.restored_test_files | index("hello.txt") != null' "$grade_file" >/dev/null
+  jq -e '.pass == true' "$grade_file" >/dev/null
+}
+
+# --- grade.sh: a clean tree (no agent edits) produces restored_test_files: [] ----------------
+@test "grade.sh: clean tree → restored_test_files is empty" {
+  local run_dir="$BENCH_OUT/$TASK_ID/A/22"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 22
+  [ "$status" -eq 0 ]
+  local grade_file="$run_dir/grade.json"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 22
+  [ "$status" -eq 0 ]
+  [ -f "$grade_file" ]
+  jq -e '.restored_test_files == []' "$grade_file" >/dev/null
+  jq -e '.pass == true' "$grade_file" >/dev/null
+}
