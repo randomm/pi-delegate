@@ -167,6 +167,21 @@ bash <<'PI_DELEGATE_BLOCK'
 TASK_FILE="<the task file from the call above>"
 [ -s "$TASK_FILE" ] || { echo "ERROR: task file missing or empty: $TASK_FILE" >&2; exit 2; }
 
+# Validate the timeout knobs the same way orchestrate.sh does (positive
+# integers) before pi resolution or launch — a bad value must fail the
+# launch with the driver's message regardless of whether a pi binary is
+# present.
+PI_TIMEOUT="${PI_TIMEOUT:-1800}"
+if ! [[ "$PI_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$PI_TIMEOUT" -lt 1 ]; then
+  echo "ERROR: PI_TIMEOUT must be a positive integer (got: $PI_TIMEOUT)"
+  exit 2
+fi
+PI_KILL_AFTER="${PI_KILL_AFTER:-30}"
+if ! [[ "$PI_KILL_AFTER" =~ ^[0-9]+$ ]] || [ "$PI_KILL_AFTER" -lt 1 ]; then
+  echo "ERROR: PI_KILL_AFTER must be a positive integer (got: $PI_KILL_AFTER)"
+  exit 2
+fi
+
 # Re-resolve the pi binary (nothing from an earlier Bash call persists).
 PI_BIN=""
 for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HOME/.local/bin/pi"; do
@@ -199,20 +214,6 @@ fi
 # pi launch below: the push-neutralising exports below only live in THIS
 # shell process and must reach the pi process as its environment.
 <the verbatim ## Safety preflight block above: from `if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then` down to `fi`, including the `# --- End safety preflight ---` marker line>
-
-# Validate the timeout knobs the same way orchestrate.sh does (positive
-# integers) before building the wrapper — a bad value must fail the
-# launch with the driver's message, not reach the timeout binary.
-PI_TIMEOUT="${PI_TIMEOUT:-1800}"
-if ! [[ "$PI_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$PI_TIMEOUT" -lt 1 ]; then
-  echo "ERROR: PI_TIMEOUT must be a positive integer (got: $PI_TIMEOUT)"
-  exit 2
-fi
-PI_KILL_AFTER="${PI_KILL_AFTER:-30}"
-if ! [[ "$PI_KILL_AFTER" =~ ^[0-9]+$ ]] || [ "$PI_KILL_AFTER" -lt 1 ]; then
-  echo "ERROR: PI_KILL_AFTER must be a positive integer (got: $PI_KILL_AFTER)"
-  exit 2
-fi
 
 # One wrapper array for every invocation: empty when no usable timeout
 # binary exists. The "${wrap[@]+...}" guard keeps empty-array expansion safe
@@ -294,6 +295,20 @@ rm -f "$LOG" "$PID_FILE" "$RC_FILE"
 # The task file is a caller-provided path: substitute <the task file from the call above> literally.
 TASK_FILE="<the task file from the call above>"
 [ -s "$TASK_FILE" ] || { echo "ERROR: task file missing or empty: $TASK_FILE" >&2; exit 2; }
+# Validate the timeout knobs the same way orchestrate.sh does (positive
+# integers) before pi resolution or launch — a bad value must fail the
+# launch with the driver's message regardless of whether a pi binary is
+# present.
+PI_TIMEOUT="${PI_TIMEOUT:-1800}"
+if ! [[ "$PI_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$PI_TIMEOUT" -lt 1 ]; then
+  echo "ERROR: PI_TIMEOUT must be a positive integer (got: $PI_TIMEOUT)"
+  exit 2
+fi
+PI_KILL_AFTER="${PI_KILL_AFTER:-30}"
+if ! [[ "$PI_KILL_AFTER" =~ ^[0-9]+$ ]] || [ "$PI_KILL_AFTER" -lt 1 ]; then
+  echo "ERROR: PI_KILL_AFTER must be a positive integer (got: $PI_KILL_AFTER)"
+  exit 2
+fi
 # Re-resolve the pi binary (nothing from an earlier Bash call persists).
 PI_BIN=""
 for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HOME/.local/bin/pi"; do
@@ -316,19 +331,6 @@ for tcand in timeout gtimeout; do
 done
 if [ -z "$TIMEOUT_CMD" ]; then
   echo "WARNING: no GNU timeout/gtimeout found — pi runs without a time limit" >&2
-fi
-# Validate the timeout knobs the same way orchestrate.sh does (positive
-# integers) before building the wrapper — a bad value must fail the
-# launch with the driver's message, not reach the timeout binary.
-PI_TIMEOUT="${PI_TIMEOUT:-1800}"
-if ! [[ "$PI_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$PI_TIMEOUT" -lt 1 ]; then
-  echo "ERROR: PI_TIMEOUT must be a positive integer (got: $PI_TIMEOUT)"
-  exit 2
-fi
-PI_KILL_AFTER="${PI_KILL_AFTER:-30}"
-if ! [[ "$PI_KILL_AFTER" =~ ^[0-9]+$ ]] || [ "$PI_KILL_AFTER" -lt 1 ]; then
-  echo "ERROR: PI_KILL_AFTER must be a positive integer (got: $PI_KILL_AFTER)"
-  exit 2
 fi
 wrap=()
 if [ -n "$TIMEOUT_CMD" ]; then

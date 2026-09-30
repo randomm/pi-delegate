@@ -257,7 +257,8 @@ skill_section() {
 @test "pi-oneshot SKILL.md blocks validate PI_TIMEOUT/PI_KILL_AFTER before launch" {
   # The launch blocks (foreground invocation + detached) must run the same
   # positive-integer validation orchestrate.sh runs, with the driver's
-  # message, BEFORE the wrap array is built / the pi call is made.
+  # message, BEFORE any pi resolution, preflight or launch — the block must
+  # refuse on a bad knob regardless of whether a pi binary is present.
   local n fg detached
   fg=$(section_block "$SKILL_FILE" "## Invocation" 1)
   detached=$(long_runs_block 1)
@@ -266,14 +267,31 @@ skill_section() {
     printf '%s' "$fg" | grep -qF 'PI_KILL_AFTER must be a positive integer'
     printf '%s' "$detached" | grep -qF 'PI_TIMEOUT must be a positive integer'
     printf '%s' "$detached" | grep -qF 'PI_KILL_AFTER must be a positive integer'
-    # Validation precedes the wrap-array construction (refuse before launch).
-    [ "$(printf '%s\n' "$fg" | grep -n 'must be a positive integer' | head -n 1 | cut -d: -f1)" -lt "$(printf '%s\n' "$fg" | grep -n 'wrap=' | head -n 1 | cut -d: -f1)" ]
-    [ "$(printf '%s\n' "$detached" | grep -n 'must be a positive integer' | head -n 1 | cut -d: -f1)" -lt "$(printf '%s\n' "$detached" | grep -n 'wrap=' | head -n 1 | cut -d: -f1)" ]
+    # Validation precedes every later step (pi resolution, preflight, the
+    # wrap-array construction, the pi call) — refuse before launch.
+    for anchor in 'command -v pi' 'PI_DELEGATE_UNSAFE' 'wrap=' 'PI_BIN'; do
+      [ "$(printf '%s\n' "$fg" | grep -n 'must be a positive integer' | head -n 1 | cut -d: -f1)" -lt "$(printf '%s\n' "$fg" | grep -nF "$anchor" | head -n 1 | cut -d: -f1)" ]
+      [ "$(printf '%s\n' "$detached" | grep -n 'must be a positive integer' | head -n 1 | cut -d: -f1)" -lt "$(printf '%s\n' "$detached" | grep -nF "$anchor" | head -n 1 | cut -d: -f1)" ]
+    done
   done
 }
 
+# A PATH directory with the bare minimum the blocks need — no pi, no GNU
+# timeout/gtimeout — so the functional tests below behave identically on
+# hosts that have a real pi (macOS dev boxes) and hosts that do not (CI).
+nopy_path() {
+  local p b
+  p="$(mktemp -d)"
+  for b in bash sh cat sed grep printf head tail sort mktemp mkdir rm echo; do
+    local src
+    src=$(command -v "$b")
+    [ -n "$src" ] && ln -sf "$src" "$p/$b"
+  done
+  printf '%s' "$p"
+}
+
 @test "pi-oneshot detached launch block validates PI_TIMEOUT=0 -> ERROR, exit 2, no RUN_DIR" {
-  local dir block script out rc=0 taskf
+  local dir block script out rc=0 taskf nopy
   dir="$(mktemp -d)"
   block="$(long_runs_block 1)"
   # Point the task-file placeholder at a file with content so the -s guard
@@ -282,15 +300,17 @@ skill_section() {
   printf 'do it' > "$taskf"
   script="$dir/launch.sh"
   printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$taskf\"|" > "$script"
-  out="$(HOME="$dir" PI_TIMEOUT=0 bash "$script" 2>&1)" || rc=$?
+  nopy="$(nopy_path)"
+  out="$(HOME="$dir" PATH="$nopy" PI_TIMEOUT=0 bash "$script" 2>&1)" || rc=$?
   [ "$rc" -eq 2 ]
   grep -qF 'PI_TIMEOUT must be a positive integer' <<<"$out"
   ! grep -qF 'RUN_DIR=' <<<"$out"
-  rm -f "$taskf"; rm -rf "$dir"
+  ! grep -qF 'pi not found' <<<"$out"
+  rm -f "$taskf"; rm -rf "$dir"; rm -rf "$nopy"
 }
 
 @test "pi-oneshot foreground invocation block validates PI_TIMEOUT=abc -> ERROR, exit 2, no pi call" {
-  local dir block script out rc=0
+  local dir block script out rc=0 nopy
   dir="$(mktemp -d)"
   block="$(section_block "$SKILL_FILE" "## Invocation" 1)"
   # Point the task-file placeholder at a file with content (the -s guard
@@ -299,10 +319,12 @@ skill_section() {
   printf 'do it' > "$taskf"
   script="$dir/inv.sh"
   printf '%s\n' "$block" | sed "s|^TASK_FILE=.*|TASK_FILE=\"$taskf\"|" > "$script"
-  out="$(HOME="$dir" PI_TIMEOUT=abc bash "$script" 2>&1)" || rc=$?
+  nopy="$(nopy_path)"
+  out="$(HOME="$dir" PATH="$nopy" PI_TIMEOUT=abc bash "$script" 2>&1)" || rc=$?
   [ "$rc" -eq 2 ]
   grep -qF 'PI_TIMEOUT must be a positive integer' <<<"$out"
-  rm -f "$taskf"; rm -rf "$dir"
+  ! grep -qF 'pi not found' <<<"$out"
+  rm -f "$taskf"; rm -rf "$dir"; rm -rf "$nopy"
 }
 
 @test "pi-oneshot foreground invocation: missing task file -> exit 2, no pi call" {
