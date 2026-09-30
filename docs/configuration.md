@@ -125,16 +125,26 @@ detached, record the pid, wait with foreground bounded calls.**
   completion signal has been read.
 - **Do not** try to fix long runs by passing a larger foreground `timeout` —
   values above the ceiling are silently clamped.
-- **Launch detached** in one foreground Bash call: redirect the invocation's
-  output to a log file (`$LOG`), record the process pid to a file
-  (`$PID_FILE`). For `pi-review-loop` the completion signal is the final
-  JSON summary line in `$LOG`; for `pi-oneshot` (no JSON summary) the
-  invocation is wrapped so its exit code is written to an exit-code file
-  (`$RC_FILE`).
-- **Wait in foreground, bounded calls**: repeat a foreground Bash call with
-  `timeout` just under the 600000 ms ceiling (e.g. 595000 ms); each call
-  exits as soon as the completion signal appears (JSON summary line /
-  exit-code file) or the recorded pid is gone. If a wait call is killed at
+- **Launch detached** in one foreground Bash call: first remove stale
+  helper files from a previous run (`rm -f "$LOG" "$PID_FILE" "$RC_FILE"`)
+  so a leftover completion signal cannot look like a completed run, then
+  redirect the invocation's output to a log file (`$LOG`) and record the
+  process pid to a file (`$PID_FILE`). The helper files must live **outside
+  the target repo** (e.g. a `mktemp -d` directory under the system temp
+  dir) — untracked files inside the repo enter the reviewed diff. For
+  `pi-review-loop` the completion signal is the final JSON summary line in
+  `$LOG` (check the last line with `tail -n 1`); for `pi-oneshot` (no
+  JSON summary) the invocation is wrapped so its exit code is written to
+  an exit-code file (`$RC_FILE`). $LOG grows as pi streams output and can
+  be deleted after the run.
+- **Wait in foreground, bounded calls**: repeat a foreground Bash call
+  with `timeout` just under the 600000 ms ceiling (the Bash tool's
+  `timeout` parameter, e.g. 595000); each call exits as soon as the
+  completion signal appears (JSON summary line / exit-code file) or the
+  recorded pid is gone. If the pid is gone and no valid completion signal
+  exists, the run died without completing — report it as **failed** with
+  the log tail (e.g. `tail -n 20 "$LOG"`), and never present a result as
+  if the run had completed. If a wait call is killed at
   the ceiling, start the next — the detached run survives and the wait
   resumes from the same files. Worst case at the defaults:
   `6 × (1800 + 30)` s = 10980 s ≈ **183 min** (~3 h), covered by enough

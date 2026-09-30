@@ -39,7 +39,6 @@ preflight is a last-resort guardrail. To opt out of all three guards, set
 
 Run the loop with the user's request as the task, passed as a **single
 shell argument**:
-
 ```bash
 bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS"
 ```
@@ -55,49 +54,60 @@ them if the limits look stale). The loop's worst-case wall clock is
 10980` s ≈ 183 min (~3 h) — which exceeds even the 10-minute foreground
 ceiling, so a single foreground invocation cannot cover a whole loop.
 
-A verified real-claude experiment (issue #69) showed that launching via
-the Bash tool's `run_in_background` and replying is NOT a safe strategy:
-in headless `claude -p` the session ends its turn and the background task
-is killed (its output file ends with `[killed]`), so the loop dies with
-the session. Do **not** use `run_in_background` for this run, and **do
-not** claim the loop is "running in the background" and end the turn.
+A verified real-claude experiment (issue #69) showed that the Bash tool's
+`run_in_background` is NOT a safe strategy for this run (the headless
+session kills it when the turn ends — see `docs/configuration.md`). Do
+**not** claim the loop is "running in the background" and end the turn.
 
 Instead — the only strategy to use:
 
-1. **Launch detached** in a single foreground Bash call: redirect both
-   stdout and stderr to a file you choose (`$LOG`, outside the repo, e.g.
-   under the system temp dir) so the file is available no matter what,
-   and record the process pid to a file (`$PID_FILE`):
+1. **Prepare, remove stale files, then launch detached** in a single
+   foreground Bash call. The helper files MUST live **outside the target
+   repo** — for example in a temp directory made with `mktemp -d` (untracked
+   files inside the repo enter the reviewed diff). Remove any stale files
+   from a previous run so leftovers cannot look like a completed run, then
+   redirect both stdout and stderr to `$LOG` so the file is available no
+   matter what, and record the process pid to `$PID_FILE`:
+```bash
+D=$(mktemp -d); LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"
+rm -f "$LOG" "$PID_FILE"
+nohup bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS" > "$LOG" 2>&1 &
+echo "$!" > "$PID_FILE"
+```
 
-   ```bash
-   nohup bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS" > "$LOG" 2>&1 &
-   echo "$!" > "$PID_FILE"
-   ```
-
+   Note that `$LOG` grows as pi streams output and can be deleted after
+   the run.
 2. **Wait in foreground, bounded calls.** Repeatedly run a foreground
-   Bash call with `timeout` just under the 600000 ms ceiling (e.g. the
-   595000 ms shown below). Each call exits as soon as the last line of
-   `$LOG` parses as the six-field JSON summary, or as soon as the
-   recorded pid is gone:
+   Bash call with `timeout` just under the 600000 ms ceiling (the Bash
+   tool's `timeout` parameter, e.g. 595000). Check only the LAST line of
+   `$LOG` — it is the JSON summary when the loop has finished. Each call
+   exits as soon as that last line parses as the six-field JSON summary,
+   or as soon as the recorded pid is gone:
+```bash
+until [ -s "$LOG" ] && tail -n 1 "$LOG" | jq -e 'has("status") and has("verdict") and has("rounds") and has("total_pi_calls") and has("findings") and has("raw_output")' 2>/dev/null; do
+  kill -0 "$(cat "$PID_FILE")" 2>/dev/null || break
+  sleep 15
+done
+```
 
-   ```bash
-   until [ -s "$LOG" ] && tail -1 "$LOG" | jq -e 'has("status") and has("verdict") and has("rounds") and has("total_pi_calls") and has("findings") and has("raw_output")' 2>/dev/null; do
-     kill -0 "$(cat "$PID_FILE")" 2>/dev/null || break
-     sleep 15
-   done
-   ```
-
+   If the wait ends with the pid gone and no valid summary on the last
+   line, the loop died before completing — print "LOOP DIED — no summary;
+   tail of log:" and `tail -n 20 "$LOG"`, and report the run as **failed**
+   with that tail (see step 4). If one wait call is instead killed at its
+   10-minute ceiling, start the next: the loop is detached and survives,
+   and the wait resumes from the same `$LOG`/`$PID_FILE`.
 3. **Do not end the turn until the loop is done.** Do not reply to the
    user — no "the loop is running, I'll report when it finishes" —
    before the final JSON line has been read (or the process is confirmed
-   dead). If one wait call is killed at its 10-minute ceiling, start the
-   next one: the loop is detached and survives, and the wait simply
-   resumes from the same `$LOG`/`$PID_FILE`. Repeat step 2 until the
-   final JSON line appears or the pid is gone.
+   dead). Repeat step 2 until the final JSON line appears or the pid is
+   gone.
 4. **Read the summary.** When the loop exits, the last line of `$LOG`
    is the JSON summary (or stderr-only output on a CLI usage error —
    see below); parse it and report per the "Interpreting the JSON
-   summary" and "Reporting the verdict" sections.
+   summary" and "Reporting the verdict" sections. If the loop died
+   without a valid summary (the step 2 failure), report the run as
+   **failed** with the log tail — **never** present a summary that is
+   not there.
 
 **Stop / abort (before ending the turn).** If the user aborts, or a
 round hangs with no progress and you decide to stop, use the recorded
@@ -106,7 +116,6 @@ has no signal trap of its own, so a plain `kill` of the loop alone can
 leave pi children behind). On macOS (no `setsid`, no guaranteed
 process-group primitives from a plain pid), kill the pid and then walk
 its child tree level by level:
-
 ```bash
 PID="$(cat "$PID_FILE")"
 front="$PID"
@@ -169,16 +178,10 @@ all processes die.
   could run); a run with no progress is safe to interrupt and re-run.
 - **Long runs — detached + foreground wait:** a full loop (develop + up
 to 3 reviews + 2 fixes) can easily exceed the Bash tool's foreground
-  ceiling (default **120000 ms** = 2 min, max **600000 ms** = 10 min;
-  values above the max are silently clamped; configurable via
-  `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` env vars — re-verify
-  current values before relying on them). Launch the loop detached with
-  its output redirected to a log file and its pid recorded (Invocation,
-  step 1), then keep the turn open with repeated **foreground** wait
-  calls, each under the ceiling (Invocation, steps 2–3). Do **not** use
-  `run_in_background` (the session ending kills the task in headless
-  mode), and do **not** pass a larger foreground `timeout` — it will be
-  clamped to the ceiling.
+  ceiling, so a single foreground call cannot cover a whole loop. Use the
+  detached-launch + bounded-foreground-wait strategy from Invocation
+  steps 1–4; `docs/configuration.md` is the single owner of why
+  `run_in_background` is unsafe and of the ceiling values.
 
 ### Model passthrough
 

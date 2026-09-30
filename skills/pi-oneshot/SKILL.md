@@ -15,7 +15,6 @@ task, read what it says, and relay it.
 
 Resolve `pi` the same way `orchestrate.sh` does — `command -v pi` on PATH
 first, then the common install locations:
-
 ```bash
 PI_BIN=""
 for candidate in "$(command -v pi 2>/dev/null || true)" "$HOME/.bun/bin/pi" "$HOME/.local/bin/pi"; do
@@ -42,7 +41,6 @@ pi has **no sandbox**: its full toolset can read every file in the working tree
 (including ignored ones) and run arbitrary commands — including `git push`.
 Before running pi, perform the same checks `orchestrate.sh` performs, unless
 `PI_DELEGATE_UNSAFE=1` is set:
-
 ```bash
 # --- Safety preflight (skip if PI_DELEGATE_UNSAFE=1) -----------------------
 if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
@@ -143,7 +141,6 @@ wrapped in `timeout` exactly the way `orchestrate.sh` wraps its pi calls
 preferred with a `gtimeout` fallback, and a probe that treats a missing
 `--kill-after` flag as "no timeout binary at all"). Run this single block —
 it is complete and covers both wrapper states (wrapped and unbounded):
-
 ```bash
 # NOTE: the `--kill-after=1 1 true` probe is GNU-timeout-specific by design —
 # non-GNU shims fail it and fall back to the unbounded path on purpose.
@@ -212,37 +209,45 @@ invocation can be killed mid-run by the Bash tool even when the script-level
 timeout would not fire.
 
 So: **do not** try to fix long runs by passing a larger foreground `timeout`
-parameter — values above the ceiling are silently clamped. Instead, launch
-the invocation **detached**, record its pid, and wait with foreground
-bounded calls (`run_in_background` is NOT safe: verified in the issue #69
-real-claude experiments, in headless `claude -p` the session ends its turn
-and the background task is killed, so the run dies with the session):
+parameter — values above the ceiling are silently clamped (the ceiling is
+the Bash tool's `timeout` parameter, not a value in any block below).
+Instead, launch the invocation **detached**, record its pid, and wait with
+foreground bounded calls (`run_in_background` is NOT safe — see
+`docs/configuration.md`):
 
-1. **Launch detached** in one foreground Bash call, redirecting the pi
-   call's output to a file you choose (`$LOG`) and the wrapper's exit code
-   to an **exit-code file** (`$RC_FILE` — the completion signal for a
-   single pi call; this skill has no JSON summary), and record the pid to
-   `$PID_FILE`:
+1. **Prepare, remove stale files, then launch detached** in one foreground
+   Bash call. The helper files MUST live **outside the target repo** — for
+   example in a temp directory made with `mktemp -d` (untracked files
+   inside the repo enter the reviewed diff). Remove any stale files from a
+   previous run so a leftover `$RC_FILE` cannot look like a completed run,
+   then redirect the pi call's output to `$LOG`, the wrapper's exit code to
+   an **exit-code file** (`$RC_FILE` — the completion signal for a single
+   pi call; this skill has no JSON summary), and record the pid to
+   `$PID_FILE`. Note that `$LOG` grows as pi streams output and can be
+   deleted after the run:
+```bash
+D=$(mktemp -d); LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"
+rm -f "$LOG" "$PID_FILE" "$RC_FILE"
+( printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates > "$LOG" 2>&1; echo $? > "$RC_FILE" ) &
+echo "$!" > "$PID_FILE"
+```
 
-   ```bash
-   wrap=()
-   ( printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates > "$LOG" 2>&1; echo $? > "$RC_FILE" ) &
-   echo "$!" > "$PID_FILE"
-   ```
-
-   (Substitute the model-passthrough variant from below when `--model` is
-   in use.)
+   The block above is the complete, verbatim launch — `wrap` is reused
+   from the `## Invocation` block above (do not reset it to `wrap=()`
+   here), and the prompt goes to pi's stdin via `printf`. If the user
+   explicitly named a model, the only variant is the same block with
+   `--model "MODEL"` appended to the pi flags (before the `>` redirect);
+   otherwise omit `--model` — pi uses its configured default.
 2. **Wait in foreground, bounded calls.** Repeatedly run a foreground
-   Bash call with `timeout` just under the 600000 ms ceiling (e.g.
-   595000 ms). Each call exits as soon as the exit-code file appears, or
-   as soon as the recorded pid is gone:
-
-   ```bash
+   Bash call with `timeout` just under the 600000 ms ceiling (the Bash
+   tool's `timeout` parameter, e.g. 595000). Each call exits as soon as
+   the exit-code file appears, or as soon as the recorded pid is gone:
+```bash
    until [ -s "$RC_FILE" ]; do
      kill -0 "$(cat "$PID_FILE")" 2>/dev/null || break
      sleep 15
    done
-   ```
+```
 
    If one wait call is killed at its 10-minute ceiling, start the next: the
    launch is detached and survives, and the wait resumes from the same
@@ -251,7 +256,11 @@ and the background task is killed, so the run dies with the session):
    confirmed gone) — no "the task is running, I'll report when it
    finishes". When done, read `$RC_FILE` and the output in `$LOG` and
    report per the "Reporting back" section below. On a deadline kill, the
-   recorded exit code is 124 or 137 = "timed out" (see above).
+   recorded exit code is 124 or 137 = "timed out" (see above). If the pid
+   is gone but `$RC_FILE` is empty, the run died without recording an exit
+   code — **report the task as failed** ("run died — no exit code recorded;
+   tail of log:") with `tail -n 20 "$LOG"`, and **never** report a result
+   as if the run had completed.
 4. **Stop / abort (before ending the turn).** On abort, kill the recorded
    pid and its children with the same recipe `pi-review-loop` documents
    (pid file, walk `ps -axo pid,ppid` level by level, SIGTERM, then
@@ -274,7 +283,6 @@ and the background task is killed, so the run dies with the session):
 
 The same wrapper wraps the **whole** command, model flag included — never
 append `--model` to an un-wrapped call:
-
 ```bash
 printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates --model "MODEL"
 ```
