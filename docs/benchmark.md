@@ -249,6 +249,9 @@ A `pi` wrapper at `<run-dir>/bin/pi`, prepended to `PATH`, that:
 - Appends one metadata line per call to `<run-dir>/pi-calls.jsonl`.
 - Prints pi's captured output to its own stdout so Claude's Bash tool sees
   the same text it would have without the shim.
+- Refuses to nest: a real pi whose file contains the marker string
+  `# pi-delegate-bench-shim` (written into every generated shim) is refused
+  at install time.
 
 ## Metrics (one JSON line per run, `collect.sh`)
 

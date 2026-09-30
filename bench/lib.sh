@@ -258,13 +258,11 @@ install_pi_shim() {
 
   # The shim is written in two parts to avoid sed substitution of the
   # real pi path (which could contain sed special characters). Part 1:
-  # header lines with the marker and the real pi path (quoted via %q so
-  # special characters in the path cannot break the assignment). Part 2:
+  # header lines with the marker and the real pi path (double-quoted after
+  # escaping backslash, double-quote, dollar, and backtick, so special
+  # characters in the path cannot break the assignment). Part 2:
   # the heredoc body (QUOTED delimiter so that $@, $$, $a, $prev, etc.
   # are NOT expanded at install time — they are evaluated at CALL time).
-  # Double-quote the path (the benchmark pi path will not contain shell
-  # metacharacters; if it did, the escaping below handles backslash, quote,
-  # dollar, and backtick). No sed needed.
   local safe_real_pi="$real_pi"
   safe_real_pi="${safe_real_pi//\\/\\\\}"
   safe_real_pi="${safe_real_pi//\"/\\\"}"
@@ -432,9 +430,8 @@ install_pi_delegate_plugin() {
     return 1
   fi
   # Verify the plugin is actually installed and enabled (stub claude in
-  # tests must implement `plugin list --json`). The real CLI reports
-  # {"id": "pi-delegate@pi-delegate", ...}; test stubs may report the
-  # {"name", "source"} pair instead — both shapes are accepted.
+  # tests must implement `plugin list --json` and emit the same shape the
+  # real CLI does: {"id": "pi-delegate@pi-delegate", ...}).
   local list_json
   if ! list_json="$(CLAUDE_CONFIG_DIR="$config_dir" timeout 120 claude plugin list --json 2>>"$log_file")"; then
     echo "install_pi_delegate_plugin: claude plugin list failed after install; see $log_file" >&2
@@ -442,7 +439,7 @@ install_pi_delegate_plugin() {
     return 1
   fi
   if ! printf '%s' "$list_json" | jq -e \
-    '[.[]? | select((.id? // ((.name? // "") + "@" + (.source? // ""))) == "pi-delegate@pi-delegate" or (.name? == "pi-delegate" and .source? == "pi-delegate")) and ((.enabled? // true) == true)] | length > 0' \
+    '[.[]? | select(.id? == "pi-delegate@pi-delegate" and ((.enabled? // true) == true))] | length > 0' \
     >/dev/null 2>&1; then
     echo "install_pi_delegate_plugin: pi-delegate@pi-delegate not enabled after install" >&2
     printf '%s\n' "$list_json" >&2
