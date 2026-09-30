@@ -95,6 +95,33 @@ bench_out_guard() {
       return 1
       ;;
   esac
+  # Warn (never refuse) when BENCH_OUT sits on a RAM-backed tmpfs: leftover
+  # disposable clones fill it quickly and later tool calls fail with ENOSPC
+  # (issue #60). The operator can silence the warning by pointing BENCH_OUT
+  # at a disk-backed path.
+  local fstype
+  fstype="$(bench_out_fs)" || fstype=""
+  if [ "$fstype" = "tmpfs" ]; then
+    echo "WARNING: BENCH_OUT '$out' is on a RAM-backed tmpfs; disposable clones and run captures fill it quickly (ENOSPC). Point BENCH_OUT at a disk-backed path for long or parallel runs." >&2
+  fi
+  return 0
+}
+
+# bench_out_fs — prints the filesystem type of the filesystem that mounts
+# $BENCH_OUT (e.g. "tmpfs", "apfs", "ext4") via `findmnt -no FSTYPE`, as in
+# the issue's hint. Prints the first (deepest) mount listed when findmnt
+# reports several. Prints an empty string and returns 0 when findmnt is
+# unavailable (e.g. stock macOS) — callers must treat empty as "unknown",
+# never as an error. Returns 1 only if findmnt itself fails.
+bench_out_fs() {
+  local out="${BENCH_OUT-}"
+  if [ -z "$out" ]; then
+    return 1
+  fi
+  if ! command -v findmnt >/dev/null 2>&1; then
+    return 0
+  fi
+  findmnt -no FSTYPE "$out" 2>/dev/null | head -n 1
   return 0
 }
 

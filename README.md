@@ -127,6 +127,11 @@ branch, a disposable clone/worktree, or a container** — use one of those; set
 opt out of all three guards. Details in
 [troubleshooting](docs/troubleshooting.md#refused--safety-preflight).
 
+A disposable clone/worktree is, as the name implies, disposable — delete it
+when the work is done (`rm -rf <the-clone>`). On a tmpfs-backed `/tmp` a
+forgotten clone is what fills the disk; see
+[benchmark → Disk use and cleanup](docs/benchmark.md#disk-use-and-cleanup-docs--disk-use).
+
 ## Docs
 
 - [Configuration](docs/configuration.md) — environment variables, flags, the

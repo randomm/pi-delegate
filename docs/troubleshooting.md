@@ -90,3 +90,20 @@ If you genuinely need to run on the default branch, with secret files present,
 or with push enabled, set `PI_DELEGATE_UNSAFE=1` — and understand that you are
 opting out of all three guards. **Real isolation is a disposable clone/worktree
 or a container**; the preflight is a last-resort guardrail, not a substitute.
+A disposable clone/worktree is, as the name implies, disposable — delete it
+when the work is done (`rm -rf <the-clone>`).
+
+## `ENOSPC` (out of disk space)
+
+Tool calls fail with `ENOSPC` and the machine gets slow, as if memory were
+exhausted. Two causes:
+
+- **A tmpfs-backed `/tmp`.** Check where your scratch/output dir lives:
+  `findmnt -no FSTYPE <dir>`. If it reports a tmpfs type (e.g. `tmpfs`),
+  point the output at a disk-backed directory instead (for the benchmark
+  harness: `BENCH_OUT=/local/disk/…`).
+- **Forgotten disposable clones / run dirs.** Every clone, worktree, or
+  benchmark run dir left behind takes real space. Delete the ones you are
+done with. See
+  [benchmark → Disk use and cleanup](benchmark.md#disk-use-and-cleanup-docs--disk-use)
+  for the run-dir cleanup step and the tmpfs warning.

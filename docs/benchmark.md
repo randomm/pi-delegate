@@ -335,6 +335,61 @@ is private, so arm B never touches GitHub; a remote URL is only an explicit
 override),
 `PI_DELEGATE_SHA`, `CLAUDE_TIMEOUT`, `PI_TIMEOUT`, `PI_KILL_AFTER`.
 
+## Disk use and cleanup (docs: §disk-use)
+
+Every run keeps its captures under `$BENCH_OUT/<task>/<arm>/<run>/` — the run
+repo (a disposable clone at BASE_SHA), the venv `SETUP_CMD` installs, the
+claude output, the pi call transcripts, and the grade results. A run repo
+with a Python venv or `node_modules` is often **well over 1 GB**, and the
+disposable clones are never deleted automatically: `setup-run.sh` only removes
+a *prior* run dir when re-running the same `task`/`arm`/`run`; nothing removes
+them after `collect.sh`.
+
+Two practices keep this from biting:
+
+- **Check where `BENCH_OUT` lives.** The default is `/tmp/pi-bench`. On
+  systems where `/tmp` is RAM-backed tmpfs (common on macOS and Linux),
+  a few run dirs quickly fill it — every tool call then fails with ENOSPC
+  and memory pressure rises. Check with:
+
+  ```bash
+  findmnt -no FSTYPE "${BENCH_OUT:-/tmp/pi-bench}"
+  ```
+
+  If it reports a tmpfs type (e.g. `tmpfs`), point `BENCH_OUT` at a
+  disk-backed directory:
+
+  ```bash
+  BENCH_OUT=/local/disk/pi-bench bench/setup-run.sh …
+  ```
+
+- **Limit parallel runs.** Run the matrix **sequentially** (one
+  `task`/`arm`/`run` at a time). Parallel runs multiply the concurrent disk
+  footprint (each with its own clone + venv + full test-suite run) and the
+  worst case is the sum, not the average.
+
+### Cleanup (operator-gated)
+
+Once results are collected, the run dirs are disposable — delete the whole
+benchmark tree:
+
+```bash
+rm -rf "$BENCH_OUT"
+```
+
+Or, for an abandoned single run, just that run dir:
+
+```bash
+rm -rf "$BENCH_OUT/<task>/<arm>/<run>"
+```
+
+These `rm -rf` commands are **not** run by the harness (all destructive
+removals inside the harness go through `guard_rm_rf`, which only allows paths
+under `$BENCH_OUT`); they are manual operator steps, so confirm the path is
+what you intend to remove before running them. `setup-run.sh` removing a
+prior run dir for a re-run is the only automatic cleanup, and it is scoped to
+the exact `task`/`arm`/`run` being re-run.
+
 ## How to read results
 
 - **Outcome quality**: `grade.pass` (the objective test standard, identical in
@@ -367,3 +422,6 @@ override),
 - The contamination guard relies on `git fetch --depth=1` not fetching
   additional objects. A future git version change could alter this
   behaviour; the BATS test verifies the guard on every run.
+- Run dirs under `$BENCH_OUT` are never deleted automatically after
+  collection — disk use grows with the matrix size, and on tmpfs-backed
+  `/tmp` this fills fast; see §disk-use for the cleanup steps.

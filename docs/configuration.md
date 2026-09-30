@@ -83,6 +83,11 @@ this when you have arranged real isolation (a disposable clone/worktree or a
 container) and understand that pi has no sandbox. See
 [troubleshooting → REFUSED](troubleshooting.md#refused--safety-preflight).
 
+A disposable clone/worktree is disposable: delete it when the work is done
+(`rm -rf <the-clone>`). A forgotten clone on a tmpfs-backed `/tmp` fills the
+disk — see [troubleshooting → ENOSPC](troubleshooting.md#enospc-out-of-disk-space)
+and [benchmark → Disk use and cleanup](benchmark.md#disk-use-and-cleanup-docs--disk-use).
+
 ## Flags (`orchestrate.sh`)
 
 ```bash
