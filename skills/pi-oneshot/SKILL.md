@@ -249,6 +249,7 @@ rm -f "$LOG" "$PID_FILE" "$RC_FILE"
 <the verbatim ## Safety preflight block: from `if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then` down to `fi`, including the `# --- End safety preflight ---` marker line>
 # `wrap` is reused from the ## Invocation block above (do not reset it to
 # wrap=() here); PI_BIN is resolved in the ## Locating the pi binary block.
+set -m
 ( printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates > "$LOG" 2>&1; echo $? > "$RC_FILE" ) &
 echo "$!" > "$PID_FILE"
 echo "RUN_DIR=$D"
@@ -289,7 +290,14 @@ until [ -s "$RC_FILE" ]; do
   kill -0 "$PID" 2>/dev/null || break
   sleep 15
 done
-tail -n 1 "$RC_FILE" >/dev/null; [ -s "$LOG" ] >/dev/null
+if [ -s "$RC_FILE" ]; then
+  echo "EXIT CODE: $(cat "$RC_FILE")"
+  tail -n 50 "$LOG"
+else
+  echo "RUN DIED — no exit code recorded; tail of log:"
+  tail -n 20 "$LOG"
+  exit 1
+fi
 ```
 
    If one wait call is killed at its 10-minute ceiling, start the next: the
@@ -307,45 +315,25 @@ tail -n 1 "$RC_FILE" >/dev/null; [ -s "$LOG" ] >/dev/null
    tail of log:") with `tail -n 20 "$LOG"`, and **never** report a result
    as if the run had completed.
 4. **Stop / abort (before ending the turn).** On abort, kill the recorded
-   pid and its children with the recipe below — the same block
-   `pi-review-loop` documents (the skill must stay self-contained; the
-   authoritative copy with the pid-reuse guard is `docs/configuration.md`,
-   **Long runs → Stop / abort**). Replace the `D=` line with the `RUN_DIR`
-   the launch printed before running:
+   pid and its children with the recipe below — the same recipe (kept
+   identical across both skills and `docs/configuration.md`; the
+   authoritative copy is `docs/configuration.md`, **Long runs → Stop /
+   abort**). The launch block ran `set -m` before backgrounding, so the
+   recorded pid leads its own process group (PGID == pid); killing that
+   group kills the run and all its children in one shot. A recycled pid
+   almost never leads its own group, so the group-leader check is the
+   safety guard. Replace the `D=` line with the `RUN_DIR` the launch
+   printed before running:
 ```bash
 D="<the RUN_DIR printed at launch>"
 PID_FILE="$D/pi-oneshot.pid"
 PID="$(cat "$PID_FILE")"
-# Pid-reuse guard: only proceed if the recorded pid still belongs to the pi
-# process (a plain `kill` on a recycled pid would hit an unrelated process).
-cmd="$(ps -o command= -p "$PID" 2>/dev/null || true)"
-if ! [[ "$cmd" == *"$PI_BIN"* ]]; then
-  echo "pid $PID no longer runs $PI_BIN — skipping kill"
-else
-  front="$PID"
-  all="$PID"
-  for _ in 1 2 3 4 5; do
-    next=""
-    for p in $front; do
-      next="${next}$(ps -axo pid,ppid | awk -v r="$p" '$2 == r { print $1 }')"
-    done
-    [ -n "$next" ] || break
-    all="$all $next"
-    front="$next"
-  done
-  for p in $all; do
-    kill -0 "$p" 2>/dev/null || continue
-    [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = "0" ] && continue
-    ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | grep -qw -- "$all" || continue
-    kill "$p" 2>/dev/null || true
-  done
+if [ "$(ps -o pgid= -p "$PID" | tr -d ' ')" = "$PID" ]; then
+  kill -TERM -- "-$PID" 2>/dev/null
   sleep 5
-  for p in $all; do
-    kill -0 "$p" 2>/dev/null || continue
-    [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = "0" ] && continue
-    ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | grep -qw -- "$all" || continue
-    kill -9 "$p" 2>/dev/null || true
-  done
+  kill -KILL -- "-$PID" 2>/dev/null || true
+else
+  echo "not a pi-delegate run group — skipping"
 fi
 ```
 

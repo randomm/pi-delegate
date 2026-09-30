@@ -128,15 +128,16 @@ detached, record the pid, wait with foreground bounded calls.**
 - **Launch detached** in one foreground Bash call: first remove stale
   helper files from a previous run (`rm -f "$LOG" "$PID_FILE" "$RC_FILE"`)
   so a leftover completion signal cannot look like a completed run, then
-  redirect the invocation's output to a log file (`$LOG`) and record the
-  process pid to a file (`$PID_FILE`). The helper files must live **outside
-  the target repo** (e.g. a `mktemp -d` directory under the system temp
-  dir) — untracked files inside the repo enter the reviewed diff. For
-  `pi-review-loop` the completion signal is the final JSON summary line in
-  `$LOG` (check the last line with `tail -n 1`); for `pi-oneshot` (no
-  JSON summary) the invocation is wrapped so its exit code is written to
-  an exit-code file (`$RC_FILE`). $LOG grows as pi streams output and can
-  be deleted after the run.
+  run `set -m` (so the backgrounded command gets its own process group
+  whose PGID equals its pid), redirect the invocation's output to a log
+  file (`$LOG`) and record the process pid to a file (`$PID_FILE`). The
+  helper files must live **outside the target repo** (e.g. a `mktemp -d`
+  directory under the system temp dir) — untracked files inside the repo
+  enter the reviewed diff. For `pi-review-loop` the completion signal is
+  the final JSON summary line in `$LOG` (check the last line with
+  `tail -n 1`); for `pi-oneshot` (no JSON summary) the invocation is
+  wrapped so its exit code is written to an exit-code file (`$RC_FILE`).
+  $LOG grows as pi streams output and can be deleted after the run.
 - **Wait in foreground, bounded calls**: repeat a foreground Bash call
   with `timeout` just under the 600000 ms ceiling (the Bash tool's
   `timeout` parameter, e.g. 595000); each call exits as soon as the
@@ -150,53 +151,32 @@ detached, record the pid, wait with foreground bounded calls.**
   `6 × (1800 + 30)` s = 10980 s ≈ **183 min** (~3 h), covered by enough
   10-minute wait calls.
 - **Stop / abort (before ending the turn)**: use the pid file to kill the
-  run **and its children** (orchestrate.sh has no signal trap; a plain
-  `kill` of the loop can leave pi children). macOS has no `setsid`, so
-  walk the child tree level by level (`ps -axo pid,ppid`), SIGTERM, then
-  SIGKILL stragglers after 5 s. **State does not persist between Bash
-  tool calls**: start the block with `D=` set to the `RUN_DIR` the
-  launch call printed (the `D=$(mktemp -d)` directory), derive the pid
-  file from `$D`, and apply the **pid-reuse guard** before killing — a
-  recycled pid would hit an unrelated process. The loop variant guards
-  for `orchestrate.sh` in the pid's command line; the oneshot variant
-  guards for the pi binary (`$PI_BIN`). The loop's verbatim block:
+  run **and its children**. The launch block ran `set -m` before
+  backgrounding, so the recorded pid is the leader of its own process
+  group (PGID == pid); `kill -- -$PID` kills the group and every member
+  in one shot. A recycled pid almost never leads its own group, so the
+  group-leader check is the safety guard. **State does not persist
+  between Bash tool calls**: start the block with `D=` set to the
+  `RUN_DIR` the launch call printed (the `D=$(mktemp -d)` directory),
+  derive the pid file from `$D`. Children that start their own session
+  or process group (`setsid`, daemons) escape the group kill — the same
+  limit already documented for the in-script timeout. The verbatim block
+  (identical in both skills, differing only in the pid-file basename):
 ```bash
 D="<the RUN_DIR printed at launch>"
 PID_FILE="$D/review-loop.pid"
 PID="$(cat "$PID_FILE")"
-# Pid-reuse guard: only proceed if the recorded pid still belongs to the pi
-# process (a plain `kill` on a recycled pid would hit an unrelated process).
-cmd="$(ps -o command= -p "$PID" 2>/dev/null || true)"
-if ! [[ "$cmd" == *orchestrate.sh* ]]; then
-  echo "pid $PID no longer runs orchestrate.sh — skipping kill"
-else
-  front="$PID"
-  all="$PID"
-  for _ in 1 2 3 4 5; do
-    next=""
-    for p in $front; do
-      next="${next}$(ps -axo pid,ppid | awk -v r="$p" '$2 == r { print $1 }')"
-    done
-    [ -n "$next" ] || break
-    all="$all $next"
-    front="$next"
-  done
-  for p in $all; do
-    kill -0 "$p" 2>/dev/null || continue
-    [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = "0" ] && continue
-    ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | grep -qw -- "$all" || continue
-    kill "$p" 2>/dev/null || true
-  done
+if [ "$(ps -o pgid= -p "$PID" | tr -d ' ')" = "$PID" ]; then
+  kill -TERM -- "-$PID" 2>/dev/null
   sleep 5
-  for p in $all; do
-    kill -0 "$p" 2>/dev/null || continue
-    [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = "0" ] && continue
-    ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | grep -qw -- "$all" || continue
-    kill -9 "$p" 2>/dev/null || true
-  done
+  kill -KILL -- "-$PID" 2>/dev/null || true
+else
+  echo "not a pi-delegate run group — skipping"
 fi
 ```
 
 Both SKILL.md files carry a verbatim copy of this block (each skill must
 be self-contained); the BATS suites assert the copies are identical.
-This was verified on macOS against a multi-level process tree.
+This was verified on macOS (bash 3.2 and bash 5) against a stub tree
+(root → child → grandchild): the whole group dies, a bystander process
+survives, and a pid that is not a group leader is skipped.

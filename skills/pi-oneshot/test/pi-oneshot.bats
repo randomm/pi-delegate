@@ -380,9 +380,46 @@ long_runs_block() {
   [[ -n "$block" ]]
   [[ "$(printf '%s\n' "$block" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
   grep -qF 'PID_FILE="$D/pi-oneshot.pid"' <<<"$block"
-  # The pid-reuse guard checks the command line before killing.
-  grep -q 'ps -o command= -p' <<<"$block"
-  grep -q '\$PI_BIN' <<<"$block"
+  # The group-leader guard checks pgid == pid before killing.
+  grep -qF 'ps -o pgid= -p' <<<"$block"
+  grep -qF 'kill -TERM -- "-$PID"' <<<"$block"
+  grep -qF 'kill -KILL -- "-$PID"' <<<"$block"
+}
+
+@test "oneshot wait block: RC_FILE holds 7 -> prints EXIT CODE: 7" {
+  local dir block script out rc=0
+  dir="$(mktemp -d)"
+  block="$(long_runs_block 2)"
+  script="$dir/wait.sh"
+  printf '%s\n' "$block" > "$script"
+  printf '7\n' > "$dir/pi-oneshot.rc"
+  printf 'log line\n' > "$dir/pi-oneshot.log"
+  printf '1\n' > "$dir/pi-oneshot.pid"
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.run"
+  out="$(bash "$script.run" 2>&1)" || rc=$?
+  [ "$rc" -eq 0 ]
+  grep -qF 'EXIT CODE: 7' <<<"$out"
+  rm -rf "$dir"
+}
+
+@test "oneshot wait block: dead pid and empty RC_FILE -> RUN DIED and exit 1" {
+  local dir block script out rc=0 dead_pid
+  dir="$(mktemp -d)"
+  block="$(long_runs_block 2)"
+  script="$dir/wait.sh"
+  printf '%s\n' "$block" > "$script"
+  : > "$dir/pi-oneshot.rc"
+  printf 'log line\n' > "$dir/pi-oneshot.log"
+  # A dead pid: spawn a child that exits immediately, reap it, record its pid.
+  ( true ) &
+  dead_pid=$!
+  wait "$dead_pid" 2>/dev/null
+  printf '%s\n' "$dead_pid" > "$dir/pi-oneshot.pid"
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.run"
+  out="$(bash "$script.run" 2>&1)" || rc=$?
+  [ "$rc" -eq 1 ]
+  grep -qF 'RUN DIED' <<<"$out"
+  rm -rf "$dir"
 }
 
 @test "lint: pi-oneshot launch, wait and abort blocks pass bash -n and shellcheck" {

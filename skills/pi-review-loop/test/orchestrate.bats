@@ -1932,9 +1932,10 @@ abort_block_of() {
   [[ -n "$block" ]]
   [[ "$(printf '%s\n' "$block" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
   grep -qF 'PID_FILE="$D/review-loop.pid"' <<<"$block"
-  # The pid-reuse guard checks the command line before killing.
-  grep -q 'ps -o command= -p' <<<"$block"
-  grep -q 'orchestrate.sh' <<<"$block"
+  # The group-leader guard checks pgid == pid before killing.
+  grep -qF 'ps -o pgid= -p' <<<"$block"
+  grep -qF 'kill -TERM -- "-$PID"' <<<"$block"
+  grep -qF 'kill -KILL -- "-$PID"' <<<"$block"
 }
 
 @test "pi-oneshot launch block prints RUN_DIR= as its last line" {
@@ -1961,7 +1962,7 @@ abort_block_of() {
   [[ -n "$abortblock" ]]
   [[ "$(printf '%s\n' "$abortblock" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
   grep -qF 'PID_FILE="$D/pi-oneshot.pid"' <<<"$abortblock"
-  grep -q 'ps -o command= -p' <<<"$abortblock"
+  grep -qF 'ps -o pgid= -p' <<<"$abortblock"
 }
 
 @test "abort recipe doc-drift: configuration.md, both SKILL.md copies are identical" {
@@ -1973,20 +1974,16 @@ abort_block_of() {
   local a b
   a="$(abort_block_of "$loop_skill")"
   b="$(abort_block_of "$oneshot_skill")"
-  # The three copies differ only in skill-specific tokens (the guard
-  # string, the pid-file basename, the guard comment), so normalise those
-  # away before diffing: guard token -> __RUN__, pid file basename ->
-  # __PID__. Comment lines are dropped here (not just for the guard
-  # comment) because the guard comment itself is skill-specific — the
-  # copies would otherwise fail the diff on that comment line.
+  # The three copies differ only in the pid-file basename, so normalise
+  # that away before diffing: review-loop.pid / pi-oneshot.pid -> __PID__.
   local canon
   canon="$(awk '/Stop \/ abort/{s=1; next} s && /^- \*\*Stop \/ abort/{s=0} s' "$config" | awk 'BEGIN{c=0} /^```bash$/{c++; f=(c==1); next} f && /^```$/{f=0} f{print}')"
   [[ -n "$canon" ]]
   [[ -n "$a" ]] && [[ -n "$b" ]]
   local norm_a norm_b norm_canon
-  norm_a="$(sed -e '/^[[:space:]]*#/d' -e 's/orchestrate\.sh/__RUN__/g' -e 's/review-loop\.pid/__PID__/g' <<<"$a")"
-  norm_b="$(sed -e '/^[[:space:]]*#/d' -e 's/\"\$PI_BIN\"/__RUN__/g' -e 's/\$PI_BIN/__RUN__/g' -e 's/pi-oneshot\.pid/__PID__/g' <<<"$b")"
-  norm_canon="$(sed -e '/^[[:space:]]*#/d' -e 's/orchestrate\.sh/__RUN__/g' -e 's/review-loop\.pid/__PID__/g' <<<"$canon")"
+  norm_a="$(sed -e 's/review-loop\.pid/__PID__/g' <<<"$a")"
+  norm_b="$(sed -e 's/pi-oneshot\.pid/__PID__/g' <<<"$b")"
+  norm_canon="$(sed -e 's/review-loop\.pid/__PID__/g' <<<"$canon")"
   diff <(printf '%s\n' "$norm_a") <(printf '%s\n' "$norm_canon")
   diff <(printf '%s\n' "$norm_b") <(printf '%s\n' "$norm_canon")
 }
@@ -2014,4 +2011,94 @@ abort_block_of() {
   bash -n "$abtmp"
   shellcheck --norc --severity=warning -s bash "$abtmp"
   rm -f "$abtmp"
+}
+
+# --- Issue #69: pgid abort recipe functional tests ---------------------------
+
+@test "abort pgid: stub tree (root+child) is killed end to end" {
+  local dir block script root_pid
+  dir="$(mktemp -d)"
+  cat > "$dir/orchestrate.sh" <<'ROOT'
+#!/usr/bin/env bash
+sleep 300 &
+wait
+ROOT
+  chmod +x "$dir/orchestrate.sh"
+  set -m
+  "$dir/orchestrate.sh" &
+  root_pid=$!
+  set +m
+  sleep 1
+  [[ -n "$root_pid" ]]
+  echo "$root_pid" > "$dir/review-loop.pid"
+  block="$(abort_block_of "$REPO_ROOT/skills/pi-review-loop/SKILL.md")"
+  script="$dir/abort.sh"
+  printf '%s\n' "$block" > "$script"
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.run"
+  bash "$script.run" >/dev/null 2>&1
+  sleep 6
+  kill -0 "$root_pid" 2>/dev/null && { pkill -f "sleep 300" 2>/dev/null; rm -rf "$dir"; return 1; }
+  pkill -f "sleep 300" 2>/dev/null || true
+  rm -rf "$dir"
+}
+
+@test "abort pgid: an unrelated sleep 300 survives the group kill" {
+  local dir block script root_pid bystander
+  dir="$(mktemp -d)"
+  cat > "$dir/orchestrate.sh" <<'ROOT'
+#!/usr/bin/env bash
+sleep 300 &
+wait
+ROOT
+  chmod +x "$dir/orchestrate.sh"
+  set -m
+  "$dir/orchestrate.sh" &
+  root_pid=$!
+  set +m
+  sleep 1
+  [[ -n "$root_pid" ]]
+  sleep 300 &
+  bystander=$!
+  sleep 0.5
+  kill -0 "$bystander" 2>/dev/null || { pkill -f "sleep 300" 2>/dev/null; rm -rf "$dir"; return 1; }
+  echo "$root_pid" > "$dir/review-loop.pid"
+  block="$(abort_block_of "$REPO_ROOT/skills/pi-review-loop/SKILL.md")"
+  script="$dir/abort.sh"
+  printf '%s\n' "$block" > "$script"
+  sed "s|^D=.*|D=\"$dir\"|" "$script" > "$script.run"
+  bash "$script.run" >/dev/null 2>&1
+  sleep 6
+  # Root must be gone.
+  kill -0 "$root_pid" 2>/dev/null && { pkill -f "sleep 300" 2>/dev/null; rm -rf "$dir"; return 1; }
+  # Bystander must survive.
+  kill -0 "$bystander" 2>/dev/null || { pkill -f "sleep 300" 2>/dev/null; rm -rf "$dir"; return 1; }
+  kill -9 "$bystander" 2>/dev/null
+  pkill -f "sleep 300" 2>/dev/null || true
+  rm -rf "$dir"
+}
+
+@test "abort pgid: guard skips when pid is not a group leader" {
+  local dir block script out rc=0 nonleader
+  dir="$(mktemp -d)"
+  # Launch a process that is NOT a group leader (plain backgrounding, no set -m).
+  sleep 300 &
+  nonleader=$!
+  sleep 0.5
+  kill -0 "$nonleader" 2>/dev/null || { pkill -f "sleep 300" 2>/dev/null || true; rm -rf "$dir"; return 1; }
+  echo "$nonleader" > "$dir/review-loop.pid"
+  block="$(abort_block_of "$REPO_ROOT/skills/pi-review-loop/SKILL.md")"
+  script="$dir/abort.sh"
+  printf '%s\n' "$block" > "$script"
+  out="$(sed "s|^D=.*|D=\"$dir\"|" "$script" | bash 2>&1)" || rc=$?
+  [[ "$out" == *"not a pi-delegate run group"* ]]
+  # The process must still be alive.
+  kill -0 "$nonleader" 2>/dev/null || { pkill -f "sleep 300" 2>/dev/null || true; rm -rf "$dir"; return 1; }
+  pkill -f "sleep 300" 2>/dev/null || true
+  rm -rf "$dir"
+}
+
+@test "launch block: set -m is present in both skill launch blocks" {
+  grep -qF 'set -m' "$REPO_ROOT/skills/pi-review-loop/SKILL.md"
+  grep -qF 'set -m' "$REPO_ROOT/skills/pi-oneshot/SKILL.md"
+  grep -qF 'set -m' "$REPO_ROOT/docs/configuration.md"
 }

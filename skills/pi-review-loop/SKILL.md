@@ -71,6 +71,7 @@ Instead — the only strategy to use:
 ```bash
 D=$(mktemp -d); LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"
 rm -f "$LOG" "$PID_FILE"
+set -m
 nohup bash "${CLAUDE_SKILL_DIR}/orchestrate.sh" "$ARGUMENTS" > "$LOG" 2>&1 &
 echo "$!" > "$PID_FILE"
 echo "RUN_DIR=$D"
@@ -139,53 +140,29 @@ done
 
 **Stop / abort (before ending the turn).** If the user aborts, or a
 round hangs with no progress and you decide to stop, use the recorded
-pid file to kill the loop **and every process it spawned** (orchestrate.sh
-has no signal trap of its own, so a plain `kill` of the loop alone can
-leave pi children behind). On macOS (no `setsid`, no guaranteed
-process-group primitives from a plain pid), kill the pid and then walk
-its child tree level by level:
+pid file to kill the loop **and every process it spawned**. The launch
+block runs `set -m` before backgrounding, so the recorded pid is the
+leader of its own process group (PGID == pid); killing that group kills
+the loop and all its children in one shot. A recycled pid almost never
+leads its own group, so the group-leader check is the safety guard:
 ```bash
 D="<the RUN_DIR printed at launch>"
 PID_FILE="$D/review-loop.pid"
 PID="$(cat "$PID_FILE")"
-# Pid-reuse guard: only proceed if the recorded pid still belongs to the pi
-# process (a plain `kill` on a recycled pid would hit an unrelated process).
-cmd="$(ps -o command= -p "$PID" 2>/dev/null || true)"
-if ! [[ "$cmd" == *orchestrate.sh* ]]; then
-  echo "pid $PID no longer runs orchestrate.sh — skipping kill"
-else
-  front="$PID"
-  all="$PID"
-  for _ in 1 2 3 4 5; do
-    next=""
-    for p in $front; do
-      next="${next}$(ps -axo pid,ppid | awk -v r="$p" '$2 == r { print $1 }')"
-    done
-    [ -n "$next" ] || break
-    all="$all $next"
-    front="$next"
-  done
-  for p in $all; do
-    kill -0 "$p" 2>/dev/null || continue
-    [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = "0" ] && continue
-    ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | grep -qw -- "$all" || continue
-    kill "$p" 2>/dev/null || true
-  done
+if [ "$(ps -o pgid= -p "$PID" | tr -d ' ')" = "$PID" ]; then
+  kill -TERM -- "-$PID" 2>/dev/null
   sleep 5
-  for p in $all; do
-    kill -0 "$p" 2>/dev/null || continue
-    [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = "0" ] && continue
-    ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | grep -qw -- "$all" || continue
-    kill -9 "$p" 2>/dev/null || true
-  done
+  kill -KILL -- "-$PID" 2>/dev/null || true
+else
+  echo "not a pi-delegate run group — skipping"
 fi
 ```
 
-This was verified on macOS against a three-level tree (loop → pi → child):
-all processes die, and a recycled pid is skipped. The same block, with the
-pi binary in place of `orchestrate.sh` in the guard, is what `pi-oneshot`
-documents (and the authoritative copy with both guards is
-`docs/configuration.md`, **Long runs → Stop / abort**).
+Note: children that start their own session or process group (`setsid`,
+daemons) escape the group kill — the same limit already documented for
+the in-script timeout. The same recipe (with the pi-oneshot pid file
+name in place of `review-loop.pid`) is what `pi-oneshot` documents; the
+authoritative copy is `docs/configuration.md`, **Long runs → Stop / abort**.
 
 - **Quote `$ARGUMENTS`.** An unquoted `$ARGUMENTS` still performs command
   substitution: `bash orchestrate.sh $ARGUMENTS` with a request containing
