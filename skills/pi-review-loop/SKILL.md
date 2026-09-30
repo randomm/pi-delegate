@@ -92,17 +92,32 @@ echo "RUN_DIR=$D"
    `$LOG` — it is the JSON summary when the loop has finished. Each call
    exits as soon as that last line parses as the six-field JSON summary,
    or as soon as the recorded pid is gone. Replace the `D=` line with the
-   `RUN_DIR` the launch printed before running:
+   `RUN_DIR` the launch printed before running. Check `command -v jq`
+   first — the summary check needs it, and a missing jq must stop the wait
+   with a clear message rather than loop on the never-parseable last line.
+   Read the pid file **once** (`PID=...`): an unreadable pid file is a
+   distinct failure ("PID FILE UNREADABLE") from a dead pid ("LOOP DIED"),
+   because re-reading it on every loop iteration would loop forever on a
+   missing file:
 ```bash
 D="<the RUN_DIR printed at launch>"
 LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"
+command -v jq >/dev/null 2>&1 || { echo "jq required — cannot validate the loop summary"; exit 1; }
+PID="$(cat "$PID_FILE" 2>/dev/null)"
+if [ -z "$PID" ]; then
+  echo "PID FILE UNREADABLE — check RUN_DIR"
+  exit 1
+fi
 until [ -s "$LOG" ] && tail -n 1 "$LOG" | jq -e 'has("status") and has("verdict") and has("rounds") and has("total_pi_calls") and has("findings") and has("raw_output")' 2>/dev/null; do
-  kill -0 "$(cat "$PID_FILE")" 2>/dev/null || break
+  kill -0 "$PID" 2>/dev/null || break
   sleep 15
 done
 ```
 
-   If the wait ends with the pid gone and no valid summary on the last
+   If the pid file was unreadable, the block already stopped with "PID
+   FILE UNREADABLE — check RUN_DIR" (a state/setup problem, not a dead run
+   — do NOT report it as "LOOP DIED"). If the wait ends with the pid gone
+   and no valid summary on the last
    line, the loop died before completing — print "LOOP DIED — no summary;
    tail of log:" and `tail -n 20 "$LOG"`, and report the run as **failed**
    with that tail (see step 4). If one wait call is instead killed at its
@@ -151,11 +166,17 @@ else
     front="$next"
   done
   for p in $all; do
+    kill -0 "$p" 2>/dev/null || continue
+    [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = "0" ] && continue
+    ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | grep -qw -- "$all" || continue
     kill "$p" 2>/dev/null || true
   done
   sleep 5
   for p in $all; do
-    kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null || true
+    kill -0 "$p" 2>/dev/null || continue
+    [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = "0" ] && continue
+    ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | grep -qw -- "$all" || continue
+    kill -9 "$p" 2>/dev/null || true
   done
 fi
 ```

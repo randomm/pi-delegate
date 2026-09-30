@@ -40,7 +40,17 @@ then offer to re-run once it is available.
 pi has **no sandbox**: its full toolset can read every file in the working tree
 (including ignored ones) and run arbitrary commands — including `git push`.
 Before running pi, perform the same checks `orchestrate.sh` performs, unless
-`PI_DELEGATE_UNSAFE=1` is set:
+`PI_DELEGATE_UNSAFE=1` is set.
+
+**The preflight must run in the SAME Bash tool call that launches pi.**
+The push-neutralising step only `export`s `GIT_CONFIG_*` variables, and a
+`Bash` tool call is one shell process: exported variables do **not** survive
+into a later, separate Bash call. A preflight run in its own call would leave
+the launch unguarded (free `git push` for pi). So the preflight block below
+is included **verbatim at the top** of each launch block — the foreground
+`## Invocation` block and the detached launch block under `### Long runs`
+(only the `# --- End safety preflight ---` line and the launch line itself
+differ). Do not run it as a standalone step.
 ```bash
 # --- Safety preflight (skip if PI_DELEGATE_UNSAFE=1) -----------------------
 if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
@@ -50,8 +60,8 @@ if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
   if [ -n "$head_ref" ]; then
     default_branch="${head_ref#origin/}"
   else
-    for cand in main master; do
-      git show-ref --verify --quiet "refs/heads/$cand" 2>/dev/null && { default_branch="$cand"; break; }
+    for dcand in main master; do
+      git show-ref --verify --quiet "refs/heads/$dcand" 2>/dev/null && { default_branch="$dcand"; break; }
     done
   fi
   cur_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || cur_branch=""
@@ -148,9 +158,9 @@ it is complete and covers both wrapper states (wrapped and unbounded):
 # fails (e.g. an old macOS `timeout` without the flag) treat it as absent —
 # unbounded call + warning — mirroring orchestrate.sh.
 TIMEOUT_CMD=""
-for cand in timeout gtimeout; do
-  if command -v "$cand" >/dev/null 2>&1 && "$cand" --kill-after=1 1 true >/dev/null 2>&1; then
-    TIMEOUT_CMD="$cand"
+for tcand in timeout gtimeout; do
+  if command -v "$tcand" >/dev/null 2>&1 && "$tcand" --kill-after=1 1 true >/dev/null 2>&1; then
+    TIMEOUT_CMD="$tcand"
     break
   fi
 done
@@ -158,6 +168,11 @@ done
 if [ -z "$TIMEOUT_CMD" ]; then
   echo "WARNING: no GNU timeout/gtimeout found — pi runs without a time limit" >&2
 fi
+
+# --- Safety preflight (skip if PI_DELEGATE_UNSAFE=1) — SAME call as the
+# pi launch below: the push-neutralising exports below only live in THIS
+# shell process and must reach the pi process as its environment.
+<the verbatim ## Safety preflight block above: from `if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then` down to `fi`, including the `# --- End safety preflight ---` marker line>
 
 # One wrapper array for every invocation: empty when no usable timeout
 # binary exists. The "${wrap[@]+...}" guard keeps empty-array expansion safe
@@ -228,6 +243,10 @@ foreground bounded calls (`run_in_background` is NOT safe — see
 ```bash
 D=$(mktemp -d); LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"
 rm -f "$LOG" "$PID_FILE" "$RC_FILE"
+# --- Safety preflight (skip if PI_DELEGATE_UNSAFE=1) — SAME call as the
+# detached launch below: the push-neutralising exports below only live in
+# THIS shell process and must reach the pi process as its environment.
+<the verbatim ## Safety preflight block: from `if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then` down to `fi`, including the `# --- End safety preflight ---` marker line>
 # `wrap` is reused from the ## Invocation block above (do not reset it to
 # wrap=() here); PI_BIN is resolved in the ## Locating the pi binary block.
 ( printf '%s' "$ARGUMENTS" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates > "$LOG" 2>&1; echo $? > "$RC_FILE" ) &
@@ -253,13 +272,21 @@ echo "RUN_DIR=$D"
    Bash call with `timeout` just under the 600000 ms ceiling (the Bash
    tool's `timeout` parameter, e.g. 595000). Each call exits as soon as
    the exit-code file appears, or as soon as the recorded pid is gone.
-   Replace the `D=` line with the `RUN_DIR` the launch printed before
-   running:
+   Read the pid file **once** (`PID=...`): an unreadable pid file is a
+   distinct failure ("PID FILE UNREADABLE") from a dead pid, because
+   re-reading it on every loop iteration would loop forever on a missing
+   file. Replace the `D=` line with the `RUN_DIR` the launch printed
+   before running:
 ```bash
 D="<the RUN_DIR printed at launch>"
 LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"
+PID="$(cat "$PID_FILE" 2>/dev/null)"
+if [ -z "$PID" ]; then
+  echo "PID FILE UNREADABLE — check RUN_DIR"
+  exit 1
+fi
 until [ -s "$RC_FILE" ]; do
-  kill -0 "$(cat "$PID_FILE")" 2>/dev/null || break
+  kill -0 "$PID" 2>/dev/null || break
   sleep 15
 done
 tail -n 1 "$RC_FILE" >/dev/null; [ -s "$LOG" ] >/dev/null
@@ -307,11 +334,17 @@ else
     front="$next"
   done
   for p in $all; do
+    kill -0 "$p" 2>/dev/null || continue
+    [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = "0" ] && continue
+    ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | grep -qw -- "$all" || continue
     kill "$p" 2>/dev/null || true
   done
   sleep 5
   for p in $all; do
-    kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null || true
+    kill -0 "$p" 2>/dev/null || continue
+    [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = "0" ] && continue
+    ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | grep -qw -- "$all" || continue
+    kill -9 "$p" 2>/dev/null || true
   done
 fi
 ```

@@ -182,11 +182,17 @@ else
     front="$next"
   done
   for p in $all; do
+    kill -0 "$p" 2>/dev/null || continue
+    [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = "0" ] && continue
+    ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | grep -qw -- "$all" || continue
     kill "$p" 2>/dev/null || true
   done
   sleep 5
   for p in $all; do
-    kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null || true
+    kill -0 "$p" 2>/dev/null || continue
+    [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = "0" ] && continue
+    ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | grep -qw -- "$all" || continue
+    kill -9 "$p" 2>/dev/null || true
   done
 fi
 ```

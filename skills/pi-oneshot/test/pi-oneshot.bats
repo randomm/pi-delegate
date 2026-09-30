@@ -139,6 +139,43 @@ skill_section() {
   grep -qF '${wrap[@]+"${wrap[@]}"}' "$SKILL_FILE"
 }
 
+@test "pi-oneshot SKILL.md states the preflight must run in the same call as the launch" {
+  grep -q 'SAME Bash tool call that launches pi' "$SKILL_FILE"
+}
+
+@test "pi-oneshot foreground invocation block embeds the safety preflight in the launch call" {
+  local block
+  block="$(preflight_in_launch_block fg)"
+  [[ -n "$block" ]]
+  # The push-neutralising exports must be inside the launch block itself —
+  # in the same shell call as the pi invocation — and the spliced block
+  # must remain valid shell.
+  grep -qF 'GIT_CONFIG_KEY_' <<<"$block"
+  grep -qF 'push.default' <<<"$block"
+  grep -qF 'PI_DELEGATE_UNSAFE' <<<"$block"
+  local tmp
+  tmp="$(mktemp)"
+  printf '%s\n' "$block" > "$tmp"
+  bash -n "$tmp"
+  shellcheck --norc --severity=warning -s bash "$tmp"
+  rm -f "$tmp"
+}
+
+@test "pi-oneshot detached launch block embeds the safety preflight in the launch call" {
+  local block
+  block="$(preflight_in_launch_block detached)"
+  [[ -n "$block" ]]
+  grep -qF 'GIT_CONFIG_KEY_' <<<"$block"
+  grep -qF 'push.default' <<<"$block"
+  grep -qF 'PI_DELEGATE_UNSAFE' <<<"$block"
+  local tmp
+  tmp="$(mktemp)"
+  printf '%s\n' "$block" > "$tmp"
+  bash -n "$tmp"
+  shellcheck --norc --severity=warning -s bash "$tmp"
+  rm -f "$tmp"
+}
+
 @test "pi-oneshot SKILL.md uses the single stdin transport (no positional variant)" {
   local block
   block=$(skill_section "## Invocation" | awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}')
@@ -226,6 +263,33 @@ oneshot_preflight_block() {
     awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}'
 }
 
+# Reconstruct a launch block with the preflight placeholder replaced by the
+# verbatim ## Safety preflight block (the documented contract: the preflight
+# runs in the SAME Bash call as the launch — its push-neutralising exports
+# must reach the pi process as its environment, and an export in a separate
+# earlier Bash call would not survive into the launch).
+# Args: fg (foreground ## Invocation block) or detached (launch block).
+preflight_in_launch_block() {
+  local preflight launch preflight_file launch_file
+  preflight="$(oneshot_preflight_block)"
+  if [ "$1" = "fg" ]; then
+    local s
+    s=$(skill_section "## Invocation")
+    launch=$(printf '%s\n' "$s" | awk 'BEGIN{n=0} /^```bash$/{n++; f=(n==1); next} /^```$/{if (f) exit; f=0} f {print}')
+  else
+    launch="$(long_runs_block 1)"
+  fi
+  # The placeholder line is spliced out and the verbatim preflight block is
+  # read in from a file (macOS awk rejects newlines in -v string values).
+  preflight_file="$(mktemp)"
+  launch_file="$(mktemp)"
+  printf '%s\n' "$preflight" > "$preflight_file"
+  printf '%s\n' "$launch" > "$launch_file"
+  sed -e "r $preflight_file" -e 's/<the verbatim ## Safety preflight block:.*>//' "$launch_file" > "${launch_file}.out"
+  cat "${launch_file}.out"
+  rm -f "$preflight_file" "$launch_file" "${launch_file}.out"
+}
+
 @test "pi-oneshot SKILL.md has a safety preflight section (issue #30)" {
   grep -q '^## Safety preflight' "$SKILL_FILE"
 }
@@ -304,6 +368,10 @@ long_runs_block() {
   [[ -n "$block" ]]
   [[ "$(printf '%s\n' "$block" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
   grep -qF 'LOG="$D/pi-oneshot.log"; PID_FILE="$D/pi-oneshot.pid"; RC_FILE="$D/pi-oneshot.rc"' <<<"$block"
+  # The pid file is read once, and an unreadable pid file stops the wait
+  # with a distinct message (not a dead-pid report, not an infinite loop).
+  grep -qF 'PID="$(cat "$PID_FILE" 2>/dev/null)"' <<<"$block"
+  grep -qF 'PID FILE UNREADABLE — check RUN_DIR' <<<"$block"
 }
 
 @test "pi-oneshot abort block starts with the D placeholder and re-derives PID_FILE" {

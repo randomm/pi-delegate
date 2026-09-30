@@ -1918,6 +1918,12 @@ abort_block_of() {
   [[ -n "$block" ]]
   [[ "$(printf '%s\n' "$block" | head -n 1)" = 'D="<the RUN_DIR printed at launch>"' ]]
   grep -qF 'LOG="$D/review-loop.log"; PID_FILE="$D/review-loop.pid"' <<<"$block"
+  # jq is checked up front and an unreadable pid file stops the wait with a
+  # message distinct from "LOOP DIED" (a dead pid, not a missing file).
+  grep -qF 'command -v jq' <<<"$block"
+  grep -qF 'jq required' <<<"$block"
+  grep -qF 'PID="$(cat "$PID_FILE" 2>/dev/null)"' <<<"$block"
+  grep -qF 'PID FILE UNREADABLE — check RUN_DIR' <<<"$block"
 }
 
 @test "review-loop abort block starts with the D placeholder and re-derives PID_FILE" {
@@ -1969,8 +1975,10 @@ abort_block_of() {
   b="$(abort_block_of "$oneshot_skill")"
   # The three copies differ only in skill-specific tokens (the guard
   # string, the pid-file basename, the guard comment), so normalise those
-  # away before diffing: comments dropped, guard token -> __RUN__, pid
-  # file basename -> __PID__.
+  # away before diffing: guard token -> __RUN__, pid file basename ->
+  # __PID__. Comment lines are dropped here (not just for the guard
+  # comment) because the guard comment itself is skill-specific — the
+  # copies would otherwise fail the diff on that comment line.
   local canon
   canon="$(awk '/Stop \/ abort/{s=1; next} s && /^- \*\*Stop \/ abort/{s=0} s' "$config" | awk 'BEGIN{c=0} /^```bash$/{c++; f=(c==1); next} f && /^```$/{f=0} f{print}')"
   [[ -n "$canon" ]]
