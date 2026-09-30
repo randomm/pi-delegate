@@ -26,7 +26,8 @@ strip_heredoc_wrapper() {
   # is caller-supplied content (substituted literally at use time): it is
   # rewritten to `$(cat "$TASK_FILE")` — an anchored, exact-literal match,
   # never a greedy pattern — which is valid bash in its own right and what
-  # the functional tests substitute their own file into.
+  # the functional tests substitute their own file into. The rewrite is
+  # restricted to the wrapper body (never to prose outside it).
   awk '
     /^bash <<[^ ]*$/ { inblk = 1; next }
     inblk && /^PI_DELEGATE_[A-Z]+$/ { inblk = 0; next }

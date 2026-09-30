@@ -199,6 +199,17 @@ skill_section() {
   ! printf '%s' "$block" | grep -qE '^\$\{wrap\[@\]\+.*"\$ARGUMENTS"$'
 }
 
+@test "pi-oneshot SKILL.md Model variant block carries the task-file guard" {
+  local block
+  block=$(section_block "$SKILL_FILE" "### Model" 1)
+  # The --model passthrough variant must carry the same task-file lines as
+  # the foreground Invocation block: the caller-substituted TASK_FILE line,
+  # the -s guard, and the $(cat "$TASK_FILE") read (after extraction).
+  printf '%s' "$block" | grep -qF -- 'TASK_FILE="<the task file from the call above>"'
+  printf '%s' "$block" | grep -qF 'ERROR: task file missing or empty: $TASK_FILE'
+  printf '%s' "$block" | grep -qF '$(cat "$TASK_FILE")'
+}
+
 @test "pi-oneshot detached launch block carries the task-file guard and literal read" {
   local block
   block="$(long_runs_block 1)"

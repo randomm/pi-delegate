@@ -475,7 +475,9 @@ The same wrapper wraps the **whole** command, model flag included — never
 append `--model` to an un-wrapped call:
 ```bash
 bash <<'PI_DELEGATE_BLOCK'
-printf '%s' "$(cat <the task file from the call above>)" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates --model "MODEL"
+TASK_FILE="<the task file from the call above>"
+[ -s "$TASK_FILE" ] || { echo "ERROR: task file missing or empty: $TASK_FILE" >&2; exit 2; }
+printf '%s' "$(cat "$TASK_FILE")" | ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates --model "MODEL"
 PI_DELEGATE_BLOCK
 ```
 

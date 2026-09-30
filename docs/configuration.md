@@ -196,8 +196,10 @@ PI_DELEGATE_BLOCK
 
 Both SKILL.md files carry a verbatim copy of this block (each skill must
 be self-contained; the oneshot copy resolves `PI_BIN` first, and if `pi`
-cannot be resolved it **skips the kill** with "cannot verify command
-line" rather than matching a bare `pi` token); the BATS suites assert the
+cannot be resolved it **exits 3** with "cannot verify command line —
+kill NOT performed" rather than matching a bare `pi` token — and the
+caller must then check liveness with `kill -0 <pid>` before reporting
+the abort as done); the BATS suites assert the
 copies are identical modulo the normalised tokens. This was verified on
 macOS (bash 3.2 and bash 5) against a stub tree
 (root → child → grandchild): the whole group dies, a bystander process
