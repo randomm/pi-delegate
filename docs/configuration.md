@@ -110,17 +110,38 @@ Claude Code's Bash tool imposes a per-foreground-call timeout
 (`BASH_DEFAULT_TIMEOUT_MS` defaults to 120000 ms / 2 minutes;
 `BASH_MAX_TIMEOUT_MS` defaults to 600000 ms / 10 minutes; values above the
 max are silently clamped). A full loop's worst-case wall clock is
-`6 × (PI_TIMEOUT + PI_KILL_AFTER)` — at the defaults ≈ 183 min (~3 h) — and
-a single pi-oneshot task can legitimately run far longer than the 10-minute
-foreground ceiling, so a foreground invocation is killed mid-run.
+`6 × (PI_TIMEOUT + PI_KILL_AFTER)` — at the defaults `6 × (1800 + 30)` s =
+10980 s ≈ 183 min (~3 h) — and a single pi-oneshot task can legitimately
+run far longer than the 10-minute foreground ceiling, so one foreground
+call cannot cover the run.
 
-Therefore:
+Strategy (verified by the issue #69 real-claude experiments): **launch
+detached, record the pid, wait with foreground bounded calls.**
 
+- **Do not** use the Bash tool's background-task mode: in headless
+  `claude -p` the session ends its turn and the background task is killed
+  (the task's output file ends with `[killed]`), so the run dies with the
+  session. The agent must also **never end the turn or reply** before the
+  completion signal has been read.
 - **Do not** try to fix long runs by passing a larger foreground `timeout` —
   values above the ceiling are silently clamped.
-- Run the invocation with the Bash tool's `run_in_background: true` and poll
-  the background task's output file with the `Read` tool until the final JSON
-  summary line (the last line of stdout) appears. Background tasks are not
-  subject to the foreground ceiling, so the full per-call budget is honored.
-  Worst case at the defaults: `6 × (1800 + 30)` s = 10980 s ≈ **183 min**
-  (~3 h).
+- **Launch detached** in one foreground Bash call: redirect the invocation's
+  output to a log file (`$LOG`), record the process pid to a file
+  (`$PID_FILE`). For `pi-review-loop` the completion signal is the final
+  JSON summary line in `$LOG`; for `pi-oneshot` (no JSON summary) the
+  invocation is wrapped so its exit code is written to an exit-code file
+  (`$RC_FILE`).
+- **Wait in foreground, bounded calls**: repeat a foreground Bash call with
+  `timeout` just under the 600000 ms ceiling (e.g. 595000 ms); each call
+  exits as soon as the completion signal appears (JSON summary line /
+  exit-code file) or the recorded pid is gone. If a wait call is killed at
+  the ceiling, start the next — the detached run survives and the wait
+  resumes from the same files. Worst case at the defaults:
+  `6 × (1800 + 30)` s = 10980 s ≈ **183 min** (~3 h), covered by enough
+  10-minute wait calls.
+- **Stop / abort (before ending the turn)**: use the pid file to kill the
+  run **and its children** (orchestrate.sh has no signal trap; a plain
+  `kill` of the loop can leave pi children). macOS has no `setsid`, so
+  walk the child tree level by level (`ps -axo pid,ppid`), SIGTERM, then
+  SIGKILL stragglers after 5 s. This was verified on macOS against a
+  multi-level process tree.

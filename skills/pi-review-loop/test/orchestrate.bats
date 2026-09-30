@@ -1276,11 +1276,16 @@ long_runs_section() {
   awk '/^## Long runs under/{s=1; next} s && /^##/{s=0} s {print}' "$config"
 }
 
-@test "docs/configuration.md owns the long-run guidance (run_in_background + Read polling)" {
+@test "docs/configuration.md owns the long-run guidance (detached launch + foreground wait)" {
   local section
   section="$(long_runs_section)"
-  printf '%s\n' "$section" | grep -q 'run_in_background'
-  printf '%s\n' "$section" | grep -q 'Read'
+  printf '%s\n' "$section" | grep -q 'detached'
+  printf '%s\n' "$section" | grep -q 'pid'
+  # The old unsafe strategy (run_in_background + poll) must be gone from
+  # the owning section (issue #69: it orphans/kills the run when the
+  # headless session ends).
+  run grep -q 'run_in_background' <<<"$section"
+  [ "$status" -ne 0 ]
   # Exactly the Long runs section: starts at its heading, no leak from the
   # Flags or Environment variables sections. The awk helper skips the
   # Long runs heading line itself (s=1; next), so assert the heading is

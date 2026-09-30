@@ -212,17 +212,51 @@ invocation can be killed mid-run by the Bash tool even when the script-level
 timeout would not fire.
 
 So: **do not** try to fix long runs by passing a larger foreground `timeout`
-parameter — values above the ceiling are silently clamped. Instead:
+parameter — values above the ceiling are silently clamped. Instead, launch
+the invocation **detached**, record its pid, and wait with foreground
+bounded calls (`run_in_background` is NOT safe: verified in the issue #69
+real-claude experiments, in headless `claude -p` the session ends its turn
+and the background task is killed, so the run dies with the session):
 
-1. Run the invocation command with the Bash tool's `run_in_background` set
-   to `true`.
-2. Poll by reading the background task's output file with the `Read` tool,
-   at an interval of a few minutes, until the output stops growing.
-3. When pi exits, report per the "Reporting back" section below. On a
-   deadline kill, the exit code is 124 or 137 = "timed out" (see above).
+1. **Launch detached** in one foreground Bash call, redirecting the pi
+   call's output to a file you choose (`$LOG`) and the wrapper's exit code
+   to an **exit-code file** (`$RC_FILE` — the completion signal for a
+   single pi call; this skill has no JSON summary), and record the pid to
+   `$PID_FILE`:
 
-Background tasks are not subject to the foreground `BASH_MAX_TIMEOUT_MS`
-ceiling, so the full `${PI_TIMEOUT}` budget is honored.
+   ```bash
+   wrap=()
+   ( ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates > "$LOG" 2>&1; echo $? > "$RC_FILE" ) &
+   echo "$!" > "$PID_FILE"
+   ```
+
+   (Substitute the model-passthrough variant from below when `--model` is
+   in use.)
+2. **Wait in foreground, bounded calls.** Repeatedly run a foreground
+   Bash call with `timeout` just under the 600000 ms ceiling (e.g.
+   595000 ms). Each call exits as soon as the exit-code file appears, or
+   as soon as the recorded pid is gone:
+
+   ```bash
+   until [ -s "$RC_FILE" ]; do
+     kill -0 "$(cat "$PID_FILE")" 2>/dev/null || break
+     sleep 15
+   done
+   ```
+
+   If one wait call is killed at its 10-minute ceiling, start the next: the
+   launch is detached and survives, and the wait resumes from the same
+   files.
+3. **Do not end the turn** before the exit-code file is read (or the pid is
+   confirmed gone) — no "the task is running, I'll report when it
+   finishes". When done, read `$RC_FILE` and the output in `$LOG` and
+   report per the "Reporting back" section below. On a deadline kill, the
+   recorded exit code is 124 or 137 = "timed out" (see above).
+4. **Stop / abort (before ending the turn).** On abort, kill the recorded
+   pid and its children with the same recipe `pi-review-loop` documents
+   (pid file, walk `ps -axo pid,ppid` level by level, SIGTERM, then
+   SIGKILL stragglers after 5 s). macOS has no `setsid`; the recipe was
+   verified on macOS against a multi-level process tree.
 
 - `-p` — print mode: pi runs headless and emits its final text on stdout.
 - `--no-session` — no session is persisted or resumed; each invocation is

@@ -120,8 +120,8 @@ never replaces the orchestrator's own judgment about the diff.
 `PI_TIMEOUT` (default 1800 s) plus the `PI_KILL_AFTER` (default 30 s) SIGKILL
 escalation — for non-detached processes (a process that detaches into its own
 session escapes the timeout entirely). That is far above Claude Code's Bash
-foreground ceiling, which is why long runs go through
-`run_in_background` + polling — see
+foreground ceiling, which is why long runs are launched detached with a
+pid file and waited on with bounded foreground calls — see
 [configuration → Long runs](configuration.md#long-runs-under-claude-codes-bash-tool)
 for the worst-case derivation.
 

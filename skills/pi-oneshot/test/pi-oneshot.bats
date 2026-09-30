@@ -5,8 +5,9 @@
 # timeout-wrapper contract: the pi call is wrapped in
 # `timeout --kill-after=${PI_KILL_AFTER:-30} ${PI_TIMEOUT:-1800}` (gtimeout
 # fallback with a --kill-after probe; unbounded + warning when absent),
-# exit 124/137 mean "timed out", and Claude Code long-run safety goes through
-# run_in_background polling, not a larger foreground timeout.
+# exit 124/137 mean "timed out", and Claude Code long-run safety goes
+# through a detached launch with a pid file plus bounded foreground waits
+# (not run_in_background — issue #69).
 #
 # No pi binary is needed: the tests only assert on the doc text.
 
@@ -56,8 +57,11 @@ skill_section() {
   grep -qi 'warn' "$CONFIG_FILE"
 }
 
-@test "docs/configuration.md owns the long-run guidance (run_in_background)" {
-  grep -q 'run_in_background' "$CONFIG_FILE"
+@test "docs/configuration.md owns the long-run guidance (detached + foreground wait)" {
+  grep -q 'detached' "$CONFIG_FILE"
+  grep -q 'pid' "$CONFIG_FILE"
+  run grep -q 'run_in_background' "$CONFIG_FILE"
+  [ "$status" -ne 0 ]
 }
 
 @test "docs/configuration.md owns the worst-case loop wall clock (183 min, not 33)" {
@@ -66,8 +70,8 @@ skill_section() {
 
 @test "README carries no timeout-contract literals (single source: docs/configuration.md)" {
   # The README points at configuration.md instead of re-stating the
-  # contract, so the literals must NOT appear there. (run_in_background
-  # may still appear as a pointer; the contract literals may not.)
+  # contract, so the literals must NOT appear there. (the long-run
+  # pointer may still appear; the contract literals may not.)
   run grep -qF 'PI_TIMEOUT:-1800' "$README_FILE"
   [ "$status" -ne 0 ]
   run grep -qF 'PI_KILL_AFTER:-30' "$README_FILE"
@@ -193,8 +197,11 @@ skill_section() {
   rm -f "$tmp"
 }
 
-@test "pi-oneshot SKILL.md instructs run_in_background polling for long runs" {
-  grep -q 'run_in_background' "$SKILL_FILE"
+@test "pi-oneshot SKILL.md instructs detached launch + foreground wait for long runs" {
+  grep -q 'detached' "$SKILL_FILE"
+  grep -q 'PID_FILE' "$SKILL_FILE"
+  # The completion signal for a single pi call is the exit-code file.
+  grep -q 'RC_FILE' "$SKILL_FILE"
 }
 
 # (Cross-file agreement tests with pi-oneshot SKILL.md live in the
