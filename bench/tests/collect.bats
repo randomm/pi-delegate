@@ -373,6 +373,48 @@ EOF
   echo "$output" | jq -e '.claude.duration_api_ms == null' >/dev/null
 }
 
+# --- collect.sh: malformed ms fields fall back to seconds (issue #71) -----------------
+# A non-numeric started_ms (e.g. "abc") must NOT abort: the wall clock falls
+# back to the second-resolution started_at/ended_at pair instead.
+@test "collect.sh: non-numeric started_ms falls back to second-resolution, exit 0" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/40"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # started_ms is a string; second-resolution pair → 7 s wall clock.
+  cat > "$run_dir/run-meta.json" <<'EOF'
+{"task":"issue-41-mech","arm":"A","run":40,"model":"claude-sonnet-5-5",
+ "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
+ "claude_exit":0,
+ "started_at":"2026-09-29T12:00:00Z","ended_at":"2026-09-29T12:00:07Z",
+ "started_ms":"abc"}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 40
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.wall_clock_ms == 7000' >/dev/null
+}
+
+# --- collect.sh: agent_ms must be number or null (issue #71) -----------------------
+# A non-numeric agent_ms is a malformed run: the jq validation rejects the
+# line (exit 2), same treatment as duration_api_ms.
+@test "collect.sh: non-numeric agent_ms → validation error, exit 2" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/41"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  cat > "$run_dir/run-meta.json" <<'EOF'
+{"task":"issue-41-mech","arm":"A","run":41,"model":"claude-sonnet-5-5",
+ "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
+ "claude_exit":0,"agent_ms":"oops"}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 41
+  [ "$status" -eq 2 ]
+}
+
 # --- collect.sh: pi_call_count and delegation_exercised (arm A + arm B) ----------------
 @test "collect.sh: arm A with pi calls — pi_call_count numeric, delegation_exercised null" {
   run_dir="$BENCH_OUT/$MECH_ID/A/34"
@@ -551,6 +593,24 @@ EOF
   local grade_file="$BENCH_OUT/$TASK_ID/A/5/grade.json"
   [ -f "$grade_file" ]
   jq -e '.pass == true' "$grade_file" >/dev/null
+}
+
+# --- grade.sh: base source is logged to stderr --------------------------------------
+# setup.json holds the base_sha (written by setup-run.sh), so grade.sh logs
+# which source it used. A normal run → "base from setup.json".
+@test "grade.sh: logs 'base from setup.json' when setup.json has base_sha" {
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 11
+  [ "$status" -eq 0 ]
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 11
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"grade: base from setup.json"* ]]
 }
 
 # --- grade.sh: git apply failure writes grade.json ------------------------------

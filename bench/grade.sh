@@ -111,12 +111,15 @@ cd "$repo_dir"
 # not the base is still graded (restore/apply target BASE_SHA, tests run
 # on the working tree) and is flagged `head_moved: true` in grade.json.
 base_sha="$(jq -r '.base_sha // empty' "$run_dir/setup.json" 2>/dev/null)" || base_sha=""
-echo "grade: base_sha='$base_sha'" >&2
-if [ -z "$base_sha" ]; then
-  # setup.json holds the BASE_SHA that setup-run.sh fetched into the run
-  # repo — prefer that over the task-level BASE_SHA, which need not be
-  # fetchable in the run repo (e.g. a task env pointing elsewhere).
+if [ -n "$base_sha" ]; then
+  echo "grade: base from setup.json" >&2
+else
+  # No setup.json base_sha: fall back to the task-level BASE_SHA. The
+  # setup.json value is the authoritative base (written by setup-run.sh);
+  # the task.env value is only a fallback for runs whose setup.json lacks
+  # a base_sha.
   base_sha="${BASE_SHA:-}"
+  echo "grade: base from task.env" >&2
 fi
 [ -n "$base_sha" ] || {
   echo "grade: cannot determine base sha (no setup.json base_sha, no BASE_SHA in task.env)" >&2

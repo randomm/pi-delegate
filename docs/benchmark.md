@@ -345,7 +345,7 @@ as a standalone export (a stray `echo $CLAUDE_CODE_OAUTH_TOKEN` in an error
 path would leak it into a log or terminal history):
 
 ```bash
-CLAUDE_CODE_OAUTH_TOKEN="$(security find-generic-password -s Claude\ Code-credentials -w 2>/dev/null)" \
+CLAUDE_CODE_OAUTH_TOKEN="$(security find-generic-password -w -s 'Claude Code-credentials' | jq -r .claudeAiOauth.accessToken)" \
   bench/run-arm.sh click-sentinel-pickle A 1
 ```
 

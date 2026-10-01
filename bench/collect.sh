@@ -51,7 +51,7 @@
 # Validation: the output line is validated with jq before being written.
 # Required fields: task, arm, run, model, target_commit, grade.pass.
 # Numeric fields: claude.duration_ms, claude.duration_api_ms (nullable),
-#   claude.cost_usd (nullable), pi_call_count (number),
+#   claude.cost_usd (nullable), agent_ms (nullable), pi_call_count (number),
 #   pi_tokens_total (nullable object with numeric leaves),
 #   pi[].duration_ms, pi[].tokens.* (nullable).
 # A malformed run (missing required fields, non-numeric where numeric
@@ -113,9 +113,17 @@ if [ -f "$meta_json" ]; then
   perm_mode="$(jq -r '.perm_mode // "null"' "$meta_json")"
   pi_delegate_sha="$(jq -r '.pi_delegate_sha // ""' "$meta_json")"
   [ -z "$pi_delegate_sha" ] && pi_delegate_sha="null"
-  agent_ms="$(jq -c '.agent_ms // null' "$meta_json")" || agent_ms="null"
   started_ms="$(jq -c '.started_ms // null' "$meta_json")" || started_ms="null"
   ended_ms="$(jq -c '.ended_ms // null' "$meta_json")" || ended_ms="null"
+  # agent_ms must be a number or null; a non-numeric value is a malformed
+  # run (same treatment as duration_api_ms below → exit 2 validation error).
+  # A string-valued agent_ms is malformed (exit 2 via validation below); a
+  # missing or JSON-null agent_ms degrades to null. Number/null are kept as
+  # their JSON form ("null" for a missing/null field).
+  agent_ms="$(jq -c 'if (has("agent_ms") and (.agent_ms | type) == "number") then .agent_ms
+                     elif (has("agent_ms") and (.agent_ms | type) == "string") then .agent_ms
+                     else null end' "$meta_json" 2>/dev/null)" || agent_ms="null"
+  [ -n "$agent_ms" ] || agent_ms="null"
 fi
 
 # Load grade.json — optional but expected after grading.
@@ -276,11 +284,11 @@ if [ -f "$run_dir/pi-calls.jsonl" ]; then
 fi
 
 # pi_call_count: number of pi calls (0 when pi-calls.jsonl is absent).
-# delegation_exercised: arm B with ≥1 pi call. Arm A's pi calls are
-# accidental (the shim is installed for both arms); they are not a
-# delegation signal, so the field is null for arm A rather than false.
-# (docs: §metrics — a zero-pi arm-B run is a skill failure and must be
-# reported separately, never mixed into arm-B averages.)
+# delegation_exercised: arm B with ≥1 pi call; arm A is null (not
+# applicable — arm A's pi calls are accidental, not a delegation signal).
+# docs/benchmark.md §"How to read results" defines it: arm B true iff
+# pi_call_count > 0, arm A null; a zero-pi arm-B run is a skill failure.
+
 pi_call_count="$(jq -c 'length' <<< "$pi_calls_json")" || pi_call_count="0"
 if [ "$arm" = "B" ]; then
   delegation_exercised="$(jq -cn --argjson n "$pi_call_count" '($n > 0)')" || delegation_exercised="false"
@@ -329,7 +337,10 @@ wall_clock_ms="null"
 # absent or older run) or a positive integer in ms. The jq -c output for a
 # JSON null is the literal string "null", not empty, so we compare against
 # that explicitly.
-if [ -n "$started_ms" ] && [ -n "$ended_ms" ] && [ "$started_ms" != "null" ] && [ "$ended_ms" != "null" ]; then
+# Both must be plain non-negative integers for the ms subtraction to be
+# safe; a malformed value (e.g. "abc") falls through to the
+# seconds-resolution fallback below instead of aborting the collection.
+if [[ "$started_ms" =~ ^[0-9]+$ ]] && [[ "$ended_ms" =~ ^[0-9]+$ ]]; then
   wall_clock_ms=$(( ended_ms - started_ms ))
 fi
 start_epoch=""
@@ -422,6 +433,8 @@ validation_out="$(printf '%s' "$final_json" | jq -r '
     then "claude.duration_api_ms is not numeric or null"
     elif .claude.cost_usd != null and (.claude.cost_usd | type) != "number"
     then "claude.cost_usd is not numeric or null"
+    elif .agent_ms != null and (.agent_ms | type) != "number"
+    then "agent_ms is not numeric or null"
     elif ((.pi_call_count | type) != "number")
     then "pi_call_count is not numeric"
     elif .pi_tokens_total != null and ((.pi_tokens_total | type) != "object")
