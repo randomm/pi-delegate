@@ -272,8 +272,8 @@ A `pi` wrapper at `<run-dir>/bin/pi`, prepended to `PATH`, that:
   written atomically at start (with `exit: null`) and atomically replaced on
   completion or TERM/INT. A SIGKILLed call keeps `exit: null` and is still
   counted. Each call owns its own file, so concurrent calls never clobber
-  each other's record. Legacy `pi-calls.jsonl` files are read only when
-  `pi-calls.d` is absent.
+  each other's record. This directory is the ONLY pi-call source — the
+  legacy `pi-calls.jsonl` file is no longer read.
 - Prints pi's captured output to its own stdout so Claude's Bash tool sees
   the same text it would have without the shim.
 - Refuses to nest: a real pi whose file contains the marker string
@@ -412,8 +412,8 @@ override),
     `run-meta.json`). The **primary cross-arm comparison metric** (includes
     pi wait time for arm B).
 - **Delegation flag** (arm B only):
-  - `pi_call_count` — number of pi calls (0 if `pi-calls.d` is absent and
-    there is no legacy `pi-calls.jsonl`).
+  - `pi_call_count` — number of pi calls (0 if `pi-calls.d` is absent or
+    empty).
   - `delegation_exercised` — arm B: `true` iff `pi_call_count > 0`; arm A:
     `null` (arm A's pi calls are accidental and not a delegation signal).
   - Arm-B runs with `delegation_exercised == false` are **skill failures**

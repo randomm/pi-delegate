@@ -105,6 +105,32 @@ teardown() {
 
 # --- collect.sh tests ---------------------------------------------------------
 
+# _make_pi_call_record <run-dir> <call_id> <mode> [argv...]
+# Writes one per-call record (the pi-calls.d design) into <run-dir>.
+# One JSON object per call, in $run_dir/pi-calls.d/<call_id>.json.
+_make_pi_call_record() {
+  local run_dir="$1" call_id="$2" mode="$3"
+  shift 3
+  local -a argv=()
+  if [ "$#" -gt 0 ]; then
+    argv=("$@")
+  fi
+  local argv_json
+  if [ "${#argv[@]}" -eq 0 ]; then
+    argv_json="[]"
+  else
+    argv_json="$(for a in "${argv[@]}"; do printf '%s\n' "$a"; done | jq -Rn '[inputs]')"
+  fi
+  jq -cn \
+    --argjson argv "$argv_json" \
+    --argjson duration_ms 0 \
+    --argjson exit 0 \
+    --arg mode "$mode" \
+    --arg call_id "$call_id" \
+    '{argv:$argv, duration_ms:$duration_ms, exit:$exit, mode:$mode, call_id:$call_id}' \
+    > "$run_dir/pi-calls.d/$call_id.json"
+}
+
 @test "collect.sh: success path with arm A fixtures" {
   run_dir="$BENCH_OUT/$MECH_ID/A/1"
   mkdir -p "$run_dir/claude"
@@ -112,7 +138,12 @@ teardown() {
   cp "$FIXTURES/setup.json"            "$run_dir/setup.json"
   cp "$FIXTURES/run-meta.json"         "$run_dir/run-meta.json"
   cp "$FIXTURES/grade-pass.json"       "$run_dir/grade.json"
-  cp "$FIXTURES/pi-calls.jsonl"        "$run_dir/pi-calls.jsonl"
+  # Per-call pi records (the pi-calls.d design) for the two fixture calls.
+  mkdir -p "$run_dir/pi-calls.d"
+  _make_pi_call_record "$run_dir" 1700000000000_12345 json \
+    --mode json -p --no-session "task: do the thing"
+  _make_pi_call_record "$run_dir" 1700000001000_12346 text \
+    -p --no-session --no-extensions "task: oneshot task"
   # pi-<call_id>.jsonl for the json-mode call.
   cp "$FIXTURES/pi-transcript-call1.jsonl" \
      "$run_dir/pi-1700000000000_12345.jsonl"
@@ -261,10 +292,10 @@ EOF
   cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
   cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
   cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
-  cat > "$run_dir/pi-calls.jsonl" <<'EOF'
-{"argv":["--mode","json"],"duration_ms":1000,"exit":0,"mode":"json","call_id":"100_1"}
-{"argv":["--mode","json"],"duration_ms":2000,"exit":0,"mode":"json","call_id":"100_2"}
-EOF
+  # Two json-mode per-call records.
+  mkdir -p "$run_dir/pi-calls.d"
+  _make_pi_call_record "$run_dir" 100_1 json --mode json
+  _make_pi_call_record "$run_dir" 100_2 json --mode json
   # Call 1: two assistant turns (develop + review), different models.
   cat > "$run_dir/pi-100_1.jsonl" <<'EOF'
 {"type":"message_end","message":{"role":"assistant","usage":{"input":100,"output":50,"cacheRead":200,"cacheWrite":1000,"totalTokens":1350},"model":"model-a"}}
@@ -475,7 +506,12 @@ EOF
   cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
   cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
   cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
-  cp "$FIXTURES/pi-calls.jsonl"          "$run_dir/pi-calls.jsonl"
+  # Per-call pi records for the two fixture calls.
+  mkdir -p "$run_dir/pi-calls.d"
+  _make_pi_call_record "$run_dir" 1700000000000_12345 json \
+    --mode json -p --no-session "task: do the thing"
+  _make_pi_call_record "$run_dir" 1700000001000_12346 text \
+    -p --no-session --no-extensions "task: oneshot task"
   cp "$FIXTURES/pi-transcript-call1.jsonl" "$run_dir/pi-1700000000000_12345.jsonl"
 
   run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 34
@@ -491,7 +527,12 @@ EOF
   cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
   cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
   cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
-  cp "$FIXTURES/pi-calls.jsonl"          "$run_dir/pi-calls.jsonl"
+  # Per-call pi records for the two fixture calls.
+  mkdir -p "$run_dir/pi-calls.d"
+  _make_pi_call_record "$run_dir" 1700000000000_12345 json \
+    --mode json -p --no-session "task: do the thing"
+  _make_pi_call_record "$run_dir" 1700000001000_12346 text \
+    -p --no-session --no-extensions "task: oneshot task"
   cp "$FIXTURES/pi-transcript-call1.jsonl" "$run_dir/pi-1700000000000_12345.jsonl"
 
   run bash "$BENCH_DIR/collect.sh" "$MECH_ID" B 1
@@ -510,7 +551,7 @@ EOF
   cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
   cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
   cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
-  # No pi-calls.jsonl → zero pi calls.
+  # No pi-calls.d → zero pi calls.
 
   run bash "$BENCH_DIR/collect.sh" "$MECH_ID" B 2
   [ "$status" -eq 0 ]
@@ -529,10 +570,9 @@ EOF
   cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
   cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
   # Two json-mode calls, two distinct models.
-  cat > "$run_dir/pi-calls.jsonl" <<'EOF'
-{"argv":["--mode","json"],"duration_ms":1000,"exit":0,"mode":"json","call_id":"200_1"}
-{"argv":["--mode","json"],"duration_ms":2000,"exit":0,"mode":"json","call_id":"200_2"}
-EOF
+  mkdir -p "$run_dir/pi-calls.d"
+  _make_pi_call_record "$run_dir" 200_1 json --mode json
+  _make_pi_call_record "$run_dir" 200_2 json --mode json
   # Call 1: one assistant turn, model-a.
   cat > "$run_dir/pi-200_1.jsonl" <<'EOF'
 {"type":"message_end","message":{"role":"assistant","usage":{"input":10,"output":20,"cacheRead":30,"cacheWrite":40,"totalTokens":100},"model":"model-a"}}
@@ -559,9 +599,8 @@ EOF
   cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
   cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
   # A text-mode-only pi call has null tokens.
-  cat > "$run_dir/pi-calls.jsonl" <<'EOF'
-{"argv":["-p","--no-session"],"duration_ms":1000,"exit":0,"mode":"text","call_id":"300_1"}
-EOF
+  mkdir -p "$run_dir/pi-calls.d"
+  _make_pi_call_record "$run_dir" 300_1 text -p --no-session
 
   run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 36
   [ "$status" -eq 0 ]
@@ -571,15 +610,17 @@ EOF
 
 # --- setup-run.sh: re-run clears prior run dir ---------------------------------
 
-@test "setup-run.sh: re-run clears pi-calls.jsonl from prior run" {
+@test "setup-run.sh: re-run clears pi-calls.d records from prior run" {
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 2
   [ "$status" -eq 0 ]
   local run_dir="$BENCH_OUT/$TASK_ID/A/2"
-  echo '{"argv":["--mode","json"],"duration_ms":1,"exit":0,"mode":"json","call_id":"stale_1"}' > "$run_dir/pi-calls.jsonl"
+  # A stale per-call record from a previous run.
+  mkdir -p "$run_dir/pi-calls.d"
+  echo '{"argv":["--mode","json"],"duration_ms":1,"exit":0,"mode":"json","call_id":"stale_1"}' > "$run_dir/pi-calls.d/stale_1.json"
   echo 'stale' > "$run_dir/pi-stale_1.jsonl"
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 2
   [ "$status" -eq 0 ]
-  [ ! -f "$run_dir/pi-calls.jsonl" ]
+  [ ! -f "$run_dir/pi-calls.d/stale_1.json" ]
   [ ! -f "$run_dir/pi-stale_1.jsonl" ]
 }
 
@@ -937,10 +978,10 @@ EOF
   [ "$line1" = '{"type":"message_end","text":"hi "there""}' ]
   # The per-call transcript must contain the blank line too. The test calls
   # the shim twice (once for rc, once for the byte-compare), producing two
-  # transcript files; pick the most recent by mtime. Exclude pi-calls.jsonl
-  # (the metadata log, which is not a per-call transcript).
+  # transcript files; pick the most recent by mtime (per-call records
+  # live in pi-calls.d/ now, so no exclusion is needed).
   local tf
-  tf="$(ls -t "$d"/run/pi-*.jsonl 2>/dev/null | grep -v 'pi-calls.jsonl' | head -n 1)"
+  tf="$(ls -t "$d"/run/pi-*.jsonl 2>/dev/null | head -n 1)"
   [ -n "$tf" ]
   [ "$(sed -n '2p' "$tf")" = "" ]
   # 3 lines total (two JSON lines + the blank line; the trailing newline
@@ -1380,9 +1421,9 @@ EOF
 
 @test "collect.sh: pi duration_ms non-numeric is rejected" {
   # A pi-calls line with duration_ms as a string would break the validator.
-  # The pi-calls.jsonl is generated by the shim (always numeric), so this is
-  # tested at the validator level: a collect line with pi[0].duration_ms
-  # as a string fails.
+  # The per-call pi records (pi-calls.d) are generated by the shim (always
+  # numeric), so this is tested at the validator level: a collect line with
+  # pi[0].duration_ms as a string fails.
   local line
   line='{"task":"x","arm":"A","run":1,"grade":{"pass":true},"pi":[{"duration_ms":"not-a-number"}]}'
   local out

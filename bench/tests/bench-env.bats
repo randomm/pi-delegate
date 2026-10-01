@@ -133,6 +133,37 @@ EOF
   echo "$output" | jq -e '.pi[0].exit == 143' >/dev/null
 }
 
+# A --mode json call killed by SIGTERM must be recorded with the TRUE mode
+# ("json"), not the text-mode default: the mode is determined before the
+# first (started) record, so both the started and the TERM record carry it.
+@test "shim: a SIGTERM-killed --mode json call is recorded with mode json" {
+  local d="$BENCH_OUT/kill-json"
+  _install_killer_pi_shim "$d"
+
+  "$d/run/bin/pi" --mode json -p "kill me" >/dev/null 2>&1 &
+  local shim_pid=$!
+  local i=0
+  while [ $i -lt 100 ] && [ ! -f "$d/stub/ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$d/stub/ready" ]
+  kill -TERM "$shim_pid" 2>/dev/null || true
+  local rc=0
+  wait "$shim_pid" 2>/dev/null || rc=$?
+  [ "$rc" -eq 143 ]
+
+  # One record file in pi-calls.d/: exit 143, mode json (the true mode).
+  local call_id rec
+  call_id="$(ls "$d/run/pi-calls.d/" | grep -v '^\.' | head -n 1)"
+  [ -n "$call_id" ]
+  rec="$d/run/pi-calls.d/$call_id"
+  [ -f "$rec" ]
+  jq -e '.exit == 143' "$rec" >/dev/null
+  jq -e '.mode == "json"' "$rec" >/dev/null
+  jq -e '(.duration_ms | type) == "number"' "$rec" >/dev/null
+}
+
 @test "shim: a completed call yields one record file with the real exit and duration" {
   local d="$BENCH_OUT/kill-ok"
   mkdir -p "$d/stub" "$d/run"

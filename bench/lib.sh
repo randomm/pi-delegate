@@ -315,21 +315,15 @@ t0="$(now_ms_shell)"
 # counted. No writes to a shared file: each call owns its own file, so
 # concurrent calls can never clobber each other's record.
 shim_record() {
-  # Called as: shim_record <duration_ms> <exit> <mode> [argv...]
-  # argv is the full top-level argv (already set in $args); the trap path
-  # passes no argv and $args is used as the fallback.
+  # Called as: shim_record <duration_ms> <exit> <mode>
+  # argv is always the top-level argv in $args (set before the first
+  # call; a trap that fires before that records an empty argv).
   local dur_ms="$1" rc="$2" mode="$3"
-  local -a argv_items=()
-  if [ $# -gt 3 ]; then
-    argv_items=("${@:4}")
-  elif [ "${#args[@]}" -gt 0 ]; then
-    argv_items=("${args[@]}")
-  fi
   local argv_json
-  if [ "${#argv_items[@]}" -eq 0 ]; then
+  if [ "${#args[@]}" -eq 0 ]; then
     argv_json="[]"
   else
-    argv_json="$(for a in "${argv_items[@]}"; do printf '%s\n' "$a"; done | jq -Rn '[inputs]')" || argv_json="[]"
+    argv_json="$(for a in "${args[@]}"; do printf '%s\n' "$a"; done | jq -Rn '[inputs]')" || argv_json="[]"
   fi
   # exit may be null (started) or a number (completed/killed).
   local exit_json
@@ -350,16 +344,23 @@ shim_record() {
   local dir="$RUN_DIR/pi-calls.d"
   local target="$dir/$CALL_TAG.json"
   local tmp="$dir/.${CALL_TAG}.$$tmp"
-  mkdir -p "$dir" 2>/dev/null
-  printf '%s\n' "$obj" > "$tmp" 2>/dev/null && mv -f "$tmp" "$target" 2>/dev/null
+  # A record-write failure (mkdir/printf/mv) must not abort the pi call —
+  # the shim's job is byte-for-byte passthrough; it only prints a warning.
+  if ! mkdir -p "$dir" 2>/dev/null \
+    || ! printf '%s\n' "$obj" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$target" 2>/dev/null; then
+    echo "shim: failed to write pi call record for $CALL_TAG" >&2
+  fi
   return 0
 }
 shim_on_term() {
-  shim_record 0 143 text
+  # json_mode is already set (determined before the first record); an unset
+  # value (trap fired before detection ran) falls back to text.
+  shim_record 0 143 "$([ "${json_mode:-0}" -eq 1 ] && echo json || echo text)"
   exit 143
 }
 shim_on_int() {
-  shim_record 0 130 text
+  shim_record 0 130 "$([ "${json_mode:-0}" -eq 1 ] && echo json || echo text)"
   exit 130
 }
 trap shim_on_term TERM
@@ -369,9 +370,12 @@ trap shim_on_int INT
 # leaves a record file. The completion path replaces it with the real
 # duration/mode/exit, and the trap path (killed call) replaces it with
 # exit 143/130.
+# The call's mode is determined BEFORE the first (started) record so the
+# started record and the TERM/INT records carry the true mode: a --mode
+# json call killed before it completes must still be recorded as mode
+# "json". --no-context-files is injected first so the recorded argv is
+# the actual argv the real pi receives.
 args=("$@")
-shim_record 0 null text "${args[@]}"
-
 # Inject --no-context-files exactly once if not already present.
 injected=0
 for a in "${args[@]}"; do
@@ -384,7 +388,6 @@ if [ "$injected" -eq 0 ]; then
   args+=(--no-context-files)
 fi
 
-# Detect --mode json in argv (adjacent pair).
 json_mode=0
 prev=""
 for a in "${args[@]}"; do
@@ -393,6 +396,7 @@ for a in "${args[@]}"; do
   fi
   prev="$a"
 done
+shim_record 0 null "$([ "$json_mode" -eq 1 ] && echo json || echo text)"
 
 stdout_file="$RUN_DIR/pi-stdout-$CALL_TAG.tmp"
 err_file="$RUN_DIR/pi-err-$CALL_TAG.tmp"
@@ -423,10 +427,11 @@ trap - TERM INT
 t1="$(now_ms_shell)"
 dur_ms=$(( t1 - t0 ))
 
-# Replace the started record with the completion record (real duration,
-# exit code, and the true mode once --mode json is known). One file per
-# call: the same $RUN_DIR/pi-calls.d/<call_id>.json is atomically replaced.
-shim_record "$dur_ms" "$rc" "$([ "$json_mode" -eq 1 ] && echo json || echo text)" "${args[@]}"
+# Replace the started record with the completion record (real duration
+# and exit code; the mode was fixed when the started record was written).
+# One file per call: the same $RUN_DIR/pi-calls.d/<call_id>.json is
+# atomically replaced.
+shim_record "$dur_ms" "$rc" "$([ "$json_mode" -eq 1 ] && echo json || echo text)"
 
 exit "$rc"
 SHEOF
