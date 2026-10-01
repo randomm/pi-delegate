@@ -149,10 +149,14 @@ fi
 # (`git diff` and `git diff --no-index`) emit, per file:
 #   --- a/<old path>   (or --- /dev/null when the patch creates the file)
 #   +++ b/<new path>   (or +++ /dev/null when the patch deletes the file)
-# Optionally followed by a TAB + timestamp, which is stripped. Only a `---`
-# line IMMEDIATELY followed by a `+++` line is a header: content lines inside
-# hunks that start with "- " / "+ " (including lines whose content itself
-# starts with "-- " / "++ ") are never in that position, so they are ignored.
+# Optionally followed by a TAB + timestamp, which is stripped. Only a `--- `
+# line IMMEDIATELY followed by a `+++ ` line is treated as a header: the usual
+# content lines inside hunks ("- "/"+ "/" " prefixes) are not in that position,
+# so they are ignored. Caveat: a hunk whose content is EXACTLY a `--- ` line
+# followed by a `+++ ` line would be misparsed as a header — there is no
+# disambiguation. Such a patch is then caught downstream: the bogus path fails
+# loudly at the path-safety check below, or at restore/`git apply` (a loud
+# failure with a recorded grade.json error, never a silent wrong grade).
 # Classification (old, new):
 #   both real           → MODIFIED: restore the old path from BASE
 #   old /dev/null       → CREATED: delete the new path if present
@@ -160,8 +164,6 @@ fi
 #   both /dev/null      → ignored (not a valid patch)
 # A patch with zero parseable file headers is a setup error (exit 2) — the
 # list is never silently collapsed to empty.
-patch_modified_json="[]"
-patch_created_json="[]"
 restored_json="[]"
 write_patch_header_error() {
   # $1 = error message. Writes the grade record and exits 2 (like the other
@@ -194,10 +196,11 @@ write_patch_header_error() {
 }
 # Parse per-file headers from the patch with awk. A "--- " line is a header
 # candidate only when the NEXT line begins with "+++ "; the pending candidate
-# is discarded otherwise, so content lines inside hunks can never be mistaken
-# for headers (a "++ " content line follows a context/add/delete line, never a
-# "-- " content line, unless the content contains a blank line — impossible
-# in a unified diff, whose header region always terminates before the hunks).
+# is discarded otherwise, so the usual content lines inside hunks ("- " / "+ "
+# / " " prefixes) are not treated as headers. A hunk whose content is exactly
+# a `--- ` line followed by a `+++ ` line WOULD be treated as a header (no
+# disambiguation is possible); that misparse then fails loudly at the path-
+# safety check below or at restore/`git apply` — never a silent wrong grade.
 _parse_out="$(timeout 60 awk '
   /^--- / {
     pend = $0
@@ -230,6 +233,15 @@ _parse_out="$(timeout 60 awk '
   }
   { pend = "" }
 ' "$patch_path" 2>/dev/null)"
+# Capture awk's own exit status: a non-zero exit is "failed to read",
+# independent of the -f/-r probes; only an awk success with no output
+# reaches the header probe below.
+_parse_rc=$?
+if [ "$_parse_rc" -ne 0 ]; then
+  write_patch_header_error "failed to read grading patch: $patch_path"
+  # Unreachable: write_patch_header_error exits the script (exit 2).
+  exit 2
+fi
 if [ -z "$_parse_out" ]; then
   # Read/grep failure OR zero file headers — both are setup errors. The list
   # is never silently collapsed to an empty list.
@@ -241,23 +253,40 @@ if [ -z "$_parse_out" ]; then
   # Unreachable: write_patch_header_error exits the script (exit 2).
   exit 2
 fi
+# Path safety: any parsed path (old or new side, not /dev/null) that is
+# absolute or contains a `..` component is refused. A misparsed hunk (see the
+# awk comment above) can only surface paths like these, so failing loudly here
+# keeps a malformed patch from ever touching restore/apply with a bogus path.
+patch_modified_json="[]"
+patch_created_json="[]"
 while IFS=$'\t' read -r _kind _old_path _new_path; do
   case "$_kind" in
     M)
-      patch_modified_json="$(jq -cn --argjson acc "$patch_modified_json" --arg p "$_old_path" '$acc + [$p]')" || patch_modified_json="[]"
+      patch_modified_json="$(jq -cn --argjson acc "$patch_modified_json" --arg p "$_old_path" '$acc + [$p]')" \
+        || write_patch_header_error "failed to build grading file list: jq failed for $_old_path"
       ;;
     C)
       if [ "$_old_path" = "/dev/null" ]; then
         # Created: delete the new path if present (below).
-        patch_created_json="$(jq -cn --argjson acc "$patch_created_json" --arg p "$_new_path" '$acc + [$p]')" || patch_created_json="[]"
+        patch_created_json="$(jq -cn --argjson acc "$patch_created_json" --arg p "$_new_path" '$acc + [$p]')" \
+          || write_patch_header_error "failed to build grading file list: jq failed for $_new_path"
       elif [ "$_new_path" = "/dev/null" ]; then
         # Deleted by the patch: restore the old path from BASE (below).
-        patch_modified_json="$(jq -cn --argjson acc "$patch_modified_json" --arg p "$_old_path" '$acc + [$p]')" || patch_modified_json="[]"
+        patch_modified_json="$(jq -cn --argjson acc "$patch_modified_json" --arg p "$_old_path" '$acc + [$p]')" \
+          || write_patch_header_error "failed to build grading file list: jq failed for $_old_path"
       else
         : # both /dev/null — not a valid patch file, ignore.
       fi
       ;;
   esac
+  for _pp in "$_old_path" "$_new_path"; do
+    [ -n "$_pp" ] || continue
+    [ "$_pp" = "/dev/null" ] && continue
+    case "$_pp" in
+      /*) write_patch_header_error "unsafe path in grading patch: $_pp" ;;
+      ../*|*/..|*/../*) write_patch_header_error "unsafe path in grading patch: $_pp" ;;
+    esac
+  done
 done <<< "$_parse_out"
 
 # For each file the patch modifies: if the working tree differs from BASE
@@ -304,7 +333,11 @@ while IFS= read -r p; do
   fi
   if [ "$_need_restore" -eq 1 ]; then
     _co_err=""
-    if ! _co_err="$(timeout 60 git checkout "$base_sha" -- "$p" 2>&1)"; then
+    _co_rc=0
+    _co_err="$(timeout 60 git checkout "$base_sha" -- "$p" 2>&1)" || _co_rc=$?
+    if [ "$_co_rc" -eq 124 ] || [ "$_co_rc" -eq 137 ]; then
+      write_restore_failure "$p" "timeout after 60s"
+    elif [ "$_co_rc" -ne 0 ]; then
       # Restore failure is a setup error: fail loudly (exit 2) with a
       # grade.json recording the error — do not swallow it and continue.
       write_restore_failure "$p" "${_co_err//$'\n'/ }"
@@ -317,7 +350,11 @@ done < <(jq -r '.[]' <<< "$patch_modified_json" 2>/dev/null)
 while IFS= read -r p; do
   [ -n "$p" ] || continue
   if [ -f "$p" ]; then
-    rm -f -- "$p" || true
+    if ! rm -f -- "$p"; then
+      # A stray copy that cannot be removed blocks `git apply`: fail loudly
+      # (the file is not restored, so it is not recorded in the list).
+      write_restore_failure "$p" "could not delete stray created file"
+    fi
     restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" || true
   fi
 done < <(jq -r '.[]' <<< "$patch_created_json" 2>/dev/null)

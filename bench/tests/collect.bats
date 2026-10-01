@@ -72,6 +72,10 @@ FIX_SHA=$FIX_SHA
 TEST_CMD=true
 GRADING_PATCH=grading.patch
 EOF
+  # Save pristine copies so teardown can restore them if a test mutates
+  # $TASK_DIR and fails mid-way (item 8: prevent cross-test poisoning).
+  cp "$TASK_DIR/grading.patch" "$BENCH_OUT/.saved-grading.patch"
+  cp "$TASK_DIR/task.env"      "$BENCH_OUT/.saved-task.env"
 
   # A second temp task id used by the collect tests.
   MECH_ID="issue-41-mech"
@@ -90,7 +94,13 @@ EOF
 }
 
 teardown() {
-  rm -rf "$BENCH_OUT"
+  # Restore the shared $TASK_DIR files if a test mutated them and failed
+  # mid-way (item 8: prevent a mid-test failure from poisoning later tests).
+  if [ -n "${BENCH_OUT:-}" ] && [ -d "${TASK_DIR:-}" ]; then
+    cp "${BENCH_OUT}/.saved-grading.patch" "$TASK_DIR/grading.patch" 2>/dev/null || true
+    cp "${BENCH_OUT}/.saved-task.env"      "$TASK_DIR/task.env"      2>/dev/null || true
+  fi
+  rm -rf "${BENCH_OUT:-}"
 }
 
 # --- collect.sh tests ---------------------------------------------------------
@@ -373,16 +383,17 @@ EOF
   echo "$output" | jq -e '.claude.duration_api_ms == null' >/dev/null
 }
 
-# --- collect.sh: malformed ms fields fall back to seconds (issue #71) -----------------
-# A non-numeric started_ms (e.g. "abc") must NOT abort: the wall clock falls
-# back to the second-resolution started_at/ended_at pair instead.
-@test "collect.sh: non-numeric started_ms falls back to second-resolution, exit 0" {
+# --- collect.sh: malformed ms fields are a validation error (issue #71) --------------
+# A present, non-null started_ms/ended_ms that is NOT a plain non-negative
+# integer is a malformed run: exit 2, not a silent fallback to seconds.
+# (Absent or JSON null still falls back to the second-resolution fields.)
+@test "collect.sh: non-numeric started_ms → exit 2" {
   run_dir="$BENCH_OUT/$MECH_ID/A/40"
   mkdir -p "$run_dir/claude"
   cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
   cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
   cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
-  # started_ms is a string; second-resolution pair → 7 s wall clock.
+  # started_ms is a string: present and non-null but not an integer.
   cat > "$run_dir/run-meta.json" <<'EOF'
 {"task":"issue-41-mech","arm":"A","run":40,"model":"claude-sonnet-5-5",
  "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
@@ -392,8 +403,27 @@ EOF
 EOF
 
   run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 40
-  [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.wall_clock_ms == 7000' >/dev/null
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"started_ms"* ]]
+}
+
+@test "collect.sh: non-numeric ended_ms → exit 2" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/40"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  cat > "$run_dir/run-meta.json" <<'EOF'
+{"task":"issue-41-mech","arm":"A","run":40,"model":"claude-sonnet-5-5",
+ "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
+ "claude_exit":0,
+ "started_at":"2026-09-29T12:00:00Z","ended_at":"2026-09-29T12:00:07Z",
+ "started_ms":1761787200000,"ended_ms":"oops"}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 40
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ended_ms"* ]]
 }
 
 # --- collect.sh: agent_ms must be number or null (issue #71) -----------------------
@@ -1766,4 +1796,99 @@ index 0000000..1234567
   jq -e '.error | contains("no file headers")' "$grade_file" >/dev/null
   jq -e 'has("head_moved")' "$grade_file" >/dev/null
   _patch_parse_post
+}
+
+# --- grade.sh: path safety — unsafe parsed patch paths are refused (issue #71) ---
+# A patch whose parsed path (old or new side) is absolute or contains a `..`
+# component is refused: exit 2, grade.json error "unsafe path in grading
+# patch: <p>". Such paths can only come from a malformed/misparsed patch.
+_patch_path_test() {
+  # $1 = run#, $2 = grading patch path (already written). Uses $PATCH_TASK_DIR
+  # (an isolated task dir, so the shared $TASK_DIR is not mutated).
+  local run_num="$1" patch_file="$2"
+  local repo="$BENCH_OUT/unsafe-path-repo"
+  if [ ! -d "$repo" ]; then
+    git init -q -b main "$repo"
+    git -C "$repo" config user.email t@t.t
+    git -C "$repo" config user.name t
+    echo "x" > "$repo/seed.txt"
+    git -C "$repo" add seed.txt
+    git -C "$repo" commit -qm "add seed"
+  fi
+  local base
+  base="$(git -C "$repo" rev-parse HEAD)"
+  cp "$patch_file" "$PATCH_TASK_DIR/grading.patch"
+  cat > "$PATCH_TASK_DIR/task.env" <<EOF
+REPO=$repo
+BASE_SHA=$base
+FIX_SHA=$base
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/setup-run.sh" "$PATCH_TASK_ID" A "$run_num"
+  [ "$status" -eq 0 ]
+}
+
+@test "grade.sh: absolute path in patch → exit 2 + unsafe path error" {
+  PATCH_TASK_ID="unsafe-path-test"
+  PATCH_TASK_DIR="$TASKS_DIR/$PATCH_TASK_ID"
+  mkdir -p "$PATCH_TASK_DIR"
+  local patch="$BENCH_OUT/pt-abs.patch"
+  printf 'diff --git a/seed.txt b//absolute/path.txt\n--- /dev/null\n+++ b//absolute/path.txt\n@@ -0,0 +1 @@\n+new\n' > "$patch"
+  _patch_path_test 60 "$patch"
+  run bash "$BENCH_DIR/grade.sh" "$PATCH_TASK_ID" A 60
+  [ "$status" -eq 2 ]
+  local grade_file="$BENCH_OUT/$PATCH_TASK_ID/A/60/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == false' "$grade_file" >/dev/null
+  jq -e '.error | contains("unsafe path in grading patch: /absolute/path.txt")' "$grade_file" >/dev/null
+}
+
+@test "grade.sh: .. component in patch path → exit 2 + unsafe path error" {
+  PATCH_TASK_ID="unsafe-path-test2"
+  PATCH_TASK_DIR="$TASKS_DIR/$PATCH_TASK_ID"
+  mkdir -p "$PATCH_TASK_DIR"
+  local patch="$BENCH_OUT/pt-dotdot.patch"
+  printf 'diff --git a/seed.txt b/../escape.txt\n--- /dev/null\n+++ b/../escape.txt\n@@ -0,0 +1 @@\n+new\n' > "$patch"
+  _patch_path_test 61 "$patch"
+  run bash "$BENCH_DIR/grade.sh" "$PATCH_TASK_ID" A 61
+  [ "$status" -eq 2 ]
+  local grade_file="$BENCH_OUT/$PATCH_TASK_ID/A/61/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == false' "$grade_file" >/dev/null
+  jq -e '.error | contains("unsafe path in grading patch: ../escape.txt")' "$grade_file" >/dev/null
+}
+
+# --- grade.sh: task.env base fallback (issue #71) -----------------------------------
+# A setup.json without base_sha: grade.sh falls back to the task-level
+# BASE_SHA, logs "base from task.env", and grades normally.
+@test "grade.sh: setup.json without base_sha → base from task.env, graded normally" {
+  local run_num=70
+  local tenv_id="base-fallback"
+  local tenv_dir="$TASKS_DIR/$tenv_id"
+  local run_dir="$BENCH_OUT/$tenv_id/A/$run_num"
+  # Set up the run under the per-test task id.
+  mkdir -p "$tenv_dir"
+  cp "$TASK_DIR/grading.patch" "$tenv_dir/grading.patch"
+  cat > "$tenv_dir/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/setup-run.sh" "$tenv_id" A "$run_num"
+  [ "$status" -eq 0 ]
+  local repo_dir="$run_dir/repo"
+  # setup.json exists but has no base_sha (field deleted).
+  jq 'del(.base_sha)' "$run_dir/setup.json" > "$run_dir/setup.json.tmp"
+  mv "$run_dir/setup.json.tmp" "$run_dir/setup.json"
+  # Agent tamper: the graded file is edited; the restore must use the
+  # task.env BASE_SHA to succeed.
+  echo "agent tamper" > "$repo_dir/hello.txt"
+  run bash "$BENCH_DIR/grade.sh" "$tenv_id" A "$run_num"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"grade: base from task.env"* ]]
+  local grade_file="$run_dir/grade.json"
+  jq -e '.pass == true' "$grade_file" >/dev/null
 }

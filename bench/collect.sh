@@ -113,8 +113,20 @@ if [ -f "$meta_json" ]; then
   perm_mode="$(jq -r '.perm_mode // "null"' "$meta_json")"
   pi_delegate_sha="$(jq -r '.pi_delegate_sha // ""' "$meta_json")"
   [ -z "$pi_delegate_sha" ] && pi_delegate_sha="null"
-  started_ms="$(jq -c '.started_ms // null' "$meta_json")" || started_ms="null"
-  ended_ms="$(jq -c '.ended_ms // null' "$meta_json")" || ended_ms="null"
+  # started_ms/ended_ms: present + non-null but not a plain non-negative
+  # integer is a malformed run (exit 2) — not silently degraded. Absent or
+  # JSON null falls back to the second-resolution fields below (older runs).
+  started_ms="$(jq -c '.started_ms // null' "$meta_json")" || { echo "collect: failed to read run-meta.json started_ms" >&2; exit 2; }
+  ended_ms="$(jq -c '.ended_ms // null' "$meta_json")" || { echo "collect: failed to read run-meta.json ended_ms" >&2; exit 2; }
+  for _ms_field in started_ms ended_ms; do
+    if [ "$_ms_field" = "started_ms" ]; then _ms_val="$started_ms"; else _ms_val="$ended_ms"; fi
+    if [ -n "$_ms_val" ] && [ "$_ms_val" != "null" ]; then
+      case "$_ms_val" in
+        0|[1-9][0-9]*) ;;
+        *) echo "collect: run-meta.json $_ms_field is not a non-negative integer: $_ms_val" >&2; exit 2 ;;
+      esac
+    fi
+  done
   # agent_ms must be a number or null; a non-numeric value is a malformed
   # run (same treatment as duration_api_ms below → exit 2 validation error).
   # A string-valued agent_ms is malformed (exit 2 via validation below); a
@@ -265,9 +277,8 @@ if [ -f "$run_dir/pi-calls.jsonl" ]; then
   # Build the pi array in one jq call.
   # --rawfile + split("\n") + fromjson is robust across jq versions (the
   # --slurpfile semantics for JSONL differ between jq versions).
-  # After the array is built, sum the per-model tokens over every call (the
-  # requirement is per-model totals, so we aggregate on the per_model field
-  # that the tokens-extraction step above records).
+  # The pi array is a core field: a jq failure building it is a malformed
+  # run (exit 2), not a silent empty list.
   pi_calls_json="$(jq -cn \
     --rawfile calls "$run_dir/pi-calls.jsonl" \
     --rawfile tmap "$tokens_map" \
@@ -279,7 +290,7 @@ if [ -f "$run_dir/pi-calls.jsonl" ]; then
        | . as $tok
        | ($c + {tokens: $tok})
       ]) as $arr
-     | $arr' 2>/dev/null)" || pi_calls_json="[]"
+     | $arr')" || { echo "collect: failed to build pi call array from pi-calls.jsonl" >&2; exit 2; }
   rm -f "$tokens_map"
 fi
 
@@ -301,8 +312,8 @@ fi
 # field so the per-model breakdown is preserved; if no call had a transcript
 # (no per_model data) the total is null. (docs: §metrics — the pi side is
 # costed by tokens per model, not by cost_usd, which is 0.0 locally.)
-# The per-model aggregation uses a single jq program (no nested reduce) to
-# keep the syntax simple and portable across jq versions.
+# The per-model aggregation uses a single jq program to keep the syntax
+# simple and portable across jq versions.
 pi_tokens_total="$(jq -c '
   [ .[] | select(.tokens != null and (.tokens.per_model != null)) | .tokens.per_model ] as $per_model_arr
   | reduce $per_model_arr[] as $m ({};
@@ -315,8 +326,7 @@ pi_tokens_total="$(jq -c '
           | .total += $m[$k].total))
     )
   | if (. | length) == 0 then null else . end
-' <<< "$pi_calls_json" 2>/dev/null)" || pi_tokens_total="null"
-pi_tokens_total="$(jq -c . <<< "$pi_tokens_total" 2>/dev/null)" || pi_tokens_total="null"
+' <<< "$pi_calls_json")" || { echo "collect: failed to compute pi_tokens_total" >&2; exit 2; }
 
 # Wall clock: the run's own duration, from run-meta.json started_at to
 # ended_at (both ISO-8601 UTC, recorded by run-arm.sh around the claude
@@ -437,6 +447,8 @@ validation_out="$(printf '%s' "$final_json" | jq -r '
     then "agent_ms is not numeric or null"
     elif ((.pi_call_count | type) != "number")
     then "pi_call_count is not numeric"
+    elif (.delegation_exercised | type) != "boolean" and (.delegation_exercised != null)
+    then "delegation_exercised is not a boolean or null"
     elif .pi_tokens_total != null and ((.pi_tokens_total | type) != "object")
     then "pi_tokens_total is not an object or null"
     elif (.pi | map(select(. != null and .duration_ms != null))
