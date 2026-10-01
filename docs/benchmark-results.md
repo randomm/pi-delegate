@@ -34,13 +34,11 @@ Protocol & harness details: [docs/benchmark.md](benchmark.md)
 | sentinel-pickle | A | 3 | 3/3 | 0.0658 | 1781 | 78507 | 8058 | 17376 | 21184 |
 | sentinel-pickle | B | 3 | 3/3 | 0.1772 | 3545 | 272735 | 21778 | 36769 | 1009728 |
 | sentinel-pickle | **B/A** | — | — | **2.70×** | **2.0×** | **3.5×** | **2.7×** | **2.1×** | — |
-| param-source | A | 3 | 2/3* | 0.0866 | 1958 | 125701 | 11443 | 23405 | 29926 |
+| param-source | A | 3 | 3/3 | 0.0866 | 1919 | 117548 | 10976 | 21978 | 27715 |
 | param-source | B | 3 | 3/3 | 0.1503 | 2639 | 200105 | 20956 | 34646 | 346955 |
-| param-source | **B/A** | — | — | **1.74×** | **1.35×** | **1.6×** | **1.8×** | **1.5×** | — |
+| param-source | **B/A** | — | — | **1.73×** | **1.38×** | **1.70×** | **1.91×** | **1.58×** | — |
 
-\* arm A run 1 failed (test command exited 2); runs 2–3 passed. Excluding the failed run, arm A is 2/3; including it, 2/3.
-
-**Claude cost ratio:** sentinel-pickle **2.70×** · param-source **1.74×**
+**Claude cost ratio:** sentinel-pickle **2.70×** · param-source **1.73×**
 
 ### Per-run detail
 
@@ -52,7 +50,7 @@ Protocol & harness details: [docs/benchmark.md](benchmark.md)
 | sentinel-pickle | B | 1 | ✓ | 0.1431 | 2835 | 189853 | 19197 | 27896 | 483582 |
 | sentinel-pickle | B | 2 | ✓ | 0.1848 | 3542 | 280710 | 23287 | 37935 | 2310391 |
 | sentinel-pickle | B | 3 | ✓ | 0.2036 | 4259 | 347642 | 22851 | 44477 | 235211 |
-| param-source | A | 1 | ✗ | 0.0968 | 2369 | 123964 | 12081 | 24217 | 29955 |
+| param-source | A | 1 | ✓ | 0.0789 | 1841 | 101242 | 10042 | 19124 | 23294 |
 | param-source | A | 2 | ✓ | 0.0980 | 2078 | 130465 | 12779 | 22598 | 29787 |
 | param-source | A | 3 | ✓ | 0.0830 | 1838 | 120936 | 10106 | 24211 | 30065 |
 | param-source | B | 1 | ✓ | 0.1596 | 2906 | 228185 | 21205 | 34988 | 344235 |
@@ -74,10 +72,9 @@ Protocol & harness details: [docs/benchmark.md](benchmark.md)
 
 ## 3. Findings
 
-**Quality is at par.** All 12 valid runs pass. The single arm-A failure
-(sentinel-pickle run 1) was an environment flake (test command exited 2),
-not an implementation defect; the same task passes in arm A runs 2–3 and
-all three arm B runs.
+**Quality is at par.** All 12 valid runs pass. One run (param-source, arm A
+run 1) was re-run after a broken test environment (unpinned pytest 9) was
+fixed, and the invalid first attempt was excluded from the tables above.
 
 **Arm B used more Claude, not less.** The ratio narrows with task size,
 consistent with a roughly fixed per-task delegation overhead:
@@ -85,12 +82,12 @@ consistent with a roughly fixed per-task delegation overhead:
 | Task | Claude cost ratio (B/A) | Absolute overhead (B−A mean) |
 |---|---|---|
 | sentinel-pickle (mechanical) | 2.70× | +$0.111 |
-| param-source (intricate) | 1.74× | +$0.064 |
+| param-source (intricate) | 1.73× | +$0.064 |
 
 **Where the overhead comes from:**
 
 1. **Skill text loaded into context** — cache_creation roughly doubles
-   (sentinel: 8058 → 21778; param-source: 11443 → 20956), because the
+   (sentinel: 8058 → 21778; param-source: 10976 → 20956), because the
    skill's developer and reviewer prompts are injected into every pi call.
 2. **Launch / wait / summary turns** — arm B has extra Claude turns to
    launch the loop, wait for pi to finish, and read back the summary.
