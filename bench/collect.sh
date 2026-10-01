@@ -213,9 +213,19 @@ if [ -f "$run_dir/pi-calls.jsonl" ] || [ -d "$run_dir/pi-calls.d" ]; then
   # JSON object; exit may be null (SIGKILLed call that never completed).
   calls_dir="$run_dir/pi-calls.d"
   deduped_calls="$run_dir/.pi-calls-deduped.jsonl"
+  # Temp files (deduped calls, tokens map) are removed on every exit path
+  # via trap EXIT — never left in the run dir.
+  _cleanup_tmp() {
+    if [ -n "${_tmp_deduped:-}" ]; then rm -f "$_tmp_deduped" 2>/dev/null; fi
+    if [ -n "${_tmp_tmap:-}" ]; then rm -f "$_tmp_tmap" 2>/dev/null; fi
+    return 0
+  }
+  trap _cleanup_tmp EXIT
+  _tmp_deduped=""; _tmp_tmap=""
   if [ -d "$calls_dir" ]; then
     # Build the deduped JSONL from the per-call files (sorted by filename
     # for deterministic order). Each file is one JSON object.
+    _tmp_deduped="$deduped_calls"
     : > "$deduped_calls"
     for f in "$calls_dir"/*.json; do
       [ -e "$f" ] || continue
@@ -229,7 +239,6 @@ if [ -f "$run_dir/pi-calls.jsonl" ] || [ -d "$run_dir/pi-calls.d" ]; then
   # exit (number or null).
   if ! jq -e -s 'all(.[]; (.call_id | type) == "string" and (.mode | type) == "string" and ((.exit | type) == "number" or (.exit | type) == "null"))' "$deduped_calls" >/dev/null 2>&1; then
     echo "collect: pi-calls contains a malformed line (bad call_id/mode/exit); refusing" >&2
-    [ "$deduped_calls" != "$run_dir/pi-calls.jsonl" ] && rm -f "$deduped_calls"
     exit 2
   fi
   # Process each line of the deduped pi calls. Accumulate a jq array by parsing
@@ -243,6 +252,7 @@ if [ -f "$run_dir/pi-calls.jsonl" ] || [ -d "$run_dir/pi-calls.d" ]; then
   #      looking up tokens from a temp map file.
   # Build the tokens map as a JSONL file (one {id, tokens} object per line).
   tokens_map="$run_dir/.pi-tokens-map.jsonl"
+  _tmp_tmap="$tokens_map"
   : > "$tokens_map"
   # Build the tokens map as a JSONL file (one {id, tokens} object per line).
   # All stderr from the loop is suppressed so jq errors inside the loop
@@ -309,8 +319,8 @@ if [ -f "$run_dir/pi-calls.jsonl" ] || [ -d "$run_dir/pi-calls.d" ]; then
        | ($c + {tokens: $tok})
       ]) as $arr
      | $arr')" || { echo "collect: failed to build pi call array from pi-calls.jsonl" >&2; exit 2; }
-  rm -f "$tokens_map"
-  [ "$deduped_calls" != "$run_dir/pi-calls.jsonl" ] && rm -f "$deduped_calls" 2>/dev/null || true
+  # Temp files (.pi-calls-deduped.jsonl, .pi-tokens-map.jsonl) are cleaned
+  # by trap EXIT on every exit path — never left in the run dir.
 fi
 
 # pi_call_count: number of pi calls (0 when pi-calls.jsonl is absent).

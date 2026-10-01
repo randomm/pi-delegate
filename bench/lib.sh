@@ -200,7 +200,8 @@ PI_SHIM_MARKER="# pi-delegate-bench-shim"
 #       <run-dir>/pi-<N>.jsonl (N = the call id); collect.sh parses usage
 #       from the per-call JSONL files.
 #   text mode (oneshot path):
-#     - record argv + wall clock + exit code to <run-dir>/pi-calls.jsonl.
+#     - record argv + wall clock + exit code to
+#       <run-dir>/pi-calls.d/<call_id>.json.
 #     - the per-call token count is not available (text mode has no usage
 #       events); collect.sh reports pi_tokens as null for those calls.
 #     - This is the documented token-accounting gap (docs/benchmark.md).
@@ -281,7 +282,6 @@ install_pi_shim() {
 set -u
 
 RUN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG_FILE="${PI_SHIM_LOG:-$RUN_DIR/pi-calls.jsonl}"
 # Per-call id: epoch-seconds + $$ is portable (BSD date has no %3N).
 # The pid is the real uniqueness source for concurrent calls in one run;
 # two pids can never be equal, so call ids are unique per run and the

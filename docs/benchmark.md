@@ -268,7 +268,12 @@ A `pi` wrapper at `<run-dir>/bin/pi`, prepended to `PATH`, that:
 - **Never injects `--mode json`** — the shim must not change skill behaviour.
   For pi-oneshot this means a documented token-accounting gap rather than a
   silent behaviour change.
-- Appends one metadata line per call to `<run-dir>/pi-calls.jsonl`.
+- Records one JSON object per call in `<run-dir>/pi-calls.d/<call_id>.json`:
+  written atomically at start (with `exit: null`) and atomically replaced on
+  completion or TERM/INT. A SIGKILLed call keeps `exit: null` and is still
+  counted. Each call owns its own file, so concurrent calls never clobber
+  each other's record. Legacy `pi-calls.jsonl` files are read only when
+  `pi-calls.d` is absent.
 - Prints pi's captured output to its own stdout so Claude's Bash tool sees
   the same text it would have without the shim.
 - Refuses to nest: a real pi whose file contains the marker string
@@ -317,7 +322,7 @@ never passes validation**, `grade.pass` boolean, `claude.duration_ms` /
 numeric, `pi_tokens_total` object-or-null, and `pi[].duration_ms` and
 `pi[].tokens.*` numeric when non-null. A malformed run fails loudly (exit 2)
 instead of polluting the report. Duplicate `task`/`arm`/`run` lines (i.e.
-duplicate pi-call entries in `pi-calls.jsonl`) are refused.
+duplicate pi-call records in `pi-calls.d`) are refused.
 
 ### Cost basis
 
@@ -407,7 +412,8 @@ override),
     `run-meta.json`). The **primary cross-arm comparison metric** (includes
     pi wait time for arm B).
 - **Delegation flag** (arm B only):
-  - `pi_call_count` — number of pi calls (0 if `pi-calls.jsonl` absent).
+  - `pi_call_count` — number of pi calls (0 if `pi-calls.d` is absent and
+    there is no legacy `pi-calls.jsonl`).
   - `delegation_exercised` — arm B: `true` iff `pi_call_count > 0`; arm A:
     `null` (arm A's pi calls are accidental and not a delegation signal).
   - Arm-B runs with `delegation_exercised == false` are **skill failures**

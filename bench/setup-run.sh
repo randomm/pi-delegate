@@ -93,11 +93,11 @@ run_dir="$(arm_run_dir "$task_id" "$arm" "$run_num")"
 repo_dir="$run_dir/repo"
 
 # --- Remove any prior run directory (idempotent re-run) ---------------------
-# A re-run must start with a CLEAN run dir: pi-calls.jsonl, the per-call
+# A re-run must start with a CLEAN run dir: pi-calls.d, the per-call
 # pi-*.jsonl transcripts, the claude/ output, run-meta.json, grade.json,
 # setup.json, and any apply-err/test-output logs all live in the run dir
 # (not in repo/, which is removed above). If we only removed repo/, the
-# second run's collect.sh would read the FIRST run's pi-calls.jsonl and
+# second run's collect.sh would read the FIRST run's pi-calls.d and
 # double-count tokens (review item 12). The run dir is disposable — it is
 # created by arm_run_dir above and every other file in it is a run artifact.
 if [ -d "$run_dir" ]; then

@@ -274,7 +274,6 @@ mkdir -p "$claude_out"
 rc=0
 PATH="$run_dir/bin:$PATH" \
 CLAUDE_CONFIG_DIR="$config_dir" \
-PI_SHIM_LOG="$run_dir/pi-calls.jsonl" \
 "${wrap[@]+${wrap[@]}}" \
   claude -p \
     --output-format json \
