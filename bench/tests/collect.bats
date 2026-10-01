@@ -54,11 +54,13 @@ setup() {
   git commit -qm "add world"
   FIX_SHA="$(git rev-parse HEAD)"
   cat > "$TASK_DIR/grading.patch" <<'EOF'
-diff --git a/extra-test.txt b/extra-test.txt
-new file mode 100644
-index 0000000..e69de29
---- /dev/null
-+++ b/extra-test.txt
+diff --git a/hello.txt b/hello.txt
+index 1234567..89abcde 100644
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-hello
++hello modified
 EOF
   cat > "$TASK_DIR/prompt.md" <<'EOF'
 Test prompt for setup-run BATS.
@@ -70,6 +72,10 @@ FIX_SHA=$FIX_SHA
 TEST_CMD=true
 GRADING_PATCH=grading.patch
 EOF
+  # Save pristine copies so teardown can restore them if a test mutates
+  # $TASK_DIR and fails mid-way (item 8: prevent cross-test poisoning).
+  cp "$TASK_DIR/grading.patch" "$BENCH_OUT/.saved-grading.patch"
+  cp "$TASK_DIR/task.env"      "$BENCH_OUT/.saved-task.env"
 
   # A second temp task id used by the collect tests.
   MECH_ID="issue-41-mech"
@@ -88,7 +94,13 @@ EOF
 }
 
 teardown() {
-  rm -rf "$BENCH_OUT"
+  # Restore the shared $TASK_DIR files if a test mutated them and failed
+  # mid-way (item 8: prevent a mid-test failure from poisoning later tests).
+  if [ -n "${BENCH_OUT:-}" ] && [ -d "${TASK_DIR:-}" ]; then
+    cp "${BENCH_OUT}/.saved-grading.patch" "$TASK_DIR/grading.patch" 2>/dev/null || true
+    cp "${BENCH_OUT}/.saved-task.env"      "$TASK_DIR/task.env"      2>/dev/null || true
+  fi
+  rm -rf "${BENCH_OUT:-}"
 }
 
 # --- collect.sh tests ---------------------------------------------------------
@@ -294,6 +306,269 @@ EOF
   echo "$output" | jq -e '.wall_clock_ms == 10000' >/dev/null
 }
 
+# --- collect.sh: wall clock prefers ms-resolution started_ms/ended_ms (issue #71) -----------
+# The old second-resolution pair read wall_clock_ms to 0 for sub-second runs.
+# With the ms-resolution fields present, the sub-second run must NOT be 0.
+@test "collect.sh: wall clock prefers ms-resolution started_ms/ended_ms over second-resolution" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/30"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # 12 ms wall clock, 36 ms agent. The second-resolution pair would be 0
+  # (both timestamps fall in the same second); the ms pair is the true value.
+  cat > "$run_dir/run-meta.json" <<'EOF'
+{"task":"issue-41-mech","arm":"A","run":30,"model":"claude-sonnet-5-5",
+ "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
+ "claude_exit":0,"agent_ms":36,
+ "started_at":"2026-09-29T12:00:00Z","ended_at":"2026-09-29T12:00:00Z",
+ "started_ms":1761787200000,"ended_ms":1761787200012}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 30
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.wall_clock_ms == 12' >/dev/null
+  echo "$output" | jq -e '.agent_ms == 36' >/dev/null
+}
+
+# --- collect.sh: wall clock falls back to second-resolution when ms absent ---------------
+@test "collect.sh: wall clock falls back to second-resolution when ms fields absent" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/31"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # No started_ms/ended_ms; second-resolution only → 5 s wall clock.
+  cat > "$run_dir/run-meta.json" <<'EOF'
+{"task":"issue-41-mech","arm":"A","run":31,"model":"claude-sonnet-5-5",
+ "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
+ "claude_exit":0,
+ "started_at":"2026-09-29T12:00:00Z","ended_at":"2026-09-29T12:00:05Z"}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 31
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.wall_clock_ms == 5000' >/dev/null
+  echo "$output" | jq -e '.agent_ms == null' >/dev/null
+}
+
+# --- collect.sh: claude.duration_api_ms is recorded (issue #71) -------------------------
+@test "collect.sh: records claude.duration_api_ms from output.json" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/32"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 32
+  [ "$status" -eq 0 ]
+  # The fixture carries duration_ms=42000 and duration_api_ms=40000.
+  echo "$output" | jq -e '.claude.duration_ms == 42000' >/dev/null
+  echo "$output" | jq -e '.claude.duration_api_ms == 40000' >/dev/null
+}
+
+# --- collect.sh: duration_api_ms degrades to null when absent (older runs) ---------------
+@test "collect.sh: claude.duration_api_ms degrades to null when absent" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/33"
+  mkdir -p "$run_dir/claude"
+  # Strip duration_api_ms from the fixture to simulate an older run.
+  jq 'del(.duration_api_ms)' "$FIXTURES/claude-output-armA.json" > "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 33
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.claude.duration_api_ms == null' >/dev/null
+}
+
+# --- collect.sh: malformed ms fields are a validation error (issue #71) --------------
+# A present, non-null started_ms/ended_ms that is NOT a plain non-negative
+# integer is a malformed run: exit 2, not a silent fallback to seconds.
+# (Absent or JSON null still falls back to the second-resolution fields.)
+@test "collect.sh: non-numeric started_ms → exit 2" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/40"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # started_ms is a string: present and non-null but not an integer.
+  cat > "$run_dir/run-meta.json" <<'EOF'
+{"task":"issue-41-mech","arm":"A","run":40,"model":"claude-sonnet-5-5",
+ "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
+ "claude_exit":0,
+ "started_at":"2026-09-29T12:00:00Z","ended_at":"2026-09-29T12:00:07Z",
+ "started_ms":"abc"}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 40
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"started_ms"* ]]
+}
+
+@test "collect.sh: non-numeric ended_ms → exit 2" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/40"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  cat > "$run_dir/run-meta.json" <<'EOF'
+{"task":"issue-41-mech","arm":"A","run":40,"model":"claude-sonnet-5-5",
+ "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
+ "claude_exit":0,
+ "started_at":"2026-09-29T12:00:00Z","ended_at":"2026-09-29T12:00:07Z",
+ "started_ms":1761787200000,"ended_ms":"oops"}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 40
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ended_ms"* ]]
+}
+
+# --- collect.sh: agent_ms must be number or null (issue #71) -----------------------
+# A non-numeric agent_ms is a malformed run: the jq validation rejects the
+# line (exit 2), same treatment as duration_api_ms.
+@test "collect.sh: non-numeric agent_ms → validation error, exit 2" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/41"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  cat > "$run_dir/run-meta.json" <<'EOF'
+{"task":"issue-41-mech","arm":"A","run":41,"model":"claude-sonnet-5-5",
+ "perm_mode":"auto","pi_delegate_sha":"","config_dir":"x","prompt_file":"x",
+ "claude_exit":0,"agent_ms":"oops"}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 41
+  [ "$status" -eq 2 ]
+}
+
+# --- collect.sh: agent_ms read failure (jq error) → loud exit 2 (issue #71) ---
+# run-meta.json exists but is not parseable as the agent_ms read expects it
+# to be: a jq read failure on run-meta.json must exit 2 with the
+# "failed to read run-meta.json agent_ms" error — not degrade to null.
+@test "collect.sh: agent_ms jq read failure → exit 2 (loud)" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/42"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # run-meta.json is not a JSON object (an array): the jq reads of it fail.
+  # The agent_ms read has no `|| true` — a jq failure on run-meta.json exits
+  # 2 with a loud error instead of degrading to null (the started_ms/ended_ms
+  # reads already guard the same file with the same shape).
+  cat > "$run_dir/run-meta.json" <<'EOF'
+[1, 2, 3]
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 42
+  [ "$status" -eq 2 ]
+}
+
+# --- collect.sh: pi_call_count and delegation_exercised (arm A + arm B) ----------------
+@test "collect.sh: arm A with pi calls — pi_call_count numeric, delegation_exercised null" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/34"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  cp "$FIXTURES/pi-calls.jsonl"          "$run_dir/pi-calls.jsonl"
+  cp "$FIXTURES/pi-transcript-call1.jsonl" "$run_dir/pi-1700000000000_12345.jsonl"
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 34
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.pi_call_count == 2' >/dev/null
+  echo "$output" | jq -e '.delegation_exercised == null' >/dev/null
+}
+
+@test "collect.sh: arm B with ≥1 pi call → delegation_exercised true" {
+  run_dir="$BENCH_OUT/$MECH_ID/B/1"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  cp "$FIXTURES/pi-calls.jsonl"          "$run_dir/pi-calls.jsonl"
+  cp "$FIXTURES/pi-transcript-call1.jsonl" "$run_dir/pi-1700000000000_12345.jsonl"
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" B 1
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.pi_call_count == 2' >/dev/null
+  echo "$output" | jq -e '.delegation_exercised == true' >/dev/null
+}
+
+# --- collect.sh: zero-pi arm-B run → delegation_exercised false (skill failure) -------------
+# This is the "skill failure" run the docs instruct readers to report separately;
+# the flag is in the collect line, and the grade is NOT rewritten by it.
+@test "collect.sh: arm B with zero pi calls → delegation_exercised false, grade unchanged" {
+  run_dir="$BENCH_OUT/$MECH_ID/B/2"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # No pi-calls.jsonl → zero pi calls.
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" B 2
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.pi_call_count == 0' >/dev/null
+  echo "$output" | jq -e '.delegation_exercised == false' >/dev/null
+  # The flag does not rewrite the grade.
+  echo "$output" | jq -e '.grade.pass == true' >/dev/null
+}
+
+# --- collect.sh: pi_tokens_total per model (summed across calls) -------------------------
+@test "collect.sh: pi_tokens_total aggregates per-model totals across calls" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/35"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # Two json-mode calls, two distinct models.
+  cat > "$run_dir/pi-calls.jsonl" <<'EOF'
+{"argv":["--mode","json"],"duration_ms":1000,"exit":0,"mode":"json","call_id":"200_1"}
+{"argv":["--mode","json"],"duration_ms":2000,"exit":0,"mode":"json","call_id":"200_2"}
+EOF
+  # Call 1: one assistant turn, model-a.
+  cat > "$run_dir/pi-200_1.jsonl" <<'EOF'
+{"type":"message_end","message":{"role":"assistant","usage":{"input":10,"output":20,"cacheRead":30,"cacheWrite":40,"totalTokens":100},"model":"model-a"}}
+EOF
+  # Call 2: one assistant turn, model-b.
+  cat > "$run_dir/pi-200_2.jsonl" <<'EOF'
+{"type":"message_end","message":{"role":"assistant","usage":{"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"totalTokens":10},"model":"model-b"}}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 35
+  [ "$status" -eq 0 ]
+  # Per-model totals should be present, keyed by model.
+  echo "$output" | jq -e '.pi_tokens_total["model-a"].input == 10' >/dev/null
+  echo "$output" | jq -e '.pi_tokens_total["model-a"].total == 100' >/dev/null
+  echo "$output" | jq -e '.pi_tokens_total["model-b"].input == 1' >/dev/null
+  echo "$output" | jq -e '.pi_tokens_total["model-b"].total == 10' >/dev/null
+}
+
+@test "collect.sh: pi_tokens_total is null when no transcript data" {
+  run_dir="$BENCH_OUT/$MECH_ID/A/36"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # A text-mode-only pi call has null tokens.
+  cat > "$run_dir/pi-calls.jsonl" <<'EOF'
+{"argv":["-p","--no-session"],"duration_ms":1000,"exit":0,"mode":"text","call_id":"300_1"}
+EOF
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 36
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.pi_tokens_total == null' >/dev/null
+  echo "$output" | jq -e '.pi_call_count == 1' >/dev/null
+}
+
 # --- setup-run.sh: re-run clears prior run dir ---------------------------------
 
 @test "setup-run.sh: re-run clears pi-calls.jsonl from prior run" {
@@ -372,6 +647,24 @@ EOF
   jq -e '.pass == true' "$grade_file" >/dev/null
 }
 
+# --- grade.sh: base source is logged to stderr --------------------------------------
+# setup.json holds the base_sha (written by setup-run.sh), so grade.sh logs
+# which source it used. A normal run → "base from setup.json".
+@test "grade.sh: logs 'base from setup.json' when setup.json has base_sha" {
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 11
+  [ "$status" -eq 0 ]
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 11
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"grade: base from setup.json"* ]]
+}
+
 # --- grade.sh: git apply failure writes grade.json ------------------------------
 
 @test "grade.sh: git apply failure writes grade.json with error" {
@@ -386,6 +679,100 @@ GRADING_PATCH=nonexistent.patch
 EOF
   run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 6
   [ "$status" -eq 2 ]
+}
+
+# --- grade.sh: agent committed + edited graded file → graded, head_moved true ---
+# An agent that commits its work moves HEAD; the run is still graded (restore
+# and git apply target the recorded BASE_SHA, tests run on the working tree).
+# The graded test file the agent edited is restored from base and recorded in
+# restored_test_files, and grade.json records head_moved: true.
+@test "grade.sh: agent committed its fix → graded normally, head_moved true" {
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 8
+  [ "$status" -eq 0 ]
+  local run_dir="$BENCH_OUT/$TASK_ID/A/8"
+  local repo_dir="$run_dir/repo"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  # Agent commits its fix AND edits the graded test file (hello.txt), in the
+  # RUN repo (not FAKE_REPO): the run repo's HEAD moves away from the
+  # recorded base, which is what head_moved detects.
+  git -C "$repo_dir" config user.email t@t.t
+  git -C "$repo_dir" config user.name t
+  echo "agent fix" >> "$repo_dir/hello.txt"
+  echo "tampered test" > "$repo_dir/world.txt"
+  git -C "$repo_dir" add hello.txt world.txt
+  git -C "$repo_dir" commit -qm "agent committed its work"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 8
+  [ "$status" -eq 0 ]
+  local grade_file="$run_dir/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == true' "$grade_file" >/dev/null
+  jq -e '.head_moved == true' "$grade_file" >/dev/null
+  jq -e '.restored_test_files == ["hello.txt"]' "$grade_file" >/dev/null
+  [ "$(cat "$repo_dir/hello.txt")" = "hello modified" ]
+}
+
+# --- grade.sh: restore failure → exit 2 + error field ----------------------------
+# If `git checkout <base> -- <path>` fails (e.g. the recorded base sha does
+# not resolve in the run repo), the run is a setup error: exit 2 and a
+# grade.json with pass:false and error "restore failed for <path>: ...".
+# The invalid BASE_SHA goes in task.env BEFORE the setup re-run: setup-run
+# fetches BASE_SHA into the run repo, so a fetch failure leaves an empty
+# object db and setup.json absent — the recorded base then cannot resolve.
+@test "grade.sh: restore failure → exit 2 + grade.json error" {
+  # First, a valid setup so the run dir exists (task.env from setup()).
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 10
+  [ "$status" -eq 0 ]
+  local run_dir="$BENCH_OUT/$TASK_ID/A/10"
+  local repo_dir="$run_dir/repo"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  # Re-run setup with the invalid BASE_SHA: the fetch fails, leaving an
+  # empty run-repo object db and no setup.json.
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 10
+  [ "$status" -eq 2 ]
+  echo "agent tamper" > "$repo_dir/hello.txt"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 10
+  [ "$status" -eq 2 ]
+  local grade_file="$run_dir/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == false' "$grade_file" >/dev/null
+  jq -e '.error | startswith("restore failed for hello.txt:")' "$grade_file" >/dev/null
+}
+
+# --- grade.sh: agent edited a patched file → restored from BASE ----------------
+# The restore must come from the recorded base: after grade.sh runs, the
+# agent's edit is gone, the patch is applied (hello.txt = base content with
+# the patch hunk applied), and the file is recorded in restored_test_files.
+@test "grade.sh: agent edit restored from BASE sha, patch applied" {
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 9
+  [ "$status" -eq 0 ]
+  local run_dir="$BENCH_OUT/$TASK_ID/A/9"
+  local repo_dir="$run_dir/repo"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  echo "agent tamper" > "$repo_dir/hello.txt"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 9
+  [ "$status" -eq 0 ]
+  local grade_file="$run_dir/grade.json"
+  jq -e '.restored_test_files == ["hello.txt"]' "$grade_file" >/dev/null
+  jq -e '.head_moved == false' "$grade_file" >/dev/null
+  [ "$(cat "$repo_dir/hello.txt")" = "hello modified" ]
 }
 
 # --- run-arm.sh: arm A does NOT get a pi shim -----------------------------------
@@ -681,6 +1068,51 @@ EOF
   [ -f "$run_dir/plugin-install.log" ]
   grep -q -i "marketplace" "$run_dir/plugin-install.log"
   grep -q -i "install" "$run_dir/plugin-install.log"
+}
+
+# --- run-arm.sh: claude runs in the task checkout, not the caller's cwd (issue #71) ----
+# The stub claude records its own cwd (pwd at launch). The test invokes
+# run-arm.sh from a different directory (the parent of BENCH_OUT) and asserts
+# the claude process's cwd is the run's repo directory, not the caller's cwd.
+@test "run-arm.sh: claude runs in the task checkout (not the caller's cwd)" {
+  local run_dir="$BENCH_OUT/$TASK_ID/A/20"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 20
+  [ "$status" -eq 0 ]
+
+  local stub_dir="$BENCH_OUT/stub-claude-20"
+  mkdir -p "$stub_dir"
+  cat > "$stub_dir/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+# Record the cwd the claude process was launched in (the dry-run 4 failure was
+# a launch from the pi-delegate repo with the click checkout NOT in cwd).
+pwd > "$PWD/.claude-cwd-at-launch"
+echo '{"is_error":false,"result":"ok","duration_ms":10,"total_cost_usd":0}'
+exit 0
+CLAUDE
+  chmod +x "$stub_dir/claude"
+  cat > "$stub_dir/pi" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$stub_dir/pi"
+
+  # Launch from a different directory (the parent of BENCH_OUT), so the
+  # script's cwd is NOT the task checkout. The script must cd into the repo
+  # before launching claude.
+  local caller_dir="$BENCH_OUT"
+  local rc=0
+  ( cd "$caller_dir" && PATH="$stub_dir:$PATH" bash "$BENCH_DIR/run-arm.sh" "$TASK_ID" A 20 >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -eq 0 ]
+
+  # The stub wrote .claude-cwd-at-launch at the cwd at launch. It must be
+  # inside the run's repo directory (i.e. the task checkout), not the caller's.
+  local repo_dir="$BENCH_OUT/$TASK_ID/A/20/repo"
+  local cwd_marker
+  cwd_marker="$(cat "$repo_dir/.claude-cwd-at-launch" 2>/dev/null)"
+  [ -n "$cwd_marker" ]
+  [ "$cwd_marker" = "$repo_dir" ]
+  # The marker must NOT be in the caller's dir (which is BENCH_OUT, a sibling).
+  [ ! -f "$caller_dir/.claude-cwd-at-launch" ]
 }
 
 # --- run-arm.sh: arm B plugin install failure captures the CLI output --------
@@ -1043,3 +1475,548 @@ EOF
   [ "$found" -eq 0 ]
 }
 
+# ================================================================================
+# NEW: issue #71 — grading robustness (restore patch-touched files)
+# ================================================================================
+
+# The grading patch is a test-only diff. If the agent edited the file the patch
+# touches, the old code failed `git apply` (exit 3) and the run was scored as
+# a failure. The new code restores the file to BASE first, records it in
+# `restored_test_files`, and then applies the patch — the run is graded on the
+# grading tests, not on the agent's edits to the graded test files.
+# (Dry-run 4: arm A edited tests/test_utils/test_sentinel.py and the patch no
+# longer applied; a manual revert was needed.)
+@test "grade.sh: restores patch-touched files to BASE and records restored_test_files" {
+  local run_dir="$BENCH_OUT/$TASK_ID/A/21"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 21
+  [ "$status" -eq 0 ]
+  local repo="$BENCH_OUT/$TASK_ID/A/21/repo"
+  local grade_file="$run_dir/grade.json"
+
+  # The setup-created repo has two tracked files: hello.txt (BASE) and world.txt (FIX).
+  # The test grading patch creates extra-test.txt (new file). Simulate an agent
+  # that edited hello.txt AND created extra-test.txt (a stray copy of the graded test file).
+  ( cd "$repo" && echo "agent edit" > hello.txt )
+  # The patch creates extra-test.txt; a stray copy of it would break git apply.
+  ( cd "$repo" && echo "stray copy" > extra-test.txt )
+
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 21
+  # The restore step should let git apply succeed; TEST_CMD=true → pass.
+  [ "$status" -eq 0 ]
+  [ -f "$grade_file" ]
+  # hello.txt was modified by the agent; restored to BASE ("hello") and recorded.
+  jq -e '.restored_test_files | index("hello.txt") != null' "$grade_file" >/dev/null
+  jq -e '.pass == true' "$grade_file" >/dev/null
+}
+
+# --- grade.sh: a clean tree (no agent edits) produces restored_test_files: [] ----------------
+@test "grade.sh: clean tree → restored_test_files is empty" {
+  local run_dir="$BENCH_OUT/$TASK_ID/A/22"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 22
+  [ "$status" -eq 0 ]
+  local grade_file="$run_dir/grade.json"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 22
+  [ "$status" -eq 0 ]
+  [ -f "$grade_file" ]
+  jq -e '.restored_test_files == []' "$grade_file" >/dev/null
+  jq -e '.pass == true' "$grade_file" >/dev/null
+}
+
+# Adversarial review of #71: the old awk word-split broke paths containing
+# spaces (truncating `src/new file.py` to `src/new`), so a patch touching a
+# space-containing path was mis-parsed and `git apply` failed. The new
+# bash parameter-expansion extractor preserves spaces in paths.
+@test "grade.sh: patch path with spaces is restored and applied" {
+  local run_num=23
+  local run_dir="$BENCH_OUT/$TASK_ID/A/$run_num"
+  local repo_dir="$run_dir/repo"
+
+  # Create a task whose repo has a file with spaces in the path.
+  local space_repo="$BENCH_OUT/space-repo"
+  git init -q -b main "$space_repo"
+  git -C "$space_repo" config user.email t@t.t
+  git -C "$space_repo" config user.name t
+  echo "x" > "$space_repo/src dir b.txt"
+  git -C "$space_repo" add "src dir b.txt"
+  git -C "$space_repo" commit -qm "add space file"
+  local space_base="$(git -C "$space_repo" rev-parse HEAD)"
+
+  # Write the space-path task.env into the shared TASK_DIR (overwriting the
+  # existing grading.patch and task.env) — but save/restore them first so other
+  # tests that use $TASK_ID are unaffected.
+  local saved_task_env="$TASK_DIR/task.env"
+  local saved_patch="$TASK_DIR/grading.patch"
+  cp "$saved_patch" "$BENCH_OUT/saved-grading.patch"
+  cp "$saved_task_env" "$BENCH_OUT/saved-task.env"
+  printf 'diff --git a/src dir b.txt b/src dir b.txt\nindex 1234567..89abcde 100644\n--- a/src dir b.txt\n+++ b/src dir b.txt\n@@ -1 +1 @@\n-x\n+y\n' \
+    > "$TASK_DIR/grading.patch"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$space_repo
+BASE_SHA=$space_base
+FIX_SHA=$space_base
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+
+  # Set up the run and tamper the file (simulating an agent edit).
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A "$run_num"
+  [ "$status" -eq 0 ]
+  echo "tamper" > "$repo_dir/src dir b.txt"
+
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A "$run_num"
+  [ "$status" -eq 0 ]
+  local grade_file="$run_dir/grade.json"
+  [ -f "$grade_file" ]
+  # The full path (with the space) is recorded in restored_test_files.
+  jq -e '.restored_test_files == ["src dir b.txt"]' "$grade_file" >/dev/null
+  # The patch was applied successfully (the file contains the post-patch content).
+  [ "$(cat "$repo_dir/src dir b.txt")" = "y" ]
+  jq -e '.pass == true' "$grade_file" >/dev/null
+
+  # Restore the shared task files.
+  cp "$BENCH_OUT/saved-grading.patch" "$TASK_DIR/grading.patch"
+  cp "$BENCH_OUT/saved-task.env" "$TASK_DIR/task.env"
+}
+
+# --- grade.sh: file list parsing from ---/+++ lines (issue #71, part 2) --------
+# The file list is derived from the per-file `--- `/`+++ ` lines (old `diff --git`
+# parsing broke on paths containing " b/" and missed the `--- /dev/null`
+# created-file form). The tests below use a helper that builds a task, runs
+# setup + grade, and returns the grade.json path. Each test rewrites the
+# shared $TASK_DIR grading.patch/task.env and restores them afterwards.
+
+# _patch_parse_test <run#> <patch-content> [setup-fn ...]
+# Writes the patch into $TASK_DIR/grading.patch, points task.env at
+# $PATCH_PARSE_REPO, sets up run# and runs grade.sh. $status is set by the
+# caller (use `run bash ...`).
+_patch_parse_pre() {
+  # $1 = run#; $2 = grading patch path (already written by the test). The
+  # saved/restore pair keeps $TASK_DIR shared across tests. setup-run.sh
+  # runs with `run` so its rc is not aborted by the test's `set -e`.
+  local run_num="$1" patch_file="$2"
+  cp "$TASK_DIR/grading.patch" "$BENCH_OUT/pp-saved-grading.patch" 2>/dev/null || true
+  cp "$TASK_DIR/task.env" "$BENCH_OUT/pp-saved-task.env" 2>/dev/null || true
+  cp "$patch_file" "$TASK_DIR/grading.patch"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$PATCH_PARSE_REPO
+BASE_SHA=$PATCH_PARSE_BASE
+FIX_SHA=$PATCH_PARSE_BASE
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A "$run_num"
+  [ "$status" -eq 0 ]
+}
+_patch_parse_post() {
+  cp "$BENCH_OUT/pp-saved-grading.patch" "$TASK_DIR/grading.patch"
+  cp "$BENCH_OUT/pp-saved-task.env" "$TASK_DIR/task.env"
+}
+
+@test "grade.sh: path with spaces parsed from ---/+++ lines (git diff form)" {
+  local space_repo="$BENCH_OUT/pp-space-repo"
+  git init -q -b main "$space_repo"
+  git -C "$space_repo" config user.email t@t.t
+  git -C "$space_repo" config user.name t
+  echo "x" > "$space_repo/src dir with space.txt"
+  git -C "$space_repo" add "src dir with space.txt"
+  git -C "$space_repo" commit -qm "add space file"
+  local space_base
+  space_base="$(git -C "$space_repo" rev-parse HEAD)"
+  local space_patch="$BENCH_OUT/pp-space.patch"
+  printf 'diff --git a/src dir with space.txt b/src dir with space.txt
+index 1234567..89abcde 100644
+--- a/src dir with space.txt
++++ b/src dir with space.txt
+@@ -1 +1 @@
+-x
++y
+' > "$space_patch"
+  PATCH_PARSE_REPO="$space_repo" PATCH_PARSE_BASE="$space_base" _patch_parse_pre 40 "$space_patch"
+  local repo_dir="$BENCH_OUT/$TASK_ID/A/40/repo"
+  echo "tamper" > "$repo_dir/src dir with space.txt"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 40
+  [ "$status" -eq 0 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/40/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.restored_test_files == ["src dir with space.txt"]' "$grade_file" >/dev/null
+  [ "$(cat "$repo_dir/src dir with space.txt")" = "y" ]
+  _patch_parse_post
+}
+
+@test "grade.sh: path containing ' b/' parsed from ---/+++ lines (not from diff --git)" {
+  # A path containing " b/": the old `diff --git a/... b/...` parsing with
+  # ` b/` splitting would truncate it. The ---/+++ parser strips only the
+  # leading a//b/ prefix, so the full path survives.
+  local bpath_repo="$BENCH_OUT/pp-bpath-repo"
+  git init -q -b main "$bpath_repo"
+  git -C "$bpath_repo" config user.email t@t.t
+  git -C "$bpath_repo" config user.name t
+  mkdir -p "$bpath_repo/weird b"
+  echo "x" > "$bpath_repo/weird b/dir file.txt"
+  git -C "$bpath_repo" add "weird b/dir file.txt"
+  git -C "$bpath_repo" commit -qm "add b-slash file"
+  local bpath_base
+  bpath_base="$(git -C "$bpath_repo" rev-parse HEAD)"
+  local bpath_patch="$BENCH_OUT/pp-bpath.patch"
+  printf 'diff --git a/weird b/dir file.txt b/weird b/dir file.txt
+index 1234567..89abcde 100644
+--- a/weird b/dir file.txt
++++ b/weird b/dir file.txt
+@@ -1 +1 @@
+-x
++y
+' > "$bpath_patch"
+  PATCH_PARSE_REPO="$bpath_repo" PATCH_PARSE_BASE="$bpath_base" _patch_parse_pre 41 "$bpath_patch"
+  local repo_dir="$BENCH_OUT/$TASK_ID/A/41/repo"
+  echo "tamper" > "$repo_dir/weird b/dir file.txt"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 41
+  [ "$status" -eq 0 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/41/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.restored_test_files == ["weird b/dir file.txt"]' "$grade_file" >/dev/null
+  [ "$(cat "$repo_dir/weird b/dir file.txt")" = "y" ]
+  _patch_parse_post
+}
+
+@test "grade.sh: created file via git diff new-file form (--- /dev/null) is deleted if present" {
+  # Standard `git diff` new-file form: `--- /dev/null` with a real new path.
+  # A stray copy of the graded file left by the agent must be deleted before
+  # `git apply`, and the patch must then apply.
+  local created_repo="$BENCH_OUT/pp-created-repo"
+  git init -q -b main "$created_repo"
+  git -C "$created_repo" config user.email t@t.t
+  git -C "$created_repo" config user.name t
+  echo "x" > "$created_repo/seed.txt"
+  git -C "$created_repo" add seed.txt
+  git -C "$created_repo" commit -qm "add seed"
+  local created_base
+  created_base="$(git -C "$created_repo" rev-parse HEAD)"
+  local created_patch="$BENCH_OUT/pp-created.patch"
+  printf 'diff --git a/new-test.py b/new-test.py
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/new-test.py
+@@ -0,0 +1 @@
++new test
+' > "$created_patch"
+  PATCH_PARSE_REPO="$created_repo" PATCH_PARSE_BASE="$created_base" _patch_parse_pre 42 "$created_patch"
+  local repo_dir="$BENCH_OUT/$TASK_ID/A/42/repo"
+  # Stray copy of the graded file left by the agent (untracked).
+  echo "stray" > "$repo_dir/new-test.py"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 42
+  [ "$status" -eq 0 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/42/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.restored_test_files | index("new-test.py") != null' "$grade_file" >/dev/null
+  [ "$(cat "$repo_dir/new-test.py")" = "new test" ]
+  _patch_parse_post
+}
+
+@test "grade.sh: created file via git diff --no-index form is deleted if present" {
+  # `git diff --no-index /dev/null file` form: same `--- /dev/null` header,
+  # new-side path followed by a trailing TAB+timestamp.
+  local noindex_repo="$BENCH_OUT/pp-noindex-repo"
+  git init -q -b main "$noindex_repo"
+  git -C "$noindex_repo" config user.email t@t.t
+  git -C "$noindex_repo" config user.name t
+  echo "x" > "$noindex_repo/seed.txt"
+  git -C "$noindex_repo" add seed.txt
+  git -C "$noindex_repo" commit -qm "add seed"
+  local noindex_base
+  noindex_base="$(git -C "$noindex_repo" rev-parse HEAD)"
+  # Build the patch from a real `git diff --no-index` run (no index →
+  # /dev/null form), then append a TAB+timestamp to the +++ line (the
+  # timestamp form git emits when the paths are not in a git directory).
+  local ni_dir="$BENCH_OUT/pp-noindex-src"
+  mkdir -p "$ni_dir"
+  echo "no-index test content" > "$ni_dir/another-test.py"
+  local ni_patch="$ni_dir/out.patch"
+  ( cd "$ni_dir" && git diff --no-index /dev/null another-test.py > out.patch ) || true
+  grep -qF -e '--- /dev/null' "$ni_patch"
+  # Rebuild the patch with the timestamped +++ line via awk, then verify
+  # both the /dev/null form and the TAB+timestamp survived.
+  local ni_out_patch="$BENCH_OUT/pp-noindex-out.patch"
+  awk '{ if ($0 == "+++ b/another-test.py") print $0 "\t2026-01-01 00:00:00.000000000"; else print }' "$ni_patch" > "$ni_out_patch"
+  grep -qF -e '--- /dev/null' "$ni_out_patch"
+  grep -qF -e $'+++ b/another-test.py\t2026' "$ni_out_patch"
+  PATCH_PARSE_REPO="$noindex_repo" PATCH_PARSE_BASE="$noindex_base" _patch_parse_pre 43 "$ni_out_patch"
+  local repo_dir="$BENCH_OUT/$TASK_ID/A/43/repo"
+  echo "stray" > "$repo_dir/another-test.py"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 43
+  [ "$status" -eq 0 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/43/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.restored_test_files | index("another-test.py") != null' "$grade_file" >/dev/null
+  [ "$(cat "$repo_dir/another-test.py")" = "no-index test content" ]
+  _patch_parse_post
+}
+
+@test "grade.sh: deleted file (+++ /dev/null) is restored from BASE before apply" {
+  # A patch that deletes a file: `+++ /dev/null`. The old path must be
+  # restored from BASE (so the delete applies cleanly) and recorded.
+  local deleted_repo="$BENCH_OUT/pp-deleted-repo"
+  git init -q -b main "$deleted_repo"
+  git -C "$deleted_repo" config user.email t@t.t
+  git -C "$deleted_repo" config user.name t
+  echo "x" > "$deleted_repo/keep.txt"
+  echo "gone" > "$deleted_repo/obsolete.txt"
+  git -C "$deleted_repo" add keep.txt obsolete.txt
+  git -C "$deleted_repo" commit -qm "add files"
+  local deleted_base
+  deleted_base="$(git -C "$deleted_repo" rev-parse HEAD)"
+  local deleted_patch="$BENCH_OUT/pp-deleted.patch"
+  # Build the delete patch from a real `git diff` of an agent that deleted
+  # the file (the hunk must be `@@ -1 +0,0 @@`, not `@@ -1 +0 @@`).
+  local del_src="$BENCH_OUT/pp-deleted-src"
+  git init -q -b main "$del_src"
+  git -C "$del_src" config user.email t@t.t
+  git -C "$del_src" config user.name t
+  echo "x" > "$del_src/keep.txt"
+  echo "gone" > "$del_src/obsolete.txt"
+  git -C "$del_src" add keep.txt obsolete.txt
+  git -C "$del_src" commit -qm "add files"
+  git -C "$del_src" rm -q obsolete.txt
+  git -C "$del_src" diff HEAD > "$deleted_patch"
+  grep -qF '+++ /dev/null' "$deleted_patch"
+  PATCH_PARSE_REPO="$deleted_repo" PATCH_PARSE_BASE="$deleted_base" _patch_parse_pre 44 "$deleted_patch" || true
+  local repo_dir="$BENCH_OUT/$TASK_ID/A/44/repo"
+  # The agent deleted the file (and tampered the other one). Without a
+  # restore-from-BASE the delete patch cannot apply.
+  rm -f "$repo_dir/obsolete.txt"
+  echo "tamper" > "$repo_dir/keep.txt"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 44
+  [ "$status" -eq 0 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/44/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.restored_test_files | index("obsolete.txt") != null' "$grade_file" >/dev/null
+  [ ! -f "$repo_dir/obsolete.txt" ]
+  _patch_parse_post
+}
+
+@test "grade.sh: patch with no file headers → exit 2 + grade.json error" {
+  # A patch whose content has no parseable `--- `/`+++ ` header pair is a
+  # setup error: exit 2, grade.json with pass:false and the error, with
+  # head_moved present. The list is never silently collapsed to empty.
+  local nohdr_repo="$BENCH_OUT/pp-nohdr-repo"
+  git init -q -b main "$nohdr_repo"
+  git -C "$nohdr_repo" config user.email t@t.t
+  git -C "$nohdr_repo" config user.name t
+  echo "x" > "$nohdr_repo/seed.txt"
+  git -C "$nohdr_repo" add seed.txt
+  git -C "$nohdr_repo" commit -qm "add seed"
+  local nohdr_base
+  nohdr_base="$(git -C "$nohdr_repo" rev-parse HEAD)"
+  local nohdr_patch="$BENCH_OUT/pp-nohdr.patch"
+  printf 'this patch has no file headers\nonly prose\n@@ -1 +1 @@\n-x\n+y\n' > "$nohdr_patch"
+  PATCH_PARSE_REPO="$nohdr_repo" PATCH_PARSE_BASE="$nohdr_base" _patch_parse_pre 45 "$nohdr_patch" || true
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 45
+  [ "$status" -eq 2 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/45/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == false' "$grade_file" >/dev/null
+  jq -e '.error | contains("no file headers")' "$grade_file" >/dev/null
+  jq -e 'has("head_moved")' "$grade_file" >/dev/null
+  _patch_parse_post
+}
+
+# --- grade.sh: path safety — unsafe parsed patch paths are refused (issue #71) ---
+# A patch whose parsed path (old or new side) is absolute or contains a `..`
+# component is refused: exit 2, grade.json error "unsafe path in grading
+# patch: <p>". Such paths can only come from a malformed/misparsed patch.
+_patch_path_test() {
+  # $1 = run#, $2 = grading patch path (already written). Uses $PATCH_TASK_DIR
+  # (an isolated task dir, so the shared $TASK_DIR is not mutated).
+  local run_num="$1" patch_file="$2"
+  local repo="$BENCH_OUT/unsafe-path-repo"
+  if [ ! -d "$repo" ]; then
+    git init -q -b main "$repo"
+    git -C "$repo" config user.email t@t.t
+    git -C "$repo" config user.name t
+    echo "x" > "$repo/seed.txt"
+    git -C "$repo" add seed.txt
+    git -C "$repo" commit -qm "add seed"
+  fi
+  local base
+  base="$(git -C "$repo" rev-parse HEAD)"
+  cp "$patch_file" "$PATCH_TASK_DIR/grading.patch"
+  cat > "$PATCH_TASK_DIR/task.env" <<EOF
+REPO=$repo
+BASE_SHA=$base
+FIX_SHA=$base
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/setup-run.sh" "$PATCH_TASK_ID" A "$run_num"
+  [ "$status" -eq 0 ]
+}
+
+@test "grade.sh: absolute path in patch → exit 2 + unsafe path error" {
+  PATCH_TASK_ID="unsafe-path-test"
+  PATCH_TASK_DIR="$TASKS_DIR/$PATCH_TASK_ID"
+  mkdir -p "$PATCH_TASK_DIR"
+  local patch="$BENCH_OUT/pt-abs.patch"
+  printf 'diff --git a/seed.txt b//absolute/path.txt\n--- /dev/null\n+++ b//absolute/path.txt\n@@ -0,0 +1 @@\n+new\n' > "$patch"
+  _patch_path_test 60 "$patch"
+  run bash "$BENCH_DIR/grade.sh" "$PATCH_TASK_ID" A 60
+  [ "$status" -eq 2 ]
+  local grade_file="$BENCH_OUT/$PATCH_TASK_ID/A/60/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == false' "$grade_file" >/dev/null
+  jq -e '.error | contains("unsafe path in grading patch: /absolute/path.txt")' "$grade_file" >/dev/null
+}
+
+@test "grade.sh: .. component in patch path → exit 2 + unsafe path error" {
+  PATCH_TASK_ID="unsafe-path-test2"
+  PATCH_TASK_DIR="$TASKS_DIR/$PATCH_TASK_ID"
+  mkdir -p "$PATCH_TASK_DIR"
+  local patch="$BENCH_OUT/pt-dotdot.patch"
+  printf 'diff --git a/seed.txt b/../escape.txt\n--- /dev/null\n+++ b/../escape.txt\n@@ -0,0 +1 @@\n+new\n' > "$patch"
+  _patch_path_test 61 "$patch"
+  run bash "$BENCH_DIR/grade.sh" "$PATCH_TASK_ID" A 61
+  [ "$status" -eq 2 ]
+  local grade_file="$BENCH_OUT/$PATCH_TASK_ID/A/61/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == false' "$grade_file" >/dev/null
+  jq -e '.error | contains("unsafe path in grading patch: ../escape.txt")' "$grade_file" >/dev/null
+}
+
+# --- grade.sh: task.env base fallback (issue #71) -----------------------------------
+# A setup.json without base_sha: grade.sh falls back to the task-level
+# BASE_SHA, logs "base from task.env", and grades normally.
+@test "grade.sh: setup.json without base_sha → base from task.env, graded normally" {
+  local run_num=70
+  local tenv_id="base-fallback"
+  local tenv_dir="$TASKS_DIR/$tenv_id"
+  local run_dir="$BENCH_OUT/$tenv_id/A/$run_num"
+  # Set up the run under the per-test task id.
+  mkdir -p "$tenv_dir"
+  cp "$TASK_DIR/grading.patch" "$tenv_dir/grading.patch"
+  cat > "$tenv_dir/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=$BASE_SHA
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/setup-run.sh" "$tenv_id" A "$run_num"
+  [ "$status" -eq 0 ]
+  local repo_dir="$run_dir/repo"
+  # setup.json exists but has no base_sha (field deleted).
+  jq 'del(.base_sha)' "$run_dir/setup.json" > "$run_dir/setup.json.tmp"
+  mv "$run_dir/setup.json.tmp" "$run_dir/setup.json"
+  # Agent tamper: the graded file is edited; the restore must use the
+  # task.env BASE_SHA to succeed.
+  echo "agent tamper" > "$repo_dir/hello.txt"
+  run bash "$BENCH_DIR/grade.sh" "$tenv_id" A "$run_num"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"grade: base from task.env"* ]]
+  local grade_file="$run_dir/grade.json"
+  jq -e '.pass == true' "$grade_file" >/dev/null
+}
+
+# --- grade.sh: unreadable grading patch → awk failure, exit 2 + grade.json ---
+# Under `set -e` a failing awk inside `var=$(…)` would abort the script at
+# the assignment (no grade.json). The `|| _parse_rc=$?` form must catch the
+# failure and record a grade.json with pass:false and the "failed to read
+# grading patch" error.
+@test "grade.sh: unreadable grading patch → exit 2 + 'failed to read grading patch'" {
+  if [ "$(id -u)" = "0" ]; then skip "running as root: chmod 000 is bypassed"; fi
+  local run_num=71
+  local run_dir="$BENCH_OUT/$TASK_ID/A/$run_num"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A "$run_num"
+  [ "$status" -eq 0 ]
+  local patch="$TASK_DIR/grading.patch"
+  local saved_patch="$BENCH_OUT/gp71-saved.patch"
+  cp "$patch" "$saved_patch"
+  chmod 000 "$patch"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A "$run_num"
+  local rc=$status
+  # Restore readability regardless of the outcome.
+  chmod 644 "$patch"
+  cp "$saved_patch" "$patch"
+  [ "$rc" -eq 2 ]
+  local grade_file="$run_dir/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == false' "$grade_file" >/dev/null
+  jq -e '.error | contains("failed to read grading patch")' "$grade_file" >/dev/null
+}
+
+# --- grade.sh: empty BASE_SHA in task.env → require_task_fields rejects ---
+# The missing-base early exit inside grade.sh (the "cannot determine base
+# sha" path) is a defensive net, normally unreachable: require_task_fields
+# rejects an empty BASE_SHA first, so grade.sh exits 2 at the guard before
+# any base resolution. This test pins THAT guard: a task whose task.env
+# has an empty BASE_SHA must be refused at require_task_fields, with no
+# grade.json written (the guard fires before the run-dir/base-sha checks).
+@test "grade.sh: empty BASE_SHA in task.env → exit 2 via require_task_fields (no grade.json)" {
+  local run_num=72
+  local nobase_id="nobase-test"
+  local nobase_dir="$TASKS_DIR/$nobase_id"
+  local run_dir="$BENCH_OUT/$nobase_id/A/$run_num"
+  mkdir -p "$nobase_dir" "$run_dir/repo"
+  cp "$TASK_DIR/grading.patch" "$nobase_dir/grading.patch"
+  # task.env with empty BASE_SHA: require_task_fields must reject it before
+  # grade.sh reaches the (defensive) missing-base early exit.
+  cat > "$nobase_dir/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/grade.sh" "$nobase_id" A "$run_num"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"missing required field BASE_SHA"* ]]
+  # No grade.json: the guard fires before any grade.json write.
+  [ ! -f "$run_dir/grade.json" ]
+}
+
+# --- run-arm.sh: started_at/ended_at match the ms-resolution run window ----
+# Regression (dry run 4 / issue #71): started_at and ended_at were written
+# with a second-resolution `date` taken AFTER claude exited, so a ~343 s run
+# recorded started_at == ended_at. They must now derive from the same
+# captured moments as started_ms/ended_ms (captured immediately before and
+# after the claude call): started_at < ended_at for a multi-second run, and
+# the ms delta must reflect the real run duration.
+@test "run-arm.sh: started_at/ended_at span the run window (stub claude sleeps 2s)" {
+  local run_dir="$BENCH_OUT/$TASK_ID/A/40"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 40
+  [ "$status" -eq 0 ]
+
+  local stub_dir="$BENCH_OUT/stub-claude-40"
+  mkdir -p "$stub_dir"
+  cat > "$stub_dir/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+sleep 2
+echo '{"is_error":false,"result":"ok","duration_ms":2000,"total_cost_usd":0}'
+exit 0
+CLAUDE
+  chmod +x "$stub_dir/claude"
+  cat > "$stub_dir/pi" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$stub_dir/pi"
+
+  PATH="$stub_dir:$PATH" bash "$BENCH_DIR/run-arm.sh" "$TASK_ID" A 40 >/dev/null 2>&1
+  local rc=$?
+  [ "$rc" -eq 0 ]
+
+  local meta="$run_dir/run-meta.json"
+  [ -f "$meta" ]
+  local started_at ended_at started_ms ended_ms
+  started_at="$(jq -r '.started_at' "$meta")"
+  ended_at="$(jq -r '.ended_at' "$meta")"
+  started_ms="$(jq -r '.started_ms' "$meta")"
+  ended_ms="$(jq -r '.ended_ms' "$meta")"
+  # The ISO timestamps are distinct and ordered (second resolution is fine:
+  # a 2 s sleep crosses a second boundary). String comparison works because
+  # the format is a fixed-width ISO 8601 UTC string.
+  [ -n "$started_at" ]
+  [ -n "$ended_at" ]
+  [ "$started_at" "<" "$ended_at" ]
+  # The ms timestamps reflect the real run duration.
+  local delta_ms=$(( ended_ms - started_ms ))
+  [ "$delta_ms" -ge 2000 ]
+}

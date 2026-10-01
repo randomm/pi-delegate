@@ -17,25 +17,42 @@
 #     task, arm, run, model, permission_mode, pi_delegate_commit,
 #     target_commit (base sha from setup.json),
 #     claude: {
-#       cost_usd, duration_ms, permission_denials (array),
+#       cost_usd, duration_ms, duration_api_ms (API time only — the
+#       session wall clock is duration_ms and is NOT the same quantity;
+#       duration_api_ms can exceed duration_ms, so treat them as
+#       independent), permission_denials (array),
 #       model_usage: {<model>: {input_tokens, output_tokens, cache_read,
 #                              cache_creation, cost_usd}}
 #     },
 #     pi: [
 #       {call_id, mode, exit, duration_ms, argv,
-#        tokens: {input, output, cache_read, cache_write, total} | null}
+#        tokens: {input, output, cache_read, cache_write, total, per_model}
+#                 | null}
 #     ],
+#     pi_call_count (number of pi calls, 0 if pi-calls.jsonl is absent),
+#     delegation_exercised (arm B: boolean — arm B with pi_call_count > 0;
+#       arm A: null, since pi calls in arm A are accidental and are not a
+#       delegation signal),
+#     pi_tokens_total (per-model totals summed over all pi calls, or null
+#       when no json-mode call recorded usage — arm A has the same shape,
+#       keyed by model, since it too runs the pi shim),
 #     grade: {pass, test_cmd, error},
-#     wall_clock_ms (from setup/setup_at to grade/graded_at, or null)
+#     wall_clock_ms (run wall clock: claude started → ended. Prefer the
+#       ms-resolution started_ms/ended_ms from run-meta.json when present;
+#       otherwise fall back to the second-resolution started_at/ended_at;
+#       otherwise the setup_at→graded_at range. null when nothing is known.)
 #
 # Exit codes:
 #   0  success (one JSON line written)
 #   1  run directory missing or claude/output.json missing
-#   2  claude/output.json is not valid JSON (malformed run)
+#   2  claude/output.json is not valid JSON (malformed run), or the
+#       pi-calls.jsonl contains a duplicate/malformed line
 #
 # Validation: the output line is validated with jq before being written.
 # Required fields: task, arm, run, model, target_commit, grade.pass.
-# Numeric fields: claude.duration_ms, claude.cost_usd (nullable),
+# Numeric fields: claude.duration_ms, claude.duration_api_ms (nullable),
+#   claude.cost_usd (nullable), agent_ms (nullable), pi_call_count (number),
+#   pi_tokens_total (nullable object with numeric leaves),
 #   pi[].duration_ms, pi[].tokens.* (nullable).
 # A malformed run (missing required fields, non-numeric where numeric
 # expected) causes a non-zero exit so the caller can flag it.
@@ -90,11 +107,39 @@ fi
 # Load run-meta.json (model, perm mode, pi_delegate_sha) — optional.
 meta_json="$run_dir/run-meta.json"
 model="null"; perm_mode="null"; pi_delegate_sha="null"
+agent_ms="null"; started_ms="null"; ended_ms="null"
 if [ -f "$meta_json" ]; then
-  model="$(jq -r '.model // "null"' "$meta_json")"
-  perm_mode="$(jq -r '.perm_mode // "null"' "$meta_json")"
-  pi_delegate_sha="$(jq -r '.pi_delegate_sha // ""' "$meta_json")"
+  model="$(jq -r '.model // "null"' "$meta_json")" || { echo "collect: failed to read run-meta.json model" >&2; exit 2; }
+  perm_mode="$(jq -r '.perm_mode // "null"' "$meta_json")" || { echo "collect: failed to read run-meta.json perm_mode" >&2; exit 2; }
+  pi_delegate_sha="$(jq -r '.pi_delegate_sha // ""' "$meta_json")" || { echo "collect: failed to read run-meta.json pi_delegate_sha" >&2; exit 2; }
   [ -z "$pi_delegate_sha" ] && pi_delegate_sha="null"
+  # started_ms/ended_ms: present + non-null but not a plain non-negative
+  # integer is a malformed run (exit 2) — not silently degraded. Absent or
+  # JSON null falls back to the second-resolution fields below (older runs).
+  started_ms="$(jq -c '.started_ms // null' "$meta_json")" || { echo "collect: failed to read run-meta.json started_ms" >&2; exit 2; }
+  ended_ms="$(jq -c '.ended_ms // null' "$meta_json")" || { echo "collect: failed to read run-meta.json ended_ms" >&2; exit 2; }
+  for _ms_field in started_ms ended_ms; do
+    if [ "$_ms_field" = "started_ms" ]; then _ms_val="$started_ms"; else _ms_val="$ended_ms"; fi
+    if [ -n "$_ms_val" ] && [ "$_ms_val" != "null" ]; then
+      case "$_ms_val" in
+        0|[1-9][0-9]*) ;;
+        *) echo "collect: run-meta.json $_ms_field is not a non-negative integer: $_ms_val" >&2; exit 2 ;;
+      esac
+    fi
+  done
+  # agent_ms must be a number or null; a non-numeric value is a malformed
+  # run (same treatment as duration_api_ms below → exit 2 validation error).
+  # A string-valued agent_ms is malformed (exit 2 via validation below); a
+  # missing or JSON-null agent_ms degrades to null. Number/null are kept as
+  # their JSON form ("null" for a missing/null field).
+  # A jq FAILURE (unreadable/corrupt run-meta.json) is a loud exit 2 — the
+  # run-meta.json was already read successfully for the fields above, so a
+  # failure here is an I/O or parse error we must not silently swallow.
+  agent_ms="$(jq -c 'if (has("agent_ms") and (.agent_ms | type) == "number") then .agent_ms
+                     elif (has("agent_ms") and (.agent_ms | type) == "string") then .agent_ms
+                     else null end' "$meta_json")" \
+    || { echo "collect: failed to read run-meta.json agent_ms" >&2; exit 2; }
+  [ -n "$agent_ms" ] || agent_ms="null"
 fi
 
 # Load grade.json — optional but expected after grading.
@@ -125,6 +170,7 @@ claude_metrics="$(jq -c '
   {
     cost_usd: (.total_cost_usd // 0),
     duration_ms: (.duration_ms // null),
+    duration_api_ms: (.duration_api_ms // null),
     permission_denials: (.permission_denials // []),
     is_error: (.is_error // false),
     model_usage: (
@@ -235,19 +281,56 @@ if [ -f "$run_dir/pi-calls.jsonl" ]; then
   # Build the pi array in one jq call.
   # --rawfile + split("\n") + fromjson is robust across jq versions (the
   # --slurpfile semantics for JSONL differ between jq versions).
+  # The pi array is a core field: a jq failure building it is a malformed
+  # run (exit 2), not a silent empty list.
   pi_calls_json="$(jq -cn \
     --rawfile calls "$run_dir/pi-calls.jsonl" \
     --rawfile tmap "$tokens_map" \
     '($calls | split("\n") | map(select(length > 0) | fromjson)) as $calls_arr
      | ($tmap  | split("\n") | map(select(length > 0) | fromjson)) as $tmap_arr
-     | [$calls_arr[]
+     | ([$calls_arr[]
        | . as $c
        | ([ $tmap_arr[] | select(.id == $c.call_id) ] | if length > 0 then .[0].tokens else null end)
        | . as $tok
        | ($c + {tokens: $tok})
-      ]' 2>/dev/null)" || pi_calls_json="[]"
+      ]) as $arr
+     | $arr')" || { echo "collect: failed to build pi call array from pi-calls.jsonl" >&2; exit 2; }
   rm -f "$tokens_map"
 fi
+
+# pi_call_count: number of pi calls (0 when pi-calls.jsonl is absent).
+# delegation_exercised: arm B with ≥1 pi call; arm A is null (not
+# applicable — arm A's pi calls are accidental, not a delegation signal).
+# docs/benchmark.md §"How to read results" defines it: arm B true iff
+# pi_call_count > 0, arm A null; a zero-pi arm-B run is a skill failure.
+
+pi_call_count="$(jq -c 'length' <<< "$pi_calls_json")" || pi_call_count="0"
+if [ "$arm" = "B" ]; then
+  delegation_exercised="$(jq -cn --argjson n "$pi_call_count" '($n > 0)')" || delegation_exercised="false"
+else
+  delegation_exercised="null"
+fi
+
+# pi_tokens_total: per-model totals summed over every pi call (json-mode
+# calls only — text-mode calls have null tokens). Aggregates on the per_model
+# field so the per-model breakdown is preserved; if no call had a transcript
+# (no per_model data) the total is null. (docs: §metrics — the pi side is
+# costed by tokens per model, not by cost_usd, which is 0.0 locally.)
+# The per-model aggregation uses a single jq program to keep the syntax
+# simple and portable across jq versions.
+pi_tokens_total="$(jq -c '
+  [ .[] | select(.tokens != null and (.tokens.per_model != null)) | .tokens.per_model ] as $per_model_arr
+  | reduce $per_model_arr[] as $m ({};
+      reduce ($m | keys[]) as $k (.;
+        .[$k] = ((.[$k] // {input:0,output:0,cache_read:0,cache_write:0,total:0})
+          | .input += $m[$k].input
+          | .output += $m[$k].output
+          | .cache_read += $m[$k].cache_read
+          | .cache_write += $m[$k].cache_write
+          | .total += $m[$k].total))
+    )
+  | if (. | length) == 0 then null else . end
+' <<< "$pi_calls_json")" || { echo "collect: failed to compute pi_tokens_total" >&2; exit 2; }
 
 # Wall clock: the run's own duration, from run-meta.json started_at to
 # ended_at (both ISO-8601 UTC, recorded by run-arm.sh around the claude
@@ -256,10 +339,27 @@ fi
 # after the fact, and started_at was written after claude exited — effectively
 # "ended_at"). Falls back to setup_at → graded_at if run-meta.json lacks
 # the new fields (e.g. a run produced by an older harness).
+# Wall clock (run start → run end). The old code used second-resolution
+# started_at/ended_at from run-meta.json (date -u +%Y-%m-%dT%H:%M:%SZ), which
+# read wall_clock_ms to 0 for any run under a second (issue #71: dry-run 4
+# recorded agent_ms=36490 but wall_clock_ms=0). run-arm.sh now writes the
+# ms-resolution started_ms/ended_ms alongside the second-resolution
+# ISO-8601 fields; collect.sh prefers the ms-resolution pair, falling back to
+# the second-resolution pair (and then to setup_at→graded_at) for older runs.
 wall_clock_ms="null"
+# $started_ms and $ended_ms are either the literal string "null" (field
+# absent or older run) or a positive integer in ms. The jq -c output for a
+# JSON null is the literal string "null", not empty, so we compare against
+# that explicitly.
+# Both must be plain non-negative integers for the ms subtraction to be
+# safe; a malformed value (e.g. "abc") falls through to the
+# seconds-resolution fallback below instead of aborting the collection.
+if [[ "$started_ms" =~ ^[0-9]+$ ]] && [[ "$ended_ms" =~ ^[0-9]+$ ]]; then
+  wall_clock_ms=$(( ended_ms - started_ms ))
+fi
 start_epoch=""
 end_epoch=""
-if [ -f "$meta_json" ]; then
+if [ "$wall_clock_ms" = "null" ] && [ -f "$meta_json" ]; then
   start_at="$(jq -r '.started_at // empty' "$meta_json")"
   end_at="$(jq -r '.ended_at // empty' "$meta_json")"
   if [ -n "$start_at" ] && [ -n "$end_at" ]; then
@@ -272,7 +372,7 @@ if [ -f "$meta_json" ]; then
     fi
   fi
 fi
-if [ -z "$start_epoch" ] && [ -f "$setup_json" ] && [ -f "$grade_json" ]; then
+if [ "$wall_clock_ms" = "null" ] && [ -z "${start_epoch:-}" ] && [ -f "$setup_json" ] && [ -f "$grade_json" ]; then
   setup_at="$(jq -r '.setup_at // empty' "$setup_json")"
   graded_at="$(jq -r '.graded_at // empty' "$grade_json")"
   if [ -n "$setup_at" ] && [ -n "$graded_at" ]; then
@@ -285,7 +385,7 @@ if [ -z "$start_epoch" ] && [ -f "$setup_json" ] && [ -f "$grade_json" ]; then
     fi
   fi
 fi
-if [ -n "$start_epoch" ] && [ -n "$end_epoch" ]; then
+if [ -n "${start_epoch:-}" ] && [ -n "${end_epoch:-}" ]; then
   wall_clock_ms=$(( (end_epoch - start_epoch) * 1000 ))
 fi
 
@@ -301,8 +401,12 @@ final_json="$(jq -cn \
   --argjson claude "$claude_metrics" \
   --argjson claude_models "$claude_models_json" \
   --argjson pi "$pi_calls_json" \
+  --argjson pi_call_count "$pi_call_count" \
+  --argjson delegation_exercised "$delegation_exercised" \
+  --argjson pi_tokens_total "$pi_tokens_total" \
   --argjson grade "$grade_obj" \
   --argjson wall_clock_ms "$wall_clock_ms" \
+  --argjson agent_ms "$agent_ms" \
   '{
     task: $task,
     arm: $arm,
@@ -313,7 +417,11 @@ final_json="$(jq -cn \
     target_commit: (if $target_commit == "null" then null else $target_commit end),
     claude: ($claude + {resolved_models: $claude_models}),
     pi: $pi,
+    pi_call_count: $pi_call_count,
+    delegation_exercised: $delegation_exercised,
+    pi_tokens_total: $pi_tokens_total,
     grade: $grade,
+    agent_ms: $agent_ms,
     wall_clock_ms: $wall_clock_ms
   }')"
 
@@ -335,8 +443,18 @@ validation_out="$(printf '%s' "$final_json" | jq -r '
     then "grade.pass is not a boolean"
     elif .claude.duration_ms != null and (.claude.duration_ms | type) != "number"
     then "claude.duration_ms is not numeric or null"
+    elif .claude.duration_api_ms != null and (.claude.duration_api_ms | type) != "number"
+    then "claude.duration_api_ms is not numeric or null"
     elif .claude.cost_usd != null and (.claude.cost_usd | type) != "number"
     then "claude.cost_usd is not numeric or null"
+    elif .agent_ms != null and (.agent_ms | type) != "number"
+    then "agent_ms is not numeric or null"
+    elif ((.pi_call_count | type) != "number")
+    then "pi_call_count is not numeric"
+    elif (.delegation_exercised | type) != "boolean" and (.delegation_exercised != null)
+    then "delegation_exercised is not a boolean or null"
+    elif .pi_tokens_total != null and ((.pi_tokens_total | type) != "object")
+    then "pi_tokens_total is not an object or null"
     elif (.pi | map(select(. != null and .duration_ms != null))
              | map(.duration_ms | type) | any(. != "number"))
     then "pi[].duration_ms is not numeric or null"
