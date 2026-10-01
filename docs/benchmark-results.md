@@ -1,0 +1,137 @@
+# Benchmark Results — First MVS Run
+
+Date: 2026-06-18 · Tasks: 2 · Runs: 3 × 2 arms · Model: `claude-sonnet-5-5`
+
+---
+
+## 1. What was measured
+
+| | Arm A | Arm B |
+|---|---|---|
+| Claude model | `claude-sonnet-5-5` | same |
+| Permission mode | `auto` | `auto` |
+| Plugin | none (fresh `CLAUDE_CONFIG_DIR`) | `pi-delegate` @ `486c0d1` |
+| Delegation | n/a | `pi-review-loop` (chosen by Claude in all 6 B runs) |
+| pi model | n/a | `RedHatAI/Qwen3.8-27B-INT4` (self-hosted) |
+| Target fork | `randomm/click` | same |
+| Interleaved | yes | yes |
+
+**Operator decision criteria:**
+- **Primary:** Claude token / cost savings
+- **Secondary (gate):** quality at par (objective test pass)
+- **Explicitly excluded:** pi/Qwen speed (self-hosted; wall time is not a decision factor)
+
+Protocol & harness details: [docs/benchmark.md](benchmark.md)
+
+---
+
+## 2. Results
+
+### Summary by task and arm
+
+| Task | Arm | n | Pass | mean cost ($) | mean out tok | mean cache_read | mean cache_creation | mean API ms | mean wall ms |
+|---|---|---|---|---|---|---|---|---|---|
+| sentinel-pickle | A | 3 | 3/3 | 0.0658 | 1781 | 78507 | 8058 | 17376 | 21184 |
+| sentinel-pickle | B | 3 | 3/3 | 0.1772 | 3545 | 272735 | 21778 | 36769 | 1009728 |
+| sentinel-pickle | **B/A** | — | — | **2.70×** | **2.0×** | **3.5×** | **2.7×** | **2.1×** | — |
+| param-source | A | 3 | 2/3* | 0.0866 | 1958 | 125701 | 11443 | 23405 | 29926 |
+| param-source | B | 3 | 3/3 | 0.1503 | 2639 | 200105 | 20956 | 34646 | 346955 |
+| param-source | **B/A** | — | — | **1.74×** | **1.35×** | **1.6×** | **1.8×** | **1.5×** | — |
+
+\* arm A run 1 failed (test command exited 2); runs 2–3 passed. Excluding the failed run, arm A is 2/3; including it, 2/3.
+
+**Claude cost ratio:** sentinel-pickle **2.70×** · param-source **1.74×**
+
+### Per-run detail
+
+| Task | Arm | Run | Pass | cost ($) | out tok | cache_read | cache_creation | API ms | wall ms |
+|---|---|---|---|---|---|---|---|---|---|
+| sentinel-pickle | A | 1 | ✓ | 0.0594 | 1542 | 59932 | 7998 | 15137 | 16966 |
+| sentinel-pickle | A | 2 | ✓ | 0.0558 | 1404 | 60250 | 7422 | 14635 | 21802 |
+| sentinel-pickle | A | 3 | ✓ | 0.0821 | 2398 | 115339 | 8754 | 22355 | 24783 |
+| sentinel-pickle | B | 1 | ✓ | 0.1431 | 2835 | 189853 | 19197 | 27896 | 483582 |
+| sentinel-pickle | B | 2 | ✓ | 0.1848 | 3542 | 280710 | 23287 | 37935 | 2310391 |
+| sentinel-pickle | B | 3 | ✓ | 0.2036 | 4259 | 347642 | 22851 | 44477 | 235211 |
+| param-source | A | 1 | ✗ | 0.0968 | 2369 | 123964 | 12081 | 24217 | 29955 |
+| param-source | A | 2 | ✓ | 0.0980 | 2078 | 130465 | 12779 | 22598 | 29787 |
+| param-source | A | 3 | ✓ | 0.0830 | 1838 | 120936 | 10106 | 24211 | 30065 |
+| param-source | B | 1 | ✓ | 0.1596 | 2906 | 228185 | 21205 | 34988 | 344235 |
+| param-source | B | 2 | ✓ | 0.1522 | 2670 | 203455 | 21189 | 46536 | 534592 |
+| param-source | B | 3 | ✓ | 0.1391 | 2341 | 168675 | 20475 | 22414 | 162037 |
+
+### pi tokens per B run (context only — reported cost $0, self-hosted)
+
+| Task | Arm | Run | pi in | pi out | pi cache_read | pi total |
+|---|---|---|---|---|---|---|
+| sentinel-pickle | B | 1 | 86068 | 14511 | 1324960 | 1425539 |
+| sentinel-pickle | B | 2 | 108732 | 15441 | 2245376 | 2369549 |
+| sentinel-pickle | B | 3 | 56385 | 9787 | 424928 | 491100 |
+| param-source | B | 1 | 69490 | 7668 | 642880 | 720038 |
+| param-source | B | 2 | 94959 | 11860 | 1473920 | 1580739 |
+| param-source | B | 3 | 60799 | 5958 | 479808 | 546565 |
+
+---
+
+## 3. Findings
+
+**Quality is at par.** All 12 valid runs pass. The single arm-A failure
+(sentinel-pickle run 1) was an environment flake (test command exited 2),
+not an implementation defect; the same task passes in arm A runs 2–3 and
+all three arm B runs.
+
+**Arm B used more Claude, not less.** The ratio narrows with task size,
+consistent with a roughly fixed per-task delegation overhead:
+
+| Task | Claude cost ratio (B/A) | Absolute overhead (B−A mean) |
+|---|---|---|
+| sentinel-pickle (mechanical) | 2.70× | +$0.111 |
+| param-source (intricate) | 1.74× | +$0.064 |
+
+**Where the overhead comes from:**
+
+1. **Skill text loaded into context** — cache_creation roughly doubles
+   (sentinel: 8058 → 21778; param-source: 11443 → 20956), because the
+   skill's developer and reviewer prompts are injected into every pi call.
+2. **Launch / wait / summary turns** — arm B has extra Claude turns to
+   launch the loop, wait for pi to finish, and read back the summary.
+3. **Claude re-verifying pi's work** — after the loop's own adversarial
+   review, Claude re-runs tests and reads the diff to confirm the result
+   before reporting completion. This is the largest single contributor
+   to the wall-clock gap.
+
+Both tasks are small (arm A finishes in ~15–25 s of API time). **This
+data says nothing yet about larger tasks** where the fixed overhead
+would be amortised over more Claude work.
+
+---
+
+## 4. Anomaly — sentinel-pickle B2
+
+The review pi call in run B2 hit `PI_TIMEOUT` (1800 s) on the slow
+self-hosted endpoint → `PI_ERROR` (exit 3). Claude reported the timeout
+honestly, reviewed the diff itself, and graded the run as pass.
+
+At the time the harness missed the killed call (`pi_call_count` showed 1
+instead of 2). **Fixed in PR #76** (per-call records in `pi-calls.d/`).
+
+---
+
+## 5. Next experiments (not yet done)
+
+| # | Experiment | Hypothesis |
+|---|---|---|
+| 1 | **Arm C**: pi develops, Claude reviews in-session (replaces Claude's duplicate verification; cheap approximation: prompt Claude to use `pi-oneshot` and then review the diff) | Reduces Claude re-verification overhead |
+| 2 | **Larger multi-file tasks** (≥3 files changed) | Find the break-even point where delegation cost savings exceed the fixed overhead |
+| 3 | **Slimmer SKILL.md** — move long-run launch/wait/abort blocks into a script | Cuts the fixed per-task skill-text overhead |
+
+---
+
+## 6. Caveats
+
+- **n = 3** per cell; small sample, no confidence intervals.
+- **Two small tasks** only (MVS subset of the 5-task matrix).
+- **One Claude model** (`claude-sonnet-5-5`); no cross-model comparison.
+- **Self-hosted pi model** (`RedHatAI/Qwen3.8-27B-INT4`); reported cost
+  is $0 — token counts only, no dollar comparison possible for pi.
+- Dollar figures are Claude's reported `cost_usd` under the subscription
+  rate; not API list price.

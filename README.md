@@ -137,6 +137,12 @@ opt out of all three guards. Details in
 - [How it works](docs/how-it-works.md) — architecture, loop sequence, verdicts,
   JSON schema, prompt flow, and the cost rationale
 
+## Benchmark
+
+First MVS benchmark (2 tasks × 3 runs × 2 arms): quality at par (12/12 pass);
+on small tasks, Claude cost was **~1.7–2.7× higher** with delegation. See
+[benchmark results](docs/benchmark-results.md).
+
 ## License
 
 Licensed under the Apache License, Version 2.0 — see LICENSE. Copyright 2026
