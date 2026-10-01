@@ -9,7 +9,7 @@
 #   run-meta.json        harness run metadata (model, perm mode, pi-delegate sha)
 #   setup.json           setup metadata (base sha, branch, etc.)
 #   grade.json           grading result (pass/fail, test cmd, test log path)
-#   pi-calls.jsonl       one line per pi call (argv, duration, exit, mode)
+#   pi-calls.d/*.json    one file per pi call (argv, duration, exit, mode)
 #   pi-<N>.jsonl         per-call pi --mode json transcript (review-loop path)
 #
 # Writes (to stdout or [output.jsonl] if given):
@@ -29,7 +29,7 @@
 #        tokens: {input, output, cache_read, cache_write, total, per_model}
 #                 | null}
 #     ],
-#     pi_call_count (number of pi calls, 0 if pi-calls.jsonl is absent),
+#     pi_call_count (number of pi calls, 0 if pi-calls.d is absent or empty),
 #     delegation_exercised (arm B: boolean — arm B with pi_call_count > 0;
 #       arm A: null, since pi calls in arm A are accidental and are not a
 #       delegation signal),
@@ -46,7 +46,7 @@
 #   0  success (one JSON line written)
 #   1  run directory missing or claude/output.json missing
 #   2  claude/output.json is not valid JSON (malformed run), or the
-#       pi-calls.jsonl contains a duplicate/malformed line
+#       pi-calls.d records contain a duplicate/malformed line
 #
 # Validation: the output line is validated with jq before being written.
 # Required fields: task, arm, run, model, target_commit, grade.pass.
@@ -193,8 +193,9 @@ claude_metrics="$(jq -c '
 claude_models_json="$(jq -c '[(.modelUsage // {}) | keys[]]' "$claude_json")"
 
 # Parse pi calls.
-# pi-calls.jsonl: one JSON object per pi invocation (argv, duration_ms,
-# exit, mode, call_id).
+# pi-calls.d/*.json: one JSON object per pi invocation (argv, duration_ms,
+# exit, mode, call_id). This is the only source of pi calls; the legacy
+# shared pi-calls.jsonl file is no longer read.
 # pi-<N>.jsonl: per-call transcript for --mode json invocations.
 # For each call, if mode is "json" and a corresponding pi-<call_id>.jsonl
 # exists, extract usage from the transcript. Tokens are SUMMED over every
@@ -205,36 +206,56 @@ claude_models_json="$(jq -c '[(.modelUsage // {}) | keys[]]' "$claude_json")"
 # tokens is null (documented gap).
 
 
-# Build the pi array. If no pi-calls.jsonl, the array is empty.
+# Build the pi array. If pi-calls.d is absent or empty, the array is empty.
 pi_calls_json="[]"
-if [ -f "$run_dir/pi-calls.jsonl" ]; then
-  # Refuse malformed / duplicate lines in pi-calls.jsonl (a duplicate
-  # task/arm/run line would double-count tokens in the report).
-  if ! jq -e -s 'length == (unique_by([.call_id // null, .mode // null]) | length)' "$run_dir/pi-calls.jsonl" >/dev/null 2>&1; then
-    echo "collect: pi-calls.jsonl contains duplicate call entries (call_id + mode); refusing" >&2
+calls_dir="$run_dir/pi-calls.d"
+if [ -d "$calls_dir" ]; then
+  # One file per call: $RUN_DIR/pi-calls.d/<call_id>.json — each file is
+  # one JSON object; exit may be null (SIGKILLed call that never
+  # completed). This is the only pi-call source (the legacy shared
+  # pi-calls.jsonl is no longer read); an absent or empty pi-calls.d
+  # means zero calls.
+  calls_jsonl="$run_dir/.pi-calls-deduped.jsonl"
+  # Temp files (deduped calls, tokens map) are removed on every exit path
+  # via trap EXIT — never left in the run dir.
+  _cleanup_tmp() {
+    if [ -n "${_tmp_calls:-}" ]; then rm -f "$_tmp_calls" 2>/dev/null; fi
+    if [ -n "${_tmp_tmap:-}" ]; then rm -f "$_tmp_tmap" 2>/dev/null; fi
+    return 0
+  }
+  trap _cleanup_tmp EXIT
+  _tmp_calls=""; _tmp_tmap=""
+  # Build the deduped JSONL from the per-call files in one command: the
+  # shell sorts the glob so the result is deterministic by call_id
+  # (filename), and each file is one JSON object on one line.
+  _tmp_calls="$calls_jsonl"
+  # When pi-calls.d exists but is empty the glob is dead and cat receives a
+  # literal `*.json` it cannot open, failing with rc=1. `|| true` lets the
+  # empty-dir case fall through to the jq validator (which handles the empty
+  # file correctly), so a valid zero-call run is not aborted by set -e.
+  cat "$calls_dir"/*.json > "$calls_jsonl" 2>/dev/null || true
+  # Validate: each line must have call_id (string), mode (string), and
+  # exit (number or null).
+  if ! jq -e -s 'all(.[]; (.call_id | type) == "string" and (.mode | type) == "string" and ((.exit | type) == "number" or (.exit | type) == "null"))' "$calls_jsonl" >/dev/null 2>&1; then
+    echo "collect: pi-calls.d contains a malformed record (bad call_id/mode/exit); refusing" >&2
     exit 2
   fi
-  if ! jq -e -s 'all(.[]; (.call_id | type) == "string" and (.mode | type) == "string" and (.exit | type) == "number")' "$run_dir/pi-calls.jsonl" >/dev/null 2>&1; then
-    echo "collect: pi-calls.jsonl contains a malformed line (bad call_id/mode/exit); refusing" >&2
-    exit 2
-  fi
-  # Process each line of pi-calls.jsonl. Accumulate a jq array by parsing
+  # Process each line of the deduped pi calls. Accumulate a jq array by parsing
   # the whole file at once (one JSON array input) instead of concatenating
   # per-line strings (which breaks when a call spans multiple lines after
   # jq pretty-prints, or when the shell mangles embedded newlines).
   #
   # We use a two-step approach:
   #   1. For each call_id with mode=json, extract tokens from the transcript.
-  #   2. Build the pi array in one jq call over the whole pi-calls.jsonl,
+  #   2. Build the pi array in one jq call over the deduped calls,
   #      looking up tokens from a temp map file.
-  # Build the tokens map as a JSONL file (one {id, tokens} object per line).
+  # Build the tokens map as a JSONL file (one {id, tokens} object per
+  # line). All stderr from the loop is suppressed so jq errors inside the
+  # loop (e.g. from a malformed call line) do not pollute the script's
+  # stderr.
   tokens_map="$run_dir/.pi-tokens-map.jsonl"
+  _tmp_tmap="$tokens_map"
   : > "$tokens_map"
-  # Build the tokens map as a JSONL file (one {id, tokens} object per line).
-  # All stderr from the loop is suppressed so jq errors inside the loop
-  # (e.g. from a malformed call line) do not pollute the script's stderr.
-  # NOTE: the `} 2>/dev/null` wrapper redirects stderr of the entire block;
-  # the loop body's individual 2>/dev/null redirects are redundant but harmless.
   {
     while IFS= read -r call_line; do
       [ -z "$call_line" ] && continue
@@ -275,7 +296,7 @@ if [ -f "$run_dir/pi-calls.jsonl" ]; then
       tok="$(printf '%s' "$tok" | jq -c . 2>/dev/null)" || tok="null"
       jq -cn --arg id "$call_id" --argjson tok "$tok" '{id:$id, tokens:$tok}' \
         >> "$tokens_map" 2>/dev/null || true
-    done < "$run_dir/pi-calls.jsonl"
+    done < "$calls_jsonl"
   } 2>/dev/null
 
   # Build the pi array in one jq call.
@@ -284,7 +305,7 @@ if [ -f "$run_dir/pi-calls.jsonl" ]; then
   # The pi array is a core field: a jq failure building it is a malformed
   # run (exit 2), not a silent empty list.
   pi_calls_json="$(jq -cn \
-    --rawfile calls "$run_dir/pi-calls.jsonl" \
+    --rawfile calls "$calls_jsonl" \
     --rawfile tmap "$tokens_map" \
     '($calls | split("\n") | map(select(length > 0) | fromjson)) as $calls_arr
      | ($tmap  | split("\n") | map(select(length > 0) | fromjson)) as $tmap_arr
@@ -294,11 +315,12 @@ if [ -f "$run_dir/pi-calls.jsonl" ]; then
        | . as $tok
        | ($c + {tokens: $tok})
       ]) as $arr
-     | $arr')" || { echo "collect: failed to build pi call array from pi-calls.jsonl" >&2; exit 2; }
-  rm -f "$tokens_map"
+     | $arr')" || { echo "collect: failed to build pi call array from pi-calls.d" >&2; exit 2; }
+  # Temp files (.pi-calls-deduped.jsonl, .pi-tokens-map.jsonl) are cleaned
+  # by trap EXIT on every exit path — never left in the run dir.
 fi
 
-# pi_call_count: number of pi calls (0 when pi-calls.jsonl is absent).
+# pi_call_count: number of pi calls (0 when pi-calls.d is absent or empty).
 # delegation_exercised: arm B with ≥1 pi call; arm A is null (not
 # applicable — arm A's pi calls are accidental, not a delegation signal).
 # docs/benchmark.md §"How to read results" defines it: arm B true iff

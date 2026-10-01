@@ -200,7 +200,8 @@ PI_SHIM_MARKER="# pi-delegate-bench-shim"
 #       <run-dir>/pi-<N>.jsonl (N = the call id); collect.sh parses usage
 #       from the per-call JSONL files.
 #   text mode (oneshot path):
-#     - record argv + wall clock + exit code to <run-dir>/pi-calls.jsonl.
+#     - record argv + wall clock + exit code to
+#       <run-dir>/pi-calls.d/<call_id>.json.
 #     - the per-call token count is not available (text mode has no usage
 #       events); collect.sh reports pi_tokens as null for those calls.
 #     - This is the documented token-accounting gap (docs/benchmark.md).
@@ -281,7 +282,6 @@ install_pi_shim() {
 set -u
 
 RUN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG_FILE="${PI_SHIM_LOG:-$RUN_DIR/pi-calls.jsonl}"
 # Per-call id: epoch-seconds + $$ is portable (BSD date has no %3N).
 # The pid is the real uniqueness source for concurrent calls in one run;
 # two pids can never be equal, so call ids are unique per run and the
@@ -307,8 +307,75 @@ now_ms_shell() {
 
 t0="$(now_ms_shell)"
 
-args=("$@")
+# Record every invocation — including one that never completes (killed by
+# orchestrate's PI_TIMEOUT wrapper, or the shim itself SIGTERMed). One file
+# per call: $RUN_DIR/pi-calls.d/<call_id>.json, written atomically (tmp +
+# mv) at start with exit null, then atomically replaced by the same call on
+# completion or TERM/INT. A SIGKILLed call keeps exit null and is still
+# counted. No writes to a shared file: each call owns its own file, so
+# concurrent calls can never clobber each other's record.
+shim_record() {
+  # Called as: shim_record <duration_ms> <exit> <mode>
+  # argv is always the top-level argv in $args (set before the first
+  # call; a trap that fires before that records an empty argv).
+  local dur_ms="$1" rc="$2" mode="$3"
+  local argv_json
+  if [ "${#args[@]}" -eq 0 ]; then
+    argv_json="[]"
+  else
+    argv_json="$(for a in "${args[@]}"; do printf '%s\n' "$a"; done | jq -Rn '[inputs]')" || argv_json="[]"
+  fi
+  # exit may be null (started) or a number (completed/killed).
+  local exit_json
+  if [ -z "$rc" ]; then
+    exit_json="null"
+  else
+    exit_json="$rc"
+  fi
+  local obj
+  obj="$(jq -cn \
+    --argjson argv "$argv_json" \
+    --argjson duration_ms "$dur_ms" \
+    --argjson exit "$exit_json" \
+    --arg mode "$mode" \
+    --arg call_id "$CALL_TAG" \
+    '{argv:$argv, duration_ms:$duration_ms, exit:$exit, mode:$mode, call_id:$call_id}' 2>/dev/null)" || obj=""
+  [ -n "$obj" ] || return 0
+  local dir="$RUN_DIR/pi-calls.d"
+  local target="$dir/$CALL_TAG.json"
+  local tmp="$dir/.${CALL_TAG}.$$tmp"
+  # A record-write failure (mkdir/printf/mv) must not abort the pi call —
+  # the shim's job is byte-for-byte passthrough; it only prints a warning.
+  if ! mkdir -p "$dir" 2>/dev/null \
+    || ! printf '%s\n' "$obj" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$target" 2>/dev/null; then
+    echo "shim: failed to write pi call record for $CALL_TAG" >&2
+  fi
+  return 0
+}
+shim_on_term() {
+  # json_mode is already set (determined before the first record); an unset
+  # value (trap fired before detection ran) falls back to text.
+  shim_record 0 143 "$([ "${json_mode:-0}" -eq 1 ] && echo json || echo text)"
+  exit 143
+}
+shim_on_int() {
+  shim_record 0 130 "$([ "${json_mode:-0}" -eq 1 ] && echo json || echo text)"
+  exit 130
+}
+trap shim_on_term TERM
+trap shim_on_int INT
 
+# Record the started state (exit null) up front so a SIGKILLed call still
+# leaves a record file. The completion path replaces it with the real
+# duration/mode/exit, and the trap path (killed call) replaces it with
+# exit 143/130.
+# The call's mode is determined BEFORE the first (started) record so the
+# started record and the TERM/INT records carry the true mode: a --mode
+# json call killed before it completes must still be recorded as mode
+# "json". --no-context-files is injected first so the recorded argv is
+# the actual argv the real pi receives.
+args=("$@")
 # Inject --no-context-files exactly once if not already present.
 injected=0
 for a in "${args[@]}"; do
@@ -321,7 +388,6 @@ if [ "$injected" -eq 0 ]; then
   args+=(--no-context-files)
 fi
 
-# Detect --mode json in argv (adjacent pair).
 json_mode=0
 prev=""
 for a in "${args[@]}"; do
@@ -330,6 +396,7 @@ for a in "${args[@]}"; do
   fi
   prev="$a"
 done
+shim_record 0 null "$([ "$json_mode" -eq 1 ] && echo json || echo text)"
 
 stdout_file="$RUN_DIR/pi-stdout-$CALL_TAG.tmp"
 err_file="$RUN_DIR/pi-err-$CALL_TAG.tmp"
@@ -355,24 +422,16 @@ if [ "$rc" -ne 0 ]; then
   cp "$err_file" "$RUN_DIR/pi-err-$CALL_TAG.log"
 fi
 rm -f "$stdout_file" "$err_file"
+trap - TERM INT
 
 t1="$(now_ms_shell)"
 dur_ms=$(( t1 - t0 ))
 
-# Build argv as a JSON array. Each element is one argv entry: "${args[@]}"
-# (never "${args[*]}") so element boundaries survive even if an argument
-# contains spaces; one element per line, one line per argv element.
-argv_json="$(for a in "${args[@]}"; do printf '%s\n' "$a"; done | jq -Rn '[inputs]')"
-
-# Append one metadata line to pi-calls.jsonl.
-jq -cn \
-  --argjson argv "$argv_json" \
-  --argjson duration_ms "$dur_ms" \
-  --argjson exit "$rc" \
-  --arg mode "$([ "$json_mode" -eq 1 ] && echo json || echo text)" \
-  --arg call_id "$CALL_TAG" \
-  '{argv:$argv, duration_ms:$duration_ms, exit:$exit, mode:$mode, call_id:$call_id}' \
-  >> "$LOG_FILE" 2>/dev/null
+# Replace the started record with the completion record (real duration
+# and exit code; the mode was fixed when the started record was written).
+# One file per call: the same $RUN_DIR/pi-calls.d/<call_id>.json is
+# atomically replaced.
+shim_record "$dur_ms" "$rc" "$([ "$json_mode" -eq 1 ] && echo json || echo text)"
 
 exit "$rc"
 SHEOF
