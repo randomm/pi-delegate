@@ -349,7 +349,9 @@ CLAUDE_CODE_OAUTH_TOKEN="$(security find-generic-password -w -s 'Claude Code-cre
   bench/run-arm.sh click-sentinel-pickle A 1
 ```
 
-After collecting results, scan the run output for any leaked token:
+After collecting results, scan the run output for any leaked token
+(Claude Code OAuth tokens use the `sk-ant-oat01-` prefix, which is why the
+grep targets that prefix):
 
 ```bash
 grep -rl 'sk-ant-oat01-' "$BENCH_OUT" && echo "TOKEN LEAKED" || echo "clean"

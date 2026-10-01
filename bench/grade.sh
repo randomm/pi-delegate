@@ -121,16 +121,40 @@ else
   base_sha="${BASE_SHA:-}"
   echo "grade: base from task.env" >&2
 fi
+# head_moved is true/false on every path that reached base resolution and
+# null otherwise (e.g. the missing-base early exit below, where the base
+# sha could not be determined — docs §grade fields).
+head_moved="true"
+if [ -n "$base_sha" ]; then
+  head_sha="$(git rev-parse HEAD 2>/dev/null)" || head_sha=""
+  if [ -n "$head_sha" ] && [ "$head_sha" = "$base_sha" ]; then
+    head_moved="false"
+  fi
+else
+  head_moved="null"
+fi
 [ -n "$base_sha" ] || {
   echo "grade: cannot determine base sha (no setup.json base_sha, no BASE_SHA in task.env)" >&2
+  # grade.json is still recorded on this exit-2 path: the collect line must
+  # never see a missing grade on a run dir that exists.
+  jq -cn \
+    --arg task "$task_id" \
+    --arg arm "$arm" \
+    --argjson run "$run_num" \
+    --arg test_cmd "$TEST_CMD" \
+    --arg patch "$patch_path" \
+    --argjson restored "$restored_json" \
+    --arg error "cannot determine base sha" \
+    --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
+      restored_test_files:$restored, head_moved:null,
+      pass:false, error:$error, graded_at:$graded_at}' \
+    > "$run_dir/grade.json" || {
+      echo "grade: FATAL — could not write $run_dir/grade.json" >&2
+      exit 2
+    }
   exit 2
 }
-head_sha="$(git rev-parse HEAD 2>/dev/null)" || head_sha=""
-if [ -z "$head_sha" ] || [ "$head_sha" != "$base_sha" ]; then
-  head_moved="true"
-else
-  head_moved="false"
-fi
 
 # --- Restore the patch's files to BASE ----------------------------------------
 # The grading patch is a test-only diff. If the agent edited any of the files
@@ -175,6 +199,8 @@ write_patch_header_error() {
   # called in a plain (non-conditional) context.
   local pe="${1:-}"
   echo "grade: $pe" >&2
+  _hm_arg="$head_moved"
+  [ "$_hm_arg" = "null" ] && _hm_arg="false"
   jq -cn \
     --arg task "$task_id" \
     --arg arm "$arm" \
@@ -182,11 +208,11 @@ write_patch_header_error() {
     --arg test_cmd "$TEST_CMD" \
     --arg patch "$patch_path" \
     --argjson restored "$restored_json" \
-    --arg head_moved "$head_moved" \
+    --arg head_moved "$_hm_arg" \
     --arg error "$pe" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
-      restored_test_files:$restored, head_moved:($head_moved|if . == "true" then true else false end),
+      restored_test_files:$restored, head_moved:($head_moved == "true"),
       pass:false, error:$error, graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2
@@ -201,7 +227,17 @@ write_patch_header_error() {
 # a `--- ` line followed by a `+++ ` line WOULD be treated as a header (no
 # disambiguation is possible); that misparse then fails loudly at the path-
 # safety check below or at restore/`git apply` — never a silent wrong grade.
-_parse_out="$(timeout 60 awk '
+# The awk runs as a PLAIN command (not `VAR=$(awk …) || rc=$?`): bash
+# applies `set -e` to a variable assignment in the same breath as the
+# subshell exit status, so a failing awk would abort the script at the
+# assignment line (the following `|| _parse_rc=$?` never runs), and no
+# grade.json would be written. Running awk standalone and redirecting its
+# stdout to a temp file is a simple command whose non-zero exit IS caught by
+# the `|| _parse_rc=$?` guard. rc=0 is the success case; non-zero means awk
+# could not read the file.
+_parse_out_file="$(mktemp)"
+_parse_rc=0
+timeout 60 awk '
   /^--- / {
     pend = $0
     sub(/^--- /, "", pend)
@@ -225,18 +261,15 @@ _parse_out="$(timeout 60 awk '
     else if (index(pend_plus, "b/") == 1) newp = substr(pend_plus, 3)
     else newp = pend_plus
     pend = ""
-    if (old == "/dev/null" || newp == "/dev/null")
-      printf "C\t%s\t%s\n", old, newp
-    else
-      printf "M\t%s\t%s\n", old, newp
-    found = 1
+    tag = (old == "/dev/null" || newp == "/dev/null") ? "C" : "M"
+    printf "%s\t%s\t%s\n", tag, old, newp
   }
   { pend = "" }
-' "$patch_path" 2>/dev/null)"
-# Capture awk's own exit status: a non-zero exit is "failed to read",
-# independent of the -f/-r probes; only an awk success with no output
-# reaches the header probe below.
-_parse_rc=$?
+' "$patch_path" > "$_parse_out_file" 2>/dev/null || _parse_rc=$?
+_parse_out="$(cat "$_parse_out_file" 2>/dev/null)" || true
+rm -f "$_parse_out_file"
+# A non-zero awk exit is "failed to read", independent of the -f/-r probes
+# below; only an awk success with no output reaches the header probe.
 if [ "$_parse_rc" -ne 0 ]; then
   write_patch_header_error "failed to read grading patch: $patch_path"
   # Unreachable: write_patch_header_error exits the script (exit 2).
@@ -298,6 +331,8 @@ write_restore_failure() {
   # $1 = path, $2 = stderr. Writes the grade record and exits 2.
   local rp="$1" rr="${2:-}"
   echo "grade: restore failed for $rp" >&2
+  _hm_arg="$head_moved"
+  [ "$_hm_arg" = "null" ] && _hm_arg="false"
   jq -cn \
     --arg task "$task_id" \
     --arg arm "$arm" \
@@ -305,11 +340,11 @@ write_restore_failure() {
     --arg test_cmd "$TEST_CMD" \
     --arg patch "$patch_path" \
     --argjson restored "$restored_json" \
-    --arg head_moved "$head_moved" \
+    --arg head_moved "$_hm_arg" \
     --arg error "restore failed for $rp: $rr" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
-      restored_test_files:$restored, head_moved:($head_moved|if . == "true" then true else false end),
+      restored_test_files:$restored, head_moved:($head_moved == "true"),
       pass:false, error:$error, graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2
@@ -342,7 +377,8 @@ while IFS= read -r p; do
       # grade.json recording the error — do not swallow it and continue.
       write_restore_failure "$p" "${_co_err//$'\n'/ }"
     fi
-    restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" || true
+    restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" \
+      || write_restore_failure "$p" "failed to record restore (jq error)"
   fi
 done < <(jq -r '.[]' <<< "$patch_modified_json" 2>/dev/null)
 # For each file the patch creates: delete it if present (a stray copy of the
@@ -355,7 +391,8 @@ while IFS= read -r p; do
       # (the file is not restored, so it is not recorded in the list).
       write_restore_failure "$p" "could not delete stray created file"
     fi
-    restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" || true
+    restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" \
+      || write_restore_failure "$p" "failed to record restore (jq error)"
   fi
 done < <(jq -r '.[]' <<< "$patch_created_json" 2>/dev/null)
 
@@ -444,6 +481,6 @@ else
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2
       exit 2
-    }
+    } 
   exit 1
 fi

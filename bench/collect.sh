@@ -109,9 +109,9 @@ meta_json="$run_dir/run-meta.json"
 model="null"; perm_mode="null"; pi_delegate_sha="null"
 agent_ms="null"; started_ms="null"; ended_ms="null"
 if [ -f "$meta_json" ]; then
-  model="$(jq -r '.model // "null"' "$meta_json")"
-  perm_mode="$(jq -r '.perm_mode // "null"' "$meta_json")"
-  pi_delegate_sha="$(jq -r '.pi_delegate_sha // ""' "$meta_json")"
+  model="$(jq -r '.model // "null"' "$meta_json")" || { echo "collect: failed to read run-meta.json model" >&2; exit 2; }
+  perm_mode="$(jq -r '.perm_mode // "null"' "$meta_json")" || { echo "collect: failed to read run-meta.json perm_mode" >&2; exit 2; }
+  pi_delegate_sha="$(jq -r '.pi_delegate_sha // ""' "$meta_json")" || { echo "collect: failed to read run-meta.json pi_delegate_sha" >&2; exit 2; }
   [ -z "$pi_delegate_sha" ] && pi_delegate_sha="null"
   # started_ms/ended_ms: present + non-null but not a plain non-negative
   # integer is a malformed run (exit 2) — not silently degraded. Absent or
@@ -132,9 +132,13 @@ if [ -f "$meta_json" ]; then
   # A string-valued agent_ms is malformed (exit 2 via validation below); a
   # missing or JSON-null agent_ms degrades to null. Number/null are kept as
   # their JSON form ("null" for a missing/null field).
+  # A jq FAILURE (unreadable/corrupt run-meta.json) is a loud exit 2 — the
+  # run-meta.json was already read successfully for the fields above, so a
+  # failure here is an I/O or parse error we must not silently swallow.
   agent_ms="$(jq -c 'if (has("agent_ms") and (.agent_ms | type) == "number") then .agent_ms
                      elif (has("agent_ms") and (.agent_ms | type) == "string") then .agent_ms
-                     else null end' "$meta_json" 2>/dev/null)" || agent_ms="null"
+                     else null end' "$meta_json")" \
+    || { echo "collect: failed to read run-meta.json agent_ms" >&2; exit 2; }
   [ -n "$agent_ms" ] || agent_ms="null"
 fi
 
