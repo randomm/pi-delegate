@@ -229,7 +229,11 @@ if [ -d "$calls_dir" ]; then
   # shell sorts the glob so the result is deterministic by call_id
   # (filename), and each file is one JSON object on one line.
   _tmp_calls="$calls_jsonl"
-  cat "$calls_dir"/*.json > "$calls_jsonl" 2>/dev/null
+  # When pi-calls.d exists but is empty the glob is dead and cat receives a
+  # literal `*.json` it cannot open, failing with rc=1. `|| true` lets the
+  # empty-dir case fall through to the jq validator (which handles the empty
+  # file correctly), so a valid zero-call run is not aborted by set -e.
+  cat "$calls_dir"/*.json > "$calls_jsonl" 2>/dev/null || true
   # Validate: each line must have call_id (string), mode (string), and
   # exit (number or null).
   if ! jq -e -s 'all(.[]; (.call_id | type) == "string" and (.mode | type) == "string" and ((.exit | type) == "number" or (.exit | type) == "null"))' "$calls_jsonl" >/dev/null 2>&1; then

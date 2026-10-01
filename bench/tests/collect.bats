@@ -561,6 +561,23 @@ EOF
   echo "$output" | jq -e '.grade.pass == true' >/dev/null
 }
 
+@test "collect.sh: arm B with an empty pi-calls.d directory → zero pi calls, exit 0" {
+  run_dir="$BENCH_OUT/$MECH_ID/B/21"
+  mkdir -p "$run_dir/claude"
+  cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
+  cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
+  cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
+  cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
+  # An existing but empty pi-calls.d (dir present, no record files).
+  mkdir -p "$run_dir/pi-calls.d"
+
+  run bash "$BENCH_DIR/collect.sh" "$MECH_ID" B 21
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.pi_call_count == 0' >/dev/null
+  echo "$output" | jq -e '.delegation_exercised == false' >/dev/null
+  echo "$output" | jq -e '.grade.pass == true' >/dev/null
+}
+
 # --- collect.sh: pi_tokens_total per model (summed across calls) -------------------------
 @test "collect.sh: pi_tokens_total aggregates per-model totals across calls" {
   run_dir="$BENCH_OUT/$MECH_ID/A/35"
