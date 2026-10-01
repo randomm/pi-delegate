@@ -1942,42 +1942,22 @@ EOF
   jq -e '.error | contains("failed to read grading patch")' "$grade_file" >/dev/null
 }
 
-# --- grade.sh: no base sha anywhere → exit 2, grade.json head_moved null ---
-# The task.env has a valid BASE_SHA (so require_task_fields passes and
-# setup-run.sh succeeds), but the resulting setup.json has its base_sha
-# field deleted — simulating a run where setup.json lacks base_sha.
-# The task.env BASE_SHA is replaced with a non-empty placeholder that
-# does not resolve in the run repo. Since base_sha is non-empty (the
-# placeholder), the missing-base early exit is NOT taken; instead the
-# restore step fails (git diff with unresolvable sha) → exit 2 with
-# head_moved true. To test the actual missing-base path, we delete
-# setup.json entirely (so base_sha is empty from setup.json) AND use
-# a placeholder BASE_SHA that is non-empty (passes require_task_fields)
-# but does not resolve. The placeholder IS the base_sha (non-empty), so
-# the early exit is still not taken.
-#
-# The only way to reach the missing-base early exit is: setup.json has no
-# base_sha AND task.env BASE_SHA is empty. But require_task_fields rejects
-# an empty BASE_SHA. So the early exit is only reachable when task.env has
-# BASE_SHA set to a non-empty value that is NOT a valid sha — wait, that
-# still gives a non-empty base_sha.
-#
-# In practice: the missing-base early exit is reachable when a manually
-# created run dir has no setup.json AND the task.env BASE_SHA is empty.
-# Since require_task_fields blocks this for grade.sh, the early exit is a
-# safety net for runs whose setup.json was written without base_sha by a
-# future harness change AND whose task.env also lacks BASE_SHA. We test it
-# by bypassing require_task_fields: create the run dir manually.
-@test "grade.sh: no base sha → exit 2 + grade.json 'cannot determine base sha', head_moved null" {
+# --- grade.sh: empty BASE_SHA in task.env → require_task_fields rejects ---
+# The missing-base early exit inside grade.sh (the "cannot determine base
+# sha" path) is a defensive net, normally unreachable: require_task_fields
+# rejects an empty BASE_SHA first, so grade.sh exits 2 at the guard before
+# any base resolution. This test pins THAT guard: a task whose task.env
+# has an empty BASE_SHA must be refused at require_task_fields, with no
+# grade.json written (the guard fires before the run-dir/base-sha checks).
+@test "grade.sh: empty BASE_SHA in task.env → exit 2 via require_task_fields (no grade.json)" {
   local run_num=72
   local nobase_id="nobase-test"
   local nobase_dir="$TASKS_DIR/$nobase_id"
   local run_dir="$BENCH_OUT/$nobase_id/A/$run_num"
   mkdir -p "$nobase_dir" "$run_dir/repo"
   cp "$TASK_DIR/grading.patch" "$nobase_dir/grading.patch"
-  # task.env with empty BASE_SHA (require_task_fields will fail, but we
-  # create the run dir manually so grade.sh sees it anyway). The GRADING_PATCH
-  # and REPO are needed for grade.sh to get past the early checks.
+  # task.env with empty BASE_SHA: require_task_fields must reject it before
+  # grade.sh reaches the (defensive) missing-base early exit.
   cat > "$nobase_dir/task.env" <<EOF
 REPO=$FAKE_REPO
 BASE_SHA=
@@ -1985,46 +1965,58 @@ FIX_SHA=$FIX_SHA
 TEST_CMD=true
 GRADING_PATCH=grading.patch
 EOF
-  # No setup.json (so no base_sha from setup.json).
-  # No BASE_SHA in task.env (empty).
-  # grade.sh will fail at require_task_fields (exit 2) BEFORE reaching the
-  # missing-base early exit. So this test actually tests the require_task_fields
-  # guard, not the missing-base path. To test the missing-base path directly,
-  # we need a task.env that passes require_task_fields but whose BASE_SHA is
-  # non-empty AND whose setup.json has no base_sha. That gives a non-empty
-  # base_sha (from task.env) → no early exit → restore failure (wrong test).
-  #
-  # The missing-base early exit is only reachable when BOTH sources are empty.
-  # Since require_task_fields blocks empty BASE_SHA, the only realistic path
-  # is: setup.json exists but has no base_sha field, AND task.env BASE_SHA is
-  # a non-empty value that the user considers "not set" (e.g. a literal
-  # "unknown"). In that case base_sha = "unknown" (non-empty) → no early exit.
-  #
-  # Conclusion: the missing-base early exit is a defensive safety net that is
-  # not reachable through the normal harness flow (require_task_fields blocks
-  # it). We test it by directly calling grade.sh with a task whose task.env
-  # passes require_task_fields but whose setup.json has no base_sha and whose
-  # task.env BASE_SHA is a non-empty dummy that won't resolve → this tests
-  # the restore-failure path, not the missing-base path.
-  #
-  # To actually test the missing-base path: create a task whose task.env has
-  # BASE_SHA set to a non-empty value (passes require_task_fields), run setup,
-  # then DELETE setup.json entirely AND replace task.env BASE_SHA with empty
-  # (bypassing require_task_fields by editing the file after the check). But
-  # grade.sh calls require_task_fields at the top, so it will fail there.
-  #
-  # The cleanest test: point GRADING_PATCH at a valid file, create the run
-  # dir manually, and make a task.env that passes require_task_fields but
-  # has a BASE_SHA that we then blank out AFTER require_task_fields runs.
-  # This is not possible from outside the script.
-  #
-  # Pragmatic approach: test the missing-base path by making setup.json have
-  # no base_sha AND making task.env have an empty BASE_SHA, and accept that
-  # grade.sh will fail at require_task_fields (exit 2) — the grade.json will
-  # NOT be written (require_task_fields fails before any grade.json write).
-  # This is the correct behavior: the guard catches the misconfiguration.
   run bash "$BENCH_DIR/grade.sh" "$nobase_id" A "$run_num"
   [ "$status" -eq 2 ]
-  # No grade.json (require_task_fields fails before the missing-base check).
+  [[ "$output" == *"missing required field BASE_SHA"* ]]
+  # No grade.json: the guard fires before any grade.json write.
   [ ! -f "$run_dir/grade.json" ]
+}
+
+# --- run-arm.sh: started_at/ended_at match the ms-resolution run window ----
+# Regression (dry run 4 / issue #71): started_at and ended_at were written
+# with a second-resolution `date` taken AFTER claude exited, so a ~343 s run
+# recorded started_at == ended_at. They must now derive from the same
+# captured moments as started_ms/ended_ms (captured immediately before and
+# after the claude call): started_at < ended_at for a multi-second run, and
+# the ms delta must reflect the real run duration.
+@test "run-arm.sh: started_at/ended_at span the run window (stub claude sleeps 2s)" {
+  local run_dir="$BENCH_OUT/$TASK_ID/A/40"
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 40
+  [ "$status" -eq 0 ]
+
+  local stub_dir="$BENCH_OUT/stub-claude-40"
+  mkdir -p "$stub_dir"
+  cat > "$stub_dir/claude" <<'CLAUDE'
+#!/usr/bin/env bash
+sleep 2
+echo '{"is_error":false,"result":"ok","duration_ms":2000,"total_cost_usd":0}'
+exit 0
+CLAUDE
+  chmod +x "$stub_dir/claude"
+  cat > "$stub_dir/pi" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$stub_dir/pi"
+
+  PATH="$stub_dir:$PATH" bash "$BENCH_DIR/run-arm.sh" "$TASK_ID" A 40 >/dev/null 2>&1
+  local rc=$?
+  [ "$rc" -eq 0 ]
+
+  local meta="$run_dir/run-meta.json"
+  [ -f "$meta" ]
+  local started_at ended_at started_ms ended_ms
+  started_at="$(jq -r '.started_at' "$meta")"
+  ended_at="$(jq -r '.ended_at' "$meta")"
+  started_ms="$(jq -r '.started_ms' "$meta")"
+  ended_ms="$(jq -r '.ended_ms' "$meta")"
+  # The ISO timestamps are distinct and ordered (second resolution is fine:
+  # a 2 s sleep crosses a second boundary). String comparison works because
+  # the format is a fixed-width ISO 8601 UTC string.
+  [ -n "$started_at" ]
+  [ -n "$ended_at" ]
+  [ "$started_at" "<" "$ended_at" ]
+  # The ms timestamps reflect the real run duration.
+  local delta_ms=$(( ended_ms - started_ms ))
+  [ "$delta_ms" -ge 2000 ]
 }

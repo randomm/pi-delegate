@@ -244,6 +244,13 @@ fi
 # recorded alongside claude's own duration_ms in run-meta.json; docs say
 # the COMPARISON METRIC is claude.duration_ms (agent_ms is the harness
 # side's figure and includes prompt/stdin setup and wrapper overhead).
+# The ISO timestamps (started_at/ended_at) are derived from the SAME
+# captured moments as started_ms/ended_ms (see below), NOT from a second
+# resolution `date` taken after the run finished: that second-resolution
+# truncation read started_at == ended_at for a ~343 s run (dry run 4) and
+# for a sub-second stub run. now_ms is captured immediately before and
+# after the claude call, so both resolutions reflect the real run window.
+started_at_epoch_s=$(( $(now_ms) / 1000 ))
 agent_start_ms="$(now_ms)"
 
 # Run claude in the task checkout, not the caller's cwd. Claude Code refuses
@@ -277,6 +284,23 @@ PI_SHIM_LOG="$run_dir/pi-calls.jsonl" \
   > "$claude_out/output.json" 2> "$claude_out/stderr.log" || rc=$?
 agent_end_ms="$(now_ms)"
 if [ -n "${agent_start_ms:-}" ] && [ -n "${agent_end_ms:-}" ]; then
+  # ISO form of the same captured moments (see the started_at_epoch_s
+  # comment above). GNU date renders an epoch with `date -u -d @<s>`; BSD
+  # (macOS) date with `date -u -r <s>`. Probe for GNU first (`date -d
+  # @0` succeeds only on GNU); a file named "0" is never on this path,
+  # so the GNU `-d` probe is unambiguous.
+  if date -u -d @0 +%Y-%m-%dT%H:%M:%SZ >/dev/null 2>&1; then
+    started_at="$(date -u -d "@$started_at_epoch_s" +%Y-%m-%dT%H:%M:%SZ)"
+    ended_at="$(date -u -d "@$(( agent_end_ms / 1000 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  else
+    started_at="$(date -u -r "$started_at_epoch_s" +%Y-%m-%dT%H:%M:%SZ)"
+    ended_at="$(date -u -r "$(( agent_end_ms / 1000 ))" +%Y-%m-%dT%H:%M:%SZ)"
+  fi
+else
+  started_at=""
+  ended_at=""
+fi
+if [ -n "${agent_start_ms:-}" ] && [ -n "${agent_end_ms:-}" ]; then
   agent_ms=$(( agent_end_ms - agent_start_ms ))
 else
   agent_ms=0
@@ -298,8 +322,8 @@ jq -cn \
   --arg prompt_file "$prompt_file" \
   --argjson claude_exit "$rc" \
   --argjson agent_ms "$agent_ms" \
-  --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg ended_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg started_at "$started_at" \
+  --arg ended_at "$ended_at" \
   --argjson started_ms "${agent_start_ms:-null}" \
   --argjson ended_ms "${agent_end_ms:-null}" \
   '{task:$task, arm:$arm, run:$run, model:$model, perm_mode:$perm_mode,

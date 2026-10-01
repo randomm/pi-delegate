@@ -133,21 +133,42 @@ if [ -n "$base_sha" ]; then
 else
   head_moved="null"
 fi
+# head_moved_json — the JSON form of the head_moved state, used by EVERY
+# grade.json writer (true/false/null consistently, via --argjson so the
+# value is a real JSON boolean/null, never a string):
+#   head_moved=true  → true;  false → false;  null → null
+# (the defensive net: the missing-base early exit below writes head_moved:null
+# directly with a literal 'null', matching this helper's null case).
+head_moved_json() {
+  case "$1" in
+    true)  printf 'true' ;;
+    false) printf 'false' ;;
+    *)     printf 'null' ;;
+  esac
+}
 [ -n "$base_sha" ] || {
   echo "grade: cannot determine base sha (no setup.json base_sha, no BASE_SHA in task.env)" >&2
   # grade.json is still recorded on this exit-2 path: the collect line must
   # never see a missing grade on a run dir that exists.
+  # NOTE: this early exit is a defensive net, normally unreachable —
+  # require_task_fields rejects an empty BASE_SHA before we get here, so
+  # base_sha is only empty if task.env is edited between require_task_fields
+  # and this point (or a future harness change bypasses that guard). The
+  # literal '[]' is NOT $restored_json: that variable is initialised later
+  # (before the restore step), so referencing it here would be unbound
+  # under set -u.
   jq -cn \
     --arg task "$task_id" \
     --arg arm "$arm" \
     --argjson run "$run_num" \
     --arg test_cmd "$TEST_CMD" \
     --arg patch "$patch_path" \
-    --argjson restored "$restored_json" \
+    --argjson restored '[]' \
+    --argjson head_moved "null" \
     --arg error "cannot determine base sha" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
-      restored_test_files:$restored, head_moved:null,
+      restored_test_files:$restored, head_moved:$head_moved,
       pass:false, error:$error, graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2
@@ -199,8 +220,6 @@ write_patch_header_error() {
   # called in a plain (non-conditional) context.
   local pe="${1:-}"
   echo "grade: $pe" >&2
-  _hm_arg="$head_moved"
-  [ "$_hm_arg" = "null" ] && _hm_arg="false"
   jq -cn \
     --arg task "$task_id" \
     --arg arm "$arm" \
@@ -208,11 +227,11 @@ write_patch_header_error() {
     --arg test_cmd "$TEST_CMD" \
     --arg patch "$patch_path" \
     --argjson restored "$restored_json" \
-    --arg head_moved "$_hm_arg" \
+    --argjson head_moved "$(head_moved_json "$head_moved")" \
     --arg error "$pe" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
-      restored_test_files:$restored, head_moved:($head_moved == "true"),
+      restored_test_files:$restored, head_moved:$head_moved,
       pass:false, error:$error, graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2
@@ -235,7 +254,12 @@ write_patch_header_error() {
 # stdout to a temp file is a simple command whose non-zero exit IS caught by
 # the `|| _parse_rc=$?` guard. rc=0 is the success case; non-zero means awk
 # could not read the file.
-_parse_out_file="$(mktemp)"
+# The awk stdout goes to a FIXED path inside the run dir (not mktemp): the
+# run dir is the harness's own scratch space under BENCH_OUT, and a fixed
+# name plus an EXIT trap makes the temp file cleanup deterministic on every
+# exit path (a leftover mktemp file in /tmp would survive a script failure).
+_parse_out_file="$run_dir/.grade-parse.out"
+trap 'rm -f "$run_dir/.grade-parse.out"' EXIT
 _parse_rc=0
 timeout 60 awk '
   /^--- / {
@@ -331,8 +355,6 @@ write_restore_failure() {
   # $1 = path, $2 = stderr. Writes the grade record and exits 2.
   local rp="$1" rr="${2:-}"
   echo "grade: restore failed for $rp" >&2
-  _hm_arg="$head_moved"
-  [ "$_hm_arg" = "null" ] && _hm_arg="false"
   jq -cn \
     --arg task "$task_id" \
     --arg arm "$arm" \
@@ -340,11 +362,11 @@ write_restore_failure() {
     --arg test_cmd "$TEST_CMD" \
     --arg patch "$patch_path" \
     --argjson restored "$restored_json" \
-    --arg head_moved "$_hm_arg" \
+    --argjson head_moved "$(head_moved_json "$head_moved")" \
     --arg error "restore failed for $rp: $rr" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
-      restored_test_files:$restored, head_moved:($head_moved == "true"),
+      restored_test_files:$restored, head_moved:$head_moved,
       pass:false, error:$error, graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2
@@ -416,10 +438,10 @@ if ! timeout 120 git apply --whitespace=nowarn "$patch_path" 2> "$apply_err"; th
     --arg patch "$patch_path" \
     --arg error "git apply failed" \
     --argjson restored "$restored_json" \
-    --arg head_moved "$head_moved" \
+    --argjson head_moved "$(head_moved_json "$head_moved")" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
-      restored_test_files:$restored, head_moved:($head_moved == "true"),
+      restored_test_files:$restored, head_moved:$head_moved,
       pass:false, error:$error, graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2
@@ -449,11 +471,11 @@ if [ "$test_rc" -eq 0 ]; then
     --arg patch "$patch_path" \
     --arg test_log "$test_log" \
     --argjson restored "$restored_json" \
-    --arg head_moved "$head_moved" \
+    --argjson head_moved "$(head_moved_json "$head_moved")" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
       test_log:$test_log, restored_test_files:$restored,
-      head_moved:($head_moved == "true"),
+      head_moved:$head_moved,
       pass:true, error:null, graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2
@@ -471,11 +493,11 @@ else
     --arg test_log "$test_log" \
     --argjson test_rc "$test_rc" \
     --argjson restored "$restored_json" \
-    --arg head_moved "$head_moved" \
+    --argjson head_moved "$(head_moved_json "$head_moved")" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
       test_log:$test_log, restored_test_files:$restored,
-      head_moved:($head_moved == "true"),
+      head_moved:$head_moved,
       test_rc:$test_rc, pass:false, error:"test command exited '"$test_rc"'",
       graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
