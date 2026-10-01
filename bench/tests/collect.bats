@@ -969,8 +969,11 @@ EOF
   local d="$BENCH_OUT/shim-argv"
   _install_stub_pi_shim "$d"
   "$d/run/bin/pi" --mode json -p "task with spaces and 'quotes'" >/dev/null 2>&1 || true
+  local rec
+  rec="$(ls "$d/run/pi-calls.d/" | grep -v '^\.' | head -n 1)"
+  [ -n "$rec" ]
   local line
-  line="$(head -n 1 "$d/run/pi-calls.jsonl")"
+  line="$(cat "$d/run/pi-calls.d/$rec")"
   # The prompt argument must survive as a single argv element.
   echo "$line" | jq -e '.argv | index("task with spaces and '\''quotes'\''") != null' >/dev/null
   # --no-context-files is injected exactly once.
@@ -1334,19 +1337,21 @@ EOF
 
 # --- collect.sh: duplicate / malformed pi-calls lines refused (item 5) ----------
 
-@test "collect.sh: duplicate task/arm/run pi-call lines are refused (exit 2)" {
+@test "collect.sh: pi-calls.d record file is counted (exit 0)" {
   run_dir="$BENCH_OUT/$MECH_ID/A/20"
   mkdir -p "$run_dir/claude"
   cp "$FIXTURES/claude-output-armA.json" "$run_dir/claude/output.json"
   cp "$FIXTURES/setup.json"              "$run_dir/setup.json"
   cp "$FIXTURES/run-meta.json"           "$run_dir/run-meta.json"
   cp "$FIXTURES/grade-pass.json"         "$run_dir/grade.json"
-  cat > "$run_dir/pi-calls.jsonl" <<'EOF'
-{"argv":["--mode","json"],"duration_ms":1000,"exit":0,"mode":"json","call_id":"dup_1"}
-{"argv":["--mode","json"],"duration_ms":1000,"exit":0,"mode":"json","call_id":"dup_1"}
+  # One record file in pi-calls.d/ — the new one-file-per-call design.
+  mkdir -p "$run_dir/pi-calls.d"
+  cat > "$run_dir/pi-calls.d/call_1.json" <<'EOF'
+{"argv":["--mode","json"],"duration_ms":1000,"exit":0,"mode":"json","call_id":"call_1"}
 EOF
   run bash "$BENCH_DIR/collect.sh" "$MECH_ID" A 20
-  [ "$status" -eq 2 ]
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.pi_call_count == 1' >/dev/null
 }
 
 @test "collect.sh: null grade never passes validation" {

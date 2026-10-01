@@ -40,11 +40,6 @@ teardown() {
 
 # --- bench/*.sh entry points: executable in the git index ---------------------
 
-# The docs invoke the bench scripts directly (bench/collect.sh ...); git
-# records the executable bit (mode 100755 vs 100644), so a 100644 entry
-# point lands non-executable after a clean checkout and fails with
-# "Permission denied". lib.sh is sourced, not invoked, and is intentionally
-# not executable in the index.
 _entry_points() {
   echo "collect.sh"
   echo "grade.sh"
@@ -61,34 +56,28 @@ _entry_points() {
 }
 
 @test "bench: collect.sh runs directly (./ path) — executable bit is honoured" {
-  # The worktree files are chmod +x'd by the operator (main checkout), so
-  # a direct `./collect.sh` here is valid only if the index bit is set —
-  # the committed mode bit (100755) is what a clean checkout gets. The
-  # previous test (100755 in the git index) is the primary guard; this test
-  # verifies the bit is actually applied in THIS worktree (i.e. the commit
-  # landed and git applied the mode).
   local rc=0
   ( cd "$BENCH_DIR" && timeout 30 ./collect.sh ) >/dev/null 2>&1 || rc=$?
-  # A non-zero usage error is fine (no args); 126 = not executable (the
-  # bug this test pins), 127 = not found.
   [ "$rc" -ne 126 ]
   [ "$rc" -ne 127 ]
 }
 
 # --- pi shim: killed invocations are recorded --------------------------------
 
-# _install_killer_pi_shim <d> — writes a stub "real pi" (sleep 10, SIGTERM-
-# trap exits 143, SIGKILL is fatal) on PATH and installs the harness shim
-# into <d>/run.
+# _install_killer_pi_shim <d> — writes a stub "real pi" (touch readiness
+# file, sleep 10, SIGTERM-trap exits 143) on PATH and installs the harness
+# shim into <d>/run.
 _install_killer_pi_shim() {
   local d="$1"
   mkdir -p "$d/stub" "$d/run"
-  cat > "$d/stub/pi" <<'EOF'
+  # Use an unquoted heredoc so $d is expanded into the stub script.
+  cat > "$d/stub/pi" <<STUB
 #!/usr/bin/env bash
 trap 'exit 143' TERM
+touch "$d/stub/ready"
 sleep 10
 exit 0
-EOF
+STUB
   chmod +x "$d/stub/pi"
   PATH="$d/stub:$PATH" bash -c "source '$BENCH_DIR/lib.sh'; install_pi_shim '$d/run'"
 }
@@ -97,30 +86,31 @@ EOF
   local d="$BENCH_OUT/kill-term"
   _install_killer_pi_shim "$d"
 
-  # Invoke the shim in the background, SIGTERM it after the stub pi is
-  # sleeping (the stub traps TERM and exits 143, mirroring a pi call
-  # killed by orchestrate's timeout wrapper — PI_TIMEOUT → 143).
   "$d/run/bin/pi" -p "kill me" >/dev/null 2>&1 &
   local shim_pid=$!
-  sleep 2
+  # Wait for the stub pi to touch the readiness file.
+  local i=0
+  while [ $i -lt 100 ] && [ ! -f "$d/stub/ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$d/stub/ready" ]
   kill -TERM "$shim_pid" 2>/dev/null || true
   local rc=0
   wait "$shim_pid" 2>/dev/null || rc=$?
-  # 143 = 128 + SIGTERM (the stub's trapped exit).
   [ "$rc" -eq 143 ]
 
-  # The shim must have written a metadata line for the killed call.
-  local line
-  line="$(head -n 1 "$d/run/pi-calls.jsonl")"
-  echo "$line" | jq -e '.exit == 143' >/dev/null
-  echo "$line" | jq -e '.mode == "text"' >/dev/null
-  # Duration is a number (0 for the killed call: the trap records before
-  # the wall clock advances — the exit code is the signal of the kill).
-  echo "$line" | jq -e '(.duration_ms | type) == "number"' >/dev/null
+  # One record file in pi-calls.d/ with exit 143.
+  local call_id rec
+  call_id="$(ls "$d/run/pi-calls.d/" | grep -v '^\.' | head -n 1)"
+  [ -n "$call_id" ]
+  rec="$d/run/pi-calls.d/$call_id"
+  [ -f "$rec" ]
+  jq -e '.exit == 143' "$rec" >/dev/null
+  jq -e '.mode == "text"' "$rec" >/dev/null
+  jq -e '(.duration_ms | type) == "number"' "$rec" >/dev/null
 
-  # collect.sh counts the killed call: pi_call_count == 1. The task env
-  # points at a non-REPO (collect never clones; the task dir only has to
-  # exist under TASKS_DIR).
+  # collect.sh counts the killed call: pi_call_count == 1.
   local run_dir="$BENCH_OUT/kill-task/A/1"
   mkdir -p "$BENCH_OUT/tasks/kill-task" "$run_dir/claude"
   cat > "$BENCH_OUT/tasks/kill-task/task.env" <<EOF
@@ -135,7 +125,7 @@ EOF
   printf '{"base_sha":"basesha"}' > "$run_dir/setup.json"
   printf '{"model":"stub","perm_mode":"auto"}' > "$run_dir/run-meta.json"
   printf '{"pass":true,"test_cmd":"true","error":null}' > "$run_dir/grade.json"
-  cp "$d/run/pi-calls.jsonl" "$run_dir/pi-calls.jsonl"
+  cp -r "$d/run/pi-calls.d" "$run_dir/pi-calls.d"
 
   run bash "$BENCH_DIR/collect.sh" kill-task A 1
   [ "$status" -eq 0 ]
@@ -143,7 +133,7 @@ EOF
   echo "$output" | jq -e '.pi[0].exit == 143' >/dev/null
 }
 
-@test "shim: a completed call is still recorded exactly once (exit 0)" {
+@test "shim: a completed call yields one record file with the real exit and duration" {
   local d="$BENCH_OUT/kill-ok"
   mkdir -p "$d/stub" "$d/run"
   cat > "$d/stub/pi" <<'EOF'
@@ -158,8 +148,84 @@ EOF
   "$d/run/bin/pi" -p "fast task" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 0 ]
 
-  local n
-  n="$(wc -l < "$d/run/pi-calls.jsonl" | tr -d ' ')"
+  # One record file in pi-calls.d/, with the real exit and duration.
+  local n call_id
+  n="$(ls "$d/run/pi-calls.d/" | grep -v '^\.' | wc -l | tr -d ' ')"
   [ "$n" -eq 1 ]
-  head -n 1 "$d/run/pi-calls.jsonl" | jq -e '.exit == 0' >/dev/null
+  call_id="$(ls "$d/run/pi-calls.d/" | grep -v '^\.' | head -n 1)"
+  local rec="$d/run/pi-calls.d/$call_id"
+  jq -e '.exit == 0' "$rec" >/dev/null
+  jq -e '(.duration_ms | type) == "number"' "$rec" >/dev/null
+
+  # collect.sh counts the completed call: pi_call_count == 1.
+  local run_dir="$BENCH_OUT/kill-ok-task/A/1"
+  mkdir -p "$BENCH_OUT/tasks/kill-ok-task" "$run_dir/claude"
+  cat > "$BENCH_OUT/tasks/kill-ok-task/task.env" <<EOF
+REPO=/nonexistent
+BASE_SHA=x
+FIX_SHA=x
+TEST_CMD=true
+GRADING_PATCH=
+EOF
+  printf '{"total_cost_usd":0,"duration_ms":100,"duration_api_ms":100,"permission_denials":[],"modelUsage":{}}' \
+    > "$run_dir/claude/output.json"
+  printf '{"base_sha":"basesha"}' > "$run_dir/setup.json"
+  printf '{"model":"stub","perm_mode":"auto"}' > "$run_dir/run-meta.json"
+  printf '{"pass":true,"test_cmd":"true","error":null}' > "$run_dir/grade.json"
+  cp -r "$d/run/pi-calls.d" "$run_dir/pi-calls.d"
+
+  run bash "$BENCH_DIR/collect.sh" kill-ok-task A 1
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.pi_call_count == 1' >/dev/null
+}
+
+@test "shim: two sequential completed calls each retain their record (no truncation)" {
+  local d="$BENCH_OUT/kill-two"
+  mkdir -p "$d/stub" "$d/run"
+  cat > "$d/stub/pi" <<'EOF'
+#!/usr/bin/env bash
+echo "call done: $1"
+exit 0
+EOF
+  chmod +x "$d/stub/pi"
+  PATH="$d/stub:$PATH" bash -c "source '$BENCH_DIR/lib.sh'; install_pi_shim '$d/run'"
+
+  local rc=0
+  "$d/run/bin/pi" -p "task one" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ]
+  sleep 1
+  "$d/run/bin/pi" -p "task two" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ]
+
+  # Two record files in pi-calls.d/ (one per call).
+  local n
+  n="$(ls "$d/run/pi-calls.d/" | grep -v '^\.' | wc -l | tr -d ' ')"
+  [ "$n" -eq 2 ]
+
+  # Both records have exit 0.
+  for f in "$d/run/pi-calls.d/"*.json; do
+    [ -e "$f" ] || continue
+    jq -e '.exit == 0' "$f" >/dev/null
+  done
+
+  # collect.sh counts both calls: pi_call_count == 2.
+  local run_dir="$BENCH_OUT/kill-two-task/A/1"
+  mkdir -p "$BENCH_OUT/tasks/kill-two-task" "$run_dir/claude"
+  cat > "$BENCH_OUT/tasks/kill-two-task/task.env" <<EOF
+REPO=/nonexistent
+BASE_SHA=x
+FIX_SHA=x
+TEST_CMD=true
+GRADING_PATCH=
+EOF
+  printf '{"total_cost_usd":0,"duration_ms":100,"duration_api_ms":100,"permission_denials":[],"modelUsage":{}}' \
+    > "$run_dir/claude/output.json"
+  printf '{"base_sha":"basesha"}' > "$run_dir/setup.json"
+  printf '{"model":"stub","perm_mode":"auto"}' > "$run_dir/run-meta.json"
+  printf '{"pass":true,"test_cmd":"true","error":null}' > "$run_dir/grade.json"
+  cp -r "$d/run/pi-calls.d" "$run_dir/pi-calls.d"
+
+  run bash "$BENCH_DIR/collect.sh" kill-two-task A 1
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.pi_call_count == 2' >/dev/null
 }

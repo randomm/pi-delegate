@@ -207,25 +207,39 @@ claude_models_json="$(jq -c '[(.modelUsage // {}) | keys[]]' "$claude_json")"
 
 # Build the pi array. If no pi-calls.jsonl, the array is empty.
 pi_calls_json="[]"
-if [ -f "$run_dir/pi-calls.jsonl" ]; then
-  # Refuse malformed / duplicate lines in pi-calls.jsonl (a duplicate
-  # task/arm/run line would double-count tokens in the report).
-  if ! jq -e -s 'length == (unique_by([.call_id // null, .mode // null]) | length)' "$run_dir/pi-calls.jsonl" >/dev/null 2>&1; then
-    echo "collect: pi-calls.jsonl contains duplicate call entries (call_id + mode); refusing" >&2
+if [ -f "$run_dir/pi-calls.jsonl" ] || [ -d "$run_dir/pi-calls.d" ]; then
+  # One file per call: $RUN_DIR/pi-calls.d/<call_id>.json. Fall back to
+  # the legacy pi-calls.jsonl if the directory is absent. Each file is one
+  # JSON object; exit may be null (SIGKILLed call that never completed).
+  calls_dir="$run_dir/pi-calls.d"
+  deduped_calls="$run_dir/.pi-calls-deduped.jsonl"
+  if [ -d "$calls_dir" ]; then
+    # Build the deduped JSONL from the per-call files (sorted by filename
+    # for deterministic order). Each file is one JSON object.
+    : > "$deduped_calls"
+    for f in "$calls_dir"/*.json; do
+      [ -e "$f" ] || continue
+      cat "$f" >> "$deduped_calls"
+    done
+  else
+    # Legacy: read pi-calls.jsonl directly.
+    deduped_calls="$run_dir/pi-calls.jsonl"
+  fi
+  # Validate: each line must have call_id (string), mode (string), and
+  # exit (number or null).
+  if ! jq -e -s 'all(.[]; (.call_id | type) == "string" and (.mode | type) == "string" and ((.exit | type) == "number" or (.exit | type) == "null"))' "$deduped_calls" >/dev/null 2>&1; then
+    echo "collect: pi-calls contains a malformed line (bad call_id/mode/exit); refusing" >&2
+    [ "$deduped_calls" != "$run_dir/pi-calls.jsonl" ] && rm -f "$deduped_calls"
     exit 2
   fi
-  if ! jq -e -s 'all(.[]; (.call_id | type) == "string" and (.mode | type) == "string" and (.exit | type) == "number")' "$run_dir/pi-calls.jsonl" >/dev/null 2>&1; then
-    echo "collect: pi-calls.jsonl contains a malformed line (bad call_id/mode/exit); refusing" >&2
-    exit 2
-  fi
-  # Process each line of pi-calls.jsonl. Accumulate a jq array by parsing
+  # Process each line of the deduped pi calls. Accumulate a jq array by parsing
   # the whole file at once (one JSON array input) instead of concatenating
   # per-line strings (which breaks when a call spans multiple lines after
   # jq pretty-prints, or when the shell mangles embedded newlines).
   #
   # We use a two-step approach:
   #   1. For each call_id with mode=json, extract tokens from the transcript.
-  #   2. Build the pi array in one jq call over the whole pi-calls.jsonl,
+  #   2. Build the pi array in one jq call over the deduped calls,
   #      looking up tokens from a temp map file.
   # Build the tokens map as a JSONL file (one {id, tokens} object per line).
   tokens_map="$run_dir/.pi-tokens-map.jsonl"
@@ -275,7 +289,7 @@ if [ -f "$run_dir/pi-calls.jsonl" ]; then
       tok="$(printf '%s' "$tok" | jq -c . 2>/dev/null)" || tok="null"
       jq -cn --arg id "$call_id" --argjson tok "$tok" '{id:$id, tokens:$tok}' \
         >> "$tokens_map" 2>/dev/null || true
-    done < "$run_dir/pi-calls.jsonl"
+    done < "$deduped_calls"
   } 2>/dev/null
 
   # Build the pi array in one jq call.
@@ -284,7 +298,7 @@ if [ -f "$run_dir/pi-calls.jsonl" ]; then
   # The pi array is a core field: a jq failure building it is a malformed
   # run (exit 2), not a silent empty list.
   pi_calls_json="$(jq -cn \
-    --rawfile calls "$run_dir/pi-calls.jsonl" \
+    --rawfile calls "$deduped_calls" \
     --rawfile tmap "$tokens_map" \
     '($calls | split("\n") | map(select(length > 0) | fromjson)) as $calls_arr
      | ($tmap  | split("\n") | map(select(length > 0) | fromjson)) as $tmap_arr
@@ -296,6 +310,7 @@ if [ -f "$run_dir/pi-calls.jsonl" ]; then
       ]) as $arr
      | $arr')" || { echo "collect: failed to build pi call array from pi-calls.jsonl" >&2; exit 2; }
   rm -f "$tokens_map"
+  [ "$deduped_calls" != "$run_dir/pi-calls.jsonl" ] && rm -f "$deduped_calls" 2>/dev/null || true
 fi
 
 # pi_call_count: number of pi calls (0 when pi-calls.jsonl is absent).
