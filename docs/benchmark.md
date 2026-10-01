@@ -71,10 +71,17 @@ bench/tasks/<id>/
 working tree, then runs `TEST_CMD`. The grading = **grading tests** (the
 specific test files from `GRADING_TESTS`) + **full suite** with
 `--deselect tests/test_utils/test__expand_args.py::test_expand_args`
-(a known macOS failure). If the agent edited the same test files the patch
-touches, `git apply` fails and the run is scored as a failure with
-`error: "git apply failed"` (documented edge case: test-editing is not
-verifiable).
+(a known macOS failure). Before applying, `grade.sh` restores every file
+the patch touches to its recorded `BASE_SHA`, and a restore failure is a
+setup error: the run is recorded as a failure in `grade.json`
+(`pass: false`, `error: "restore failed for <path>: …"`) and `grade.sh`
+exits 2, rather than silently grading a tree that was never normalised.
+A run whose repo HEAD is not the recorded base (the agent committed its
+work) is still graded normally — restore and `git apply` target the
+recorded base and tests run on the working tree — but is flagged
+`head_moved: true` in `grade.json` (false otherwise) on every exit path,
+so consumers can distinguish committed runs from the normal uncommitted
+flow.
 
 **Contamination note:** `grading.patch` is the *sole* location of the issue
 URLs and fix details for a task. It lives in the task dir (`bench/tasks/<id>/`),
@@ -422,8 +429,9 @@ override),
   base sha is the recorded `BASE_SHA` from `setup.json`/`task.env`; patch-
   created files → deleted if present) and records the affected files in
   `restored_test_files` in `grade.json`. A run whose repo HEAD is not that
-  recorded base (e.g. the agent committed its work) is refused with exit 2 —
-  such a run cannot be restored to base and is not graded. This makes grading robust to agent
+  recorded base (e.g. the agent committed its work) is still graded,
+  flagged `head_moved: true` in `grade.json`; a restore failure is a loud
+  exit 2 with `error: "restore failed for <path>: …"` in `grade.json`. This makes grading robust to agent
   test-file edits (issue #71 dry-run 4) without leaking the fix to the agent.
 - The contamination guard relies on `git fetch --depth=1` not fetching
   additional objects. A future git version change could alter this

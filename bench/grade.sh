@@ -16,9 +16,11 @@
 #      are irrelevant to grading (the grading tests are the ground truth),
 #      so the harness normalises them away instead of failing the run.
 #      Files the agent had modified are recorded as
-#      `restored_test_files: [...]` in grade.json. (Dry-run 4: arm A edited
-#      tests/test_utils/test_sentinel.py and the patch no longer applied;
-#      a manual revert was needed.)
+#      `restored_test_files: [...]` in grade.json. A restore failure
+#      (checkout error) is a setup error: exit 2 with a grade.json
+#      recording `error: "restore failed for <path>: <stderr>"`.
+#      (Dry-run 4: arm A edited tests/test_utils/test_sentinel.py and
+#      the patch no longer applied; a manual revert was needed.)
 #   4. Applies <task-dir>/<GRADING_PATCH> with `git apply`.
 #   5. Runs TEST_CMD (from task.env) in the repo directory.
 #   6. Writes <run-dir>/grade.json with pass/fail, test_cmd, the
@@ -27,8 +29,8 @@
 # Exit codes:
 #   0  tests passed
 #   1  tests failed (grading patch applied, but TEST_CMD returned non-zero)
-#   2  setup error (missing run dir, missing grading patch, git apply failed,
-#      or the run repo's HEAD is not the recorded BASE_SHA)
+#   2  setup error (missing run dir, missing grading patch, or a restore
+#      checkout failed)
 #   3  grading patch could not be applied (conflict / already applied)
 #
 # NOTE: Before applying the patch, every file the patch touches is restored
@@ -38,6 +40,13 @@
 # test run (that is the actual change under test). Restoring the patch's own
 # files is NOT a cheat signal — it is the grading contract: the graded test
 # files are the ground truth, so the agent's version of them is discarded.
+#
+# Committed runs: the agent is instructed not to commit, but if it does
+# (HEAD != recorded BASE_SHA) the run is still graded normally — the
+# restore and `git apply` target the recorded BASE_SHA, and TEST_CMD runs
+# on the working tree (the agent's final state, committed or not). The
+# divergence is recorded as `head_moved: true` in grade.json (false
+# otherwise), on every exit path.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,11 +107,15 @@ cd "$repo_dir"
 # agent is instructed not to commit), but an agent that commits its work
 # moves HEAD, and `git checkout HEAD -- <file>` would restore the agent's
 # own version instead of the base — the wrong source for grading. The base
-# is read from setup.json (written by setup-run.sh) and verified: a run
-# whose HEAD is not the base is refused with exit 2 (a loud, clean failure
-# rather than a silently-wrong restore or an ungradeable exit 3).
+# is read from setup.json (written by setup-run.sh); a run whose HEAD is
+# not the base is still graded (restore/apply target BASE_SHA, tests run
+# on the working tree) and is flagged `head_moved: true` in grade.json.
 base_sha="$(jq -r '.base_sha // empty' "$run_dir/setup.json" 2>/dev/null)" || base_sha=""
+echo "grade: base_sha='$base_sha'" >&2
 if [ -z "$base_sha" ]; then
+  # setup.json holds the BASE_SHA that setup-run.sh fetched into the run
+  # repo — prefer that over the task-level BASE_SHA, which need not be
+  # fetchable in the run repo (e.g. a task env pointing elsewhere).
   base_sha="${BASE_SHA:-}"
 fi
 [ -n "$base_sha" ] || {
@@ -111,8 +124,9 @@ fi
 }
 head_sha="$(git rev-parse HEAD 2>/dev/null)" || head_sha=""
 if [ -z "$head_sha" ] || [ "$head_sha" != "$base_sha" ]; then
-  echo "grade: HEAD ('$head_sha') is not the recorded base '$base_sha' — refusing to grade (a committed run cannot be restored to base)" >&2
-  exit 2
+  head_moved="true"
+else
+  head_moved="false"
 fi
 
 # --- Restore the patch's files to BASE ----------------------------------------
@@ -164,14 +178,48 @@ fi
 # `git diff --quiet <base> -- <file>` is empty when the tree matches BASE.
 # The base is a commit object, so a bare rev (no refname ambiguity): it is
 # the fetched commit that exists in this repo's object database.
+write_restore_failure() {
+  # $1 = path, $2 = stderr. Writes the grade record and exits 2.
+  local rp="$1" rr="${2:-}"
+  echo "grade: restore failed for $rp" >&2
+  jq -cn \
+    --arg task "$task_id" \
+    --arg arm "$arm" \
+    --argjson run "$run_num" \
+    --arg test_cmd "$TEST_CMD" \
+    --arg patch "$patch_path" \
+    --argjson restored "$restored_json" \
+    --arg head_moved "$head_moved" \
+    --arg error "restore failed for $rp: $rr" \
+    --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
+      restored_test_files:$restored, head_moved:($head_moved|if . == "true" then true else false end),
+      pass:false, error:$error, graded_at:$graded_at}' \
+    > "$run_dir/grade.json" || {
+      echo "grade: FATAL — could not write $run_dir/grade.json" >&2
+      exit 2
+    }
+  exit 2
+}
+
 while IFS= read -r p; do
   [ -n "$p" ] || continue
+  _need_restore=0
   if ! timeout 60 git diff --quiet "$base_sha" -- "$p" 2>/dev/null; then
-    timeout 60 git checkout "$base_sha" -- "$p" >/dev/null 2>&1 || true
-    restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" || true
+    # Covers "tree differs from base" AND "base sha does not resolve in
+    # this repo" (git diff fails non-zero) — both need a restore.
+    _need_restore=1
   elif [ ! -f "$p" ]; then
     # File was deleted by the agent (tracked at BASE, missing in the tree).
-    timeout 60 git checkout "$base_sha" -- "$p" >/dev/null 2>&1 || true
+    _need_restore=1
+  fi
+  if [ "$_need_restore" -eq 1 ]; then
+    _co_err=""
+    if ! _co_err="$(timeout 60 git checkout "$base_sha" -- "$p" 2>&1)"; then
+      # Restore failure is a setup error: fail loudly (exit 2) with a
+      # grade.json recording the error — do not swallow it and continue.
+      write_restore_failure "$p" "${_co_err//$'\n'/ }"
+    fi
     restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" || true
   fi
 done < <(jq -r '.[]' <<< "$patch_files_json" 2>/dev/null)
@@ -205,9 +253,10 @@ if ! timeout 120 git apply --whitespace=nowarn "$patch_path" 2> "$apply_err"; th
     --arg patch "$patch_path" \
     --arg error "git apply failed" \
     --argjson restored "$restored_json" \
+    --arg head_moved "$head_moved" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
-      restored_test_files:$restored,
+      restored_test_files:$restored, head_moved:($head_moved == "true"),
       pass:false, error:$error, graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2
@@ -237,9 +286,11 @@ if [ "$test_rc" -eq 0 ]; then
     --arg patch "$patch_path" \
     --arg test_log "$test_log" \
     --argjson restored "$restored_json" \
+    --arg head_moved "$head_moved" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
       test_log:$test_log, restored_test_files:$restored,
+      head_moved:($head_moved == "true"),
       pass:true, error:null, graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {
       echo "grade: FATAL — could not write $run_dir/grade.json" >&2
@@ -257,9 +308,11 @@ else
     --arg test_log "$test_log" \
     --argjson test_rc "$test_rc" \
     --argjson restored "$restored_json" \
+    --arg head_moved "$head_moved" \
     --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
       test_log:$test_log, restored_test_files:$restored,
+      head_moved:($head_moved == "true"),
       test_rc:$test_rc, pass:false, error:"test command exited '"$test_rc"'",
       graded_at:$graded_at}' \
     > "$run_dir/grade.json" || {

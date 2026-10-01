@@ -569,11 +569,12 @@ EOF
   [ "$status" -eq 2 ]
 }
 
-# --- grade.sh: agent committed → HEAD != base → refused (exit 2) ----------------
-# Adversarial finding #1: an agent that commits its work moves HEAD; the
-# restore must target the recorded base sha, not HEAD. A run whose HEAD is
-# not the base is refused with exit 2 (loud, not a silent wrong-restore).
-@test "grade.sh: agent committed its work → exit 2 (HEAD not base)" {
+# --- grade.sh: agent committed + edited graded file → graded, head_moved true ---
+# An agent that commits its work moves HEAD; the run is still graded (restore
+# and git apply target the recorded BASE_SHA, tests run on the working tree).
+# The graded test file the agent edited is restored from base and recorded in
+# restored_test_files, and grade.json records head_moved: true.
+@test "grade.sh: agent committed its fix → graded normally, head_moved true" {
   run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 8
   [ "$status" -eq 0 ]
   local run_dir="$BENCH_OUT/$TASK_ID/A/8"
@@ -585,12 +586,56 @@ FIX_SHA=$FIX_SHA
 TEST_CMD=true
 GRADING_PATCH=grading.patch
 EOF
-  echo "hacked" > "$repo_dir/hello.txt"
-  git -C "$repo_dir" add hello.txt
+  # Agent commits its fix AND edits the graded test file (hello.txt), in the
+  # RUN repo (not FAKE_REPO): the run repo's HEAD moves away from the
+  # recorded base, which is what head_moved detects.
+  git -C "$repo_dir" config user.email t@t.t
+  git -C "$repo_dir" config user.name t
+  echo "agent fix" >> "$repo_dir/hello.txt"
+  echo "tampered test" > "$repo_dir/world.txt"
+  git -C "$repo_dir" add hello.txt world.txt
   git -C "$repo_dir" commit -qm "agent committed its work"
   run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 8
+  [ "$status" -eq 0 ]
+  local grade_file="$run_dir/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == true' "$grade_file" >/dev/null
+  jq -e '.head_moved == true' "$grade_file" >/dev/null
+  jq -e '.restored_test_files == ["hello.txt"]' "$grade_file" >/dev/null
+  [ "$(cat "$repo_dir/hello.txt")" = "hello modified" ]
+}
+
+# --- grade.sh: restore failure → exit 2 + error field ----------------------------
+# If `git checkout <base> -- <path>` fails (e.g. the recorded base sha does
+# not resolve in the run repo), the run is a setup error: exit 2 and a
+# grade.json with pass:false and error "restore failed for <path>: ...".
+# The invalid BASE_SHA goes in task.env BEFORE the setup re-run: setup-run
+# fetches BASE_SHA into the run repo, so a fetch failure leaves an empty
+# object db and setup.json absent — the recorded base then cannot resolve.
+@test "grade.sh: restore failure → exit 2 + grade.json error" {
+  # First, a valid setup so the run dir exists (task.env from setup()).
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 10
+  [ "$status" -eq 0 ]
+  local run_dir="$BENCH_OUT/$TASK_ID/A/10"
+  local repo_dir="$run_dir/repo"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$FAKE_REPO
+BASE_SHA=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+FIX_SHA=$FIX_SHA
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  # Re-run setup with the invalid BASE_SHA: the fetch fails, leaving an
+  # empty run-repo object db and no setup.json.
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 10
   [ "$status" -eq 2 ]
-  [ ! -f "$run_dir/grade.json" ]
+  echo "agent tamper" > "$repo_dir/hello.txt"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 10
+  [ "$status" -eq 2 ]
+  local grade_file="$run_dir/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == false' "$grade_file" >/dev/null
+  jq -e '.error | startswith("restore failed for hello.txt:")' "$grade_file" >/dev/null
 }
 
 # --- grade.sh: agent edited a patched file → restored from BASE ----------------
@@ -614,6 +659,7 @@ EOF
   [ "$status" -eq 0 ]
   local grade_file="$run_dir/grade.json"
   jq -e '.restored_test_files == ["hello.txt"]' "$grade_file" >/dev/null
+  jq -e '.head_moved == false' "$grade_file" >/dev/null
   [ "$(cat "$repo_dir/hello.txt")" = "hello modified" ]
 }
 
