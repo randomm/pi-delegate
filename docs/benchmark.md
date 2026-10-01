@@ -71,7 +71,15 @@ bench/tasks/<id>/
 working tree, then runs `TEST_CMD`. The grading = **grading tests** (the
 specific test files from `GRADING_TESTS`) + **full suite** with
 `--deselect tests/test_utils/test__expand_args.py::test_expand_args`
-(a known macOS failure). Before applying, `grade.sh` restores every file
+(a known macOS failure). Grading patches must be unified git diffs
+(`git diff` or `git diff --no-index`); `grade.sh` derives the file list
+from the per-file `--- `/`+++ ` header lines, so paths containing
+spaces or ` b/` are preserved intact, and the `--- /dev/null` /
+`+++ /dev/null` created/deleted-file forms are recognised.
+A patch with no parseable file headers is a setup error: `grade.sh`
+records `pass: false` with `error: "grading patch has no file headers: …"`
+and exits 2.
+Before applying, `grade.sh` restores every file
 the patch touches to its recorded `BASE_SHA`, and a restore failure is a
 setup error: the run is recorded as a failure in `grade.json`
 (`pass: false`, `error: "restore failed for <path>: …"`) and `grade.sh`

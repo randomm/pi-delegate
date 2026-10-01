@@ -1465,3 +1465,245 @@ EOF
   cp "$BENCH_OUT/saved-grading.patch" "$TASK_DIR/grading.patch"
   cp "$BENCH_OUT/saved-task.env" "$TASK_DIR/task.env"
 }
+
+# --- grade.sh: file list parsing from ---/+++ lines (issue #71, part 2) --------
+# The file list is derived from the per-file `--- `/`+++ ` lines (old `diff --git`
+# parsing broke on paths containing " b/" and missed the `--- /dev/null`
+# created-file form). The tests below use a helper that builds a task, runs
+# setup + grade, and returns the grade.json path. Each test rewrites the
+# shared $TASK_DIR grading.patch/task.env and restores them afterwards.
+
+# _patch_parse_test <run#> <patch-content> [setup-fn ...]
+# Writes the patch into $TASK_DIR/grading.patch, points task.env at
+# $PATCH_PARSE_REPO, sets up run# and runs grade.sh. $status is set by the
+# caller (use `run bash ...`).
+_patch_parse_pre() {
+  # $1 = run#; $2 = grading patch path (already written by the test). The
+  # saved/restore pair keeps $TASK_DIR shared across tests. setup-run.sh
+  # runs with `run` so its rc is not aborted by the test's `set -e`.
+  local run_num="$1" patch_file="$2"
+  cp "$TASK_DIR/grading.patch" "$BENCH_OUT/pp-saved-grading.patch" 2>/dev/null || true
+  cp "$TASK_DIR/task.env" "$BENCH_OUT/pp-saved-task.env" 2>/dev/null || true
+  cp "$patch_file" "$TASK_DIR/grading.patch"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$PATCH_PARSE_REPO
+BASE_SHA=$PATCH_PARSE_BASE
+FIX_SHA=$PATCH_PARSE_BASE
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A "$run_num"
+  [ "$status" -eq 0 ]
+}
+_patch_parse_post() {
+  cp "$BENCH_OUT/pp-saved-grading.patch" "$TASK_DIR/grading.patch"
+  cp "$BENCH_OUT/pp-saved-task.env" "$TASK_DIR/task.env"
+}
+
+@test "grade.sh: path with spaces parsed from ---/+++ lines (git diff form)" {
+  local space_repo="$BENCH_OUT/pp-space-repo"
+  git init -q -b main "$space_repo"
+  git -C "$space_repo" config user.email t@t.t
+  git -C "$space_repo" config user.name t
+  echo "x" > "$space_repo/src dir with space.txt"
+  git -C "$space_repo" add "src dir with space.txt"
+  git -C "$space_repo" commit -qm "add space file"
+  local space_base
+  space_base="$(git -C "$space_repo" rev-parse HEAD)"
+  local space_patch="$BENCH_OUT/pp-space.patch"
+  printf 'diff --git a/src dir with space.txt b/src dir with space.txt
+index 1234567..89abcde 100644
+--- a/src dir with space.txt
++++ b/src dir with space.txt
+@@ -1 +1 @@
+-x
++y
+' > "$space_patch"
+  PATCH_PARSE_REPO="$space_repo" PATCH_PARSE_BASE="$space_base" _patch_parse_pre 40 "$space_patch"
+  local repo_dir="$BENCH_OUT/$TASK_ID/A/40/repo"
+  echo "tamper" > "$repo_dir/src dir with space.txt"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 40
+  [ "$status" -eq 0 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/40/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.restored_test_files == ["src dir with space.txt"]' "$grade_file" >/dev/null
+  [ "$(cat "$repo_dir/src dir with space.txt")" = "y" ]
+  _patch_parse_post
+}
+
+@test "grade.sh: path containing ' b/' parsed from ---/+++ lines (not from diff --git)" {
+  # A path containing " b/": the old `diff --git a/... b/...` parsing with
+  # ` b/` splitting would truncate it. The ---/+++ parser strips only the
+  # leading a//b/ prefix, so the full path survives.
+  local bpath_repo="$BENCH_OUT/pp-bpath-repo"
+  git init -q -b main "$bpath_repo"
+  git -C "$bpath_repo" config user.email t@t.t
+  git -C "$bpath_repo" config user.name t
+  mkdir -p "$bpath_repo/weird b"
+  echo "x" > "$bpath_repo/weird b/dir file.txt"
+  git -C "$bpath_repo" add "weird b/dir file.txt"
+  git -C "$bpath_repo" commit -qm "add b-slash file"
+  local bpath_base
+  bpath_base="$(git -C "$bpath_repo" rev-parse HEAD)"
+  local bpath_patch="$BENCH_OUT/pp-bpath.patch"
+  printf 'diff --git a/weird b/dir file.txt b/weird b/dir file.txt
+index 1234567..89abcde 100644
+--- a/weird b/dir file.txt
++++ b/weird b/dir file.txt
+@@ -1 +1 @@
+-x
++y
+' > "$bpath_patch"
+  PATCH_PARSE_REPO="$bpath_repo" PATCH_PARSE_BASE="$bpath_base" _patch_parse_pre 41 "$bpath_patch"
+  local repo_dir="$BENCH_OUT/$TASK_ID/A/41/repo"
+  echo "tamper" > "$repo_dir/weird b/dir file.txt"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 41
+  [ "$status" -eq 0 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/41/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.restored_test_files == ["weird b/dir file.txt"]' "$grade_file" >/dev/null
+  [ "$(cat "$repo_dir/weird b/dir file.txt")" = "y" ]
+  _patch_parse_post
+}
+
+@test "grade.sh: created file via git diff new-file form (--- /dev/null) is deleted if present" {
+  # Standard `git diff` new-file form: `--- /dev/null` with a real new path.
+  # A stray copy of the graded file left by the agent must be deleted before
+  # `git apply`, and the patch must then apply.
+  local created_repo="$BENCH_OUT/pp-created-repo"
+  git init -q -b main "$created_repo"
+  git -C "$created_repo" config user.email t@t.t
+  git -C "$created_repo" config user.name t
+  echo "x" > "$created_repo/seed.txt"
+  git -C "$created_repo" add seed.txt
+  git -C "$created_repo" commit -qm "add seed"
+  local created_base
+  created_base="$(git -C "$created_repo" rev-parse HEAD)"
+  local created_patch="$BENCH_OUT/pp-created.patch"
+  printf 'diff --git a/new-test.py b/new-test.py
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/new-test.py
+@@ -0,0 +1 @@
++new test
+' > "$created_patch"
+  PATCH_PARSE_REPO="$created_repo" PATCH_PARSE_BASE="$created_base" _patch_parse_pre 42 "$created_patch"
+  local repo_dir="$BENCH_OUT/$TASK_ID/A/42/repo"
+  # Stray copy of the graded file left by the agent (untracked).
+  echo "stray" > "$repo_dir/new-test.py"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 42
+  [ "$status" -eq 0 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/42/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.restored_test_files | index("new-test.py") != null' "$grade_file" >/dev/null
+  [ "$(cat "$repo_dir/new-test.py")" = "new test" ]
+  _patch_parse_post
+}
+
+@test "grade.sh: created file via git diff --no-index form is deleted if present" {
+  # `git diff --no-index /dev/null file` form: same `--- /dev/null` header,
+  # new-side path followed by a trailing TAB+timestamp.
+  local noindex_repo="$BENCH_OUT/pp-noindex-repo"
+  git init -q -b main "$noindex_repo"
+  git -C "$noindex_repo" config user.email t@t.t
+  git -C "$noindex_repo" config user.name t
+  echo "x" > "$noindex_repo/seed.txt"
+  git -C "$noindex_repo" add seed.txt
+  git -C "$noindex_repo" commit -qm "add seed"
+  local noindex_base
+  noindex_base="$(git -C "$noindex_repo" rev-parse HEAD)"
+  # Build the patch from a real `git diff --no-index` run (no index →
+  # /dev/null form), then append a TAB+timestamp to the +++ line (the
+  # timestamp form git emits when the paths are not in a git directory).
+  local ni_dir="$BENCH_OUT/pp-noindex-src"
+  mkdir -p "$ni_dir"
+  echo "no-index test content" > "$ni_dir/another-test.py"
+  local ni_patch="$ni_dir/out.patch"
+  ( cd "$ni_dir" && git diff --no-index /dev/null another-test.py > out.patch ) || true
+  grep -qF -e '--- /dev/null' "$ni_patch"
+  # Rebuild the patch with the timestamped +++ line via awk, then verify
+  # both the /dev/null form and the TAB+timestamp survived.
+  local ni_out_patch="$BENCH_OUT/pp-noindex-out.patch"
+  awk '{ if ($0 == "+++ b/another-test.py") print $0 "\t2026-01-01 00:00:00.000000000"; else print }' "$ni_patch" > "$ni_out_patch"
+  grep -qF -e '--- /dev/null' "$ni_out_patch"
+  grep -qF -e $'+++ b/another-test.py\t2026' "$ni_out_patch"
+  PATCH_PARSE_REPO="$noindex_repo" PATCH_PARSE_BASE="$noindex_base" _patch_parse_pre 43 "$ni_out_patch"
+  local repo_dir="$BENCH_OUT/$TASK_ID/A/43/repo"
+  echo "stray" > "$repo_dir/another-test.py"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 43
+  [ "$status" -eq 0 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/43/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.restored_test_files | index("another-test.py") != null' "$grade_file" >/dev/null
+  [ "$(cat "$repo_dir/another-test.py")" = "no-index test content" ]
+  _patch_parse_post
+}
+
+@test "grade.sh: deleted file (+++ /dev/null) is restored from BASE before apply" {
+  # A patch that deletes a file: `+++ /dev/null`. The old path must be
+  # restored from BASE (so the delete applies cleanly) and recorded.
+  local deleted_repo="$BENCH_OUT/pp-deleted-repo"
+  git init -q -b main "$deleted_repo"
+  git -C "$deleted_repo" config user.email t@t.t
+  git -C "$deleted_repo" config user.name t
+  echo "x" > "$deleted_repo/keep.txt"
+  echo "gone" > "$deleted_repo/obsolete.txt"
+  git -C "$deleted_repo" add keep.txt obsolete.txt
+  git -C "$deleted_repo" commit -qm "add files"
+  local deleted_base
+  deleted_base="$(git -C "$deleted_repo" rev-parse HEAD)"
+  local deleted_patch="$BENCH_OUT/pp-deleted.patch"
+  # Build the delete patch from a real `git diff` of an agent that deleted
+  # the file (the hunk must be `@@ -1 +0,0 @@`, not `@@ -1 +0 @@`).
+  local del_src="$BENCH_OUT/pp-deleted-src"
+  git init -q -b main "$del_src"
+  git -C "$del_src" config user.email t@t.t
+  git -C "$del_src" config user.name t
+  echo "x" > "$del_src/keep.txt"
+  echo "gone" > "$del_src/obsolete.txt"
+  git -C "$del_src" add keep.txt obsolete.txt
+  git -C "$del_src" commit -qm "add files"
+  git -C "$del_src" rm -q obsolete.txt
+  git -C "$del_src" diff HEAD > "$deleted_patch"
+  grep -qF '+++ /dev/null' "$deleted_patch"
+  PATCH_PARSE_REPO="$deleted_repo" PATCH_PARSE_BASE="$deleted_base" _patch_parse_pre 44 "$deleted_patch" || true
+  local repo_dir="$BENCH_OUT/$TASK_ID/A/44/repo"
+  # The agent deleted the file (and tampered the other one). Without a
+  # restore-from-BASE the delete patch cannot apply.
+  rm -f "$repo_dir/obsolete.txt"
+  echo "tamper" > "$repo_dir/keep.txt"
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 44
+  [ "$status" -eq 0 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/44/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.restored_test_files | index("obsolete.txt") != null' "$grade_file" >/dev/null
+  [ ! -f "$repo_dir/obsolete.txt" ]
+  _patch_parse_post
+}
+
+@test "grade.sh: patch with no file headers → exit 2 + grade.json error" {
+  # A patch whose content has no parseable `--- `/`+++ ` header pair is a
+  # setup error: exit 2, grade.json with pass:false and the error, with
+  # head_moved present. The list is never silently collapsed to empty.
+  local nohdr_repo="$BENCH_OUT/pp-nohdr-repo"
+  git init -q -b main "$nohdr_repo"
+  git -C "$nohdr_repo" config user.email t@t.t
+  git -C "$nohdr_repo" config user.name t
+  echo "x" > "$nohdr_repo/seed.txt"
+  git -C "$nohdr_repo" add seed.txt
+  git -C "$nohdr_repo" commit -qm "add seed"
+  local nohdr_base
+  nohdr_base="$(git -C "$nohdr_repo" rev-parse HEAD)"
+  local nohdr_patch="$BENCH_OUT/pp-nohdr.patch"
+  printf 'this patch has no file headers\nonly prose\n@@ -1 +1 @@\n-x\n+y\n' > "$nohdr_patch"
+  PATCH_PARSE_REPO="$nohdr_repo" PATCH_PARSE_BASE="$nohdr_base" _patch_parse_pre 45 "$nohdr_patch" || true
+  run bash "$BENCH_DIR/grade.sh" "$TASK_ID" A 45
+  [ "$status" -eq 2 ]
+  local grade_file="$BENCH_OUT/$TASK_ID/A/45/grade.json"
+  [ -f "$grade_file" ]
+  jq -e '.pass == false' "$grade_file" >/dev/null
+  jq -e '.error | contains("no file headers")' "$grade_file" >/dev/null
+  jq -e 'has("head_moved")' "$grade_file" >/dev/null
+  _patch_parse_post
+}

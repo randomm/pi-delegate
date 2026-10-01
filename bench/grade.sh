@@ -139,39 +139,123 @@ fi
 # (issue #71) while leaving the agent's non-test changes — the change under
 # test — untouched.
 #
-# The file list is derived from the patch itself: a `diff --git a/<old> b/<new>`
-# line (old/new relative to the repo root) with the old path empty (/dev/null)
-# meaning the patch creates the file. The extractor is anchored and space-safe
-# (adversarial review of #71: an awk word-split broke paths containing spaces,
-# truncating `src/new file.py` to `src/new`): the header is stripped of the
-# `a/` prefix and everything from ` b/` on, leaving the whole old path intact
-# (spaces preserved); the new path is everything after the first ` b/`.
-patch_files_json="[]"
+# The file list is derived from the patch itself, from the per-file
+# `--- ` / `+++ ` header lines (NOT from the `diff --git` lines — parsing
+# those with ` b/` splitting breaks on paths containing " b/" and misses
+# the `--- /dev/null` created-file form). Both forms of unified git diff
+# (`git diff` and `git diff --no-index`) emit, per file:
+#   --- a/<old path>   (or --- /dev/null when the patch creates the file)
+#   +++ b/<new path>   (or +++ /dev/null when the patch deletes the file)
+# Optionally followed by a TAB + timestamp, which is stripped. Only a `---`
+# line IMMEDIATELY followed by a `+++` line is a header: content lines inside
+# hunks that start with "- " / "+ " (including lines whose content itself
+# starts with "-- " / "++ ") are never in that position, so they are ignored.
+# Classification (old, new):
+#   both real           → MODIFIED: restore the old path from BASE
+#   old /dev/null       → CREATED: delete the new path if present
+#   new /dev/null       → DELETED: restore the old path from BASE
+#   both /dev/null      → ignored (not a valid patch)
+# A patch with zero parseable file headers is a setup error (exit 2) — the
+# list is never silently collapsed to empty.
+patch_modified_json="[]"
 patch_created_json="[]"
 restored_json="[]"
-_h="$(timeout 60 grep -F -- 'diff --git ' "$patch_path" 2>/dev/null)" || _h=""
-if [ -n "$_h" ]; then
-  while IFS= read -r _hdr; do
-    _rest="${_hdr#"diff --git "}"
-    _old_path="${_rest#a/}"
-    _old_path="${_old_path%% b/*}"
-    _new_path="${_rest#* b/}"
-    # The file is CREATED when the old side is /dev/null. (A standard `git diff`
-    # patch writes real paths on both a/ and b/ sides and marks creation in the
-    # `--- /dev/null` line; those files simply do not appear in the patch
-    # header as /dev/null — the created-file case is only reached by patches
-    # explicitly using the /dev/null form, e.g. hand-written or git diff
-    # --no-index style.)
-    if [ -n "$_old_path" ] && [ "$_old_path" != "/dev/null" ]; then
-      patch_files_json="$(jq -cn --argjson acc "$patch_files_json" --arg p "$_old_path" '$acc + [$p]')" || patch_files_json="[]"
-    elif [ -n "$_new_path" ] && [ "$_new_path" != "$_rest" ]; then
-      patch_created_json="$(jq -cn --argjson acc "$patch_created_json" --arg p "$_new_path" '$acc + [$p]')" || patch_created_json="[]"
-    fi
-  done <<< "$_h"
+write_patch_header_error() {
+  # $1 = error message. Writes the grade record and exits 2 (like the other
+  # exit-2 paths, with head_moved). A `return 2` (rather than `exit 2`)
+  # would NOT stop the script here: the function is invoked in a compound
+  # `cmd || { ...; }` context, where bash disables errexit — only an `exit`
+  # (or a failing simple command) aborts the script. The existing
+  # write_restore_failure uses a plain exit 2 and is safe because it is
+  # called in a plain (non-conditional) context.
+  local pe="${1:-}"
+  echo "grade: $pe" >&2
+  jq -cn \
+    --arg task "$task_id" \
+    --arg arm "$arm" \
+    --argjson run "$run_num" \
+    --arg test_cmd "$TEST_CMD" \
+    --arg patch "$patch_path" \
+    --argjson restored "$restored_json" \
+    --arg head_moved "$head_moved" \
+    --arg error "$pe" \
+    --arg graded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{task:$task, arm:$arm, run:$run, test_cmd:$test_cmd, patch:$patch,
+      restored_test_files:$restored, head_moved:($head_moved|if . == "true" then true else false end),
+      pass:false, error:$error, graded_at:$graded_at}' \
+    > "$run_dir/grade.json" || {
+      echo "grade: FATAL — could not write $run_dir/grade.json" >&2
+      exit 2
+    }
+  exit 2
+}
+# Parse per-file headers from the patch with awk. A "--- " line is a header
+# candidate only when the NEXT line begins with "+++ "; the pending candidate
+# is discarded otherwise, so content lines inside hunks can never be mistaken
+# for headers (a "++ " content line follows a context/add/delete line, never a
+# "-- " content line, unless the content contains a blank line — impossible
+# in a unified diff, whose header region always terminates before the hunks).
+_parse_out="$(timeout 60 awk '
+  /^--- / {
+    pend = $0
+    sub(/^--- /, "", pend)
+    next
+  }
+  /^\+\+\+ / && pend != "" {
+    pend_plus = $0
+    sub(/^\+\+\+ /, "", pend_plus)
+    # Strip a trailing TAB + anything (the optional timestamp field),
+    # preserving everything before the first TAB (path with spaces).
+    ti = index(pend, "\t")
+    if (ti > 0) pend = substr(pend, 1, ti - 1)
+    tj = index(pend_plus, "\t")
+    if (tj > 0) pend_plus = substr(pend_plus, 1, tj - 1)
+    # Old side: "a/<path>" or "/dev/null" (or bare "<path>").
+    if (pend == "/dev/null") old = "/dev/null"
+    else if (index(pend, "a/") == 1) old = substr(pend, 3)
+    else old = pend
+    # New side: "b/<path>" or "/dev/null".
+    if (pend_plus == "/dev/null") newp = "/dev/null"
+    else if (index(pend_plus, "b/") == 1) newp = substr(pend_plus, 3)
+    else newp = pend_plus
+    pend = ""
+    if (old == "/dev/null" || newp == "/dev/null")
+      printf "C\t%s\t%s\n", old, newp
+    else
+      printf "M\t%s\t%s\n", old, newp
+    found = 1
+  }
+  { pend = "" }
+' "$patch_path" 2>/dev/null)"
+if [ -z "$_parse_out" ]; then
+  # Read/grep failure OR zero file headers — both are setup errors. The list
+  # is never silently collapsed to an empty list.
+  if [ -f "$patch_path" ] && [ -r "$patch_path" ]; then
+    write_patch_header_error "grading patch has no file headers: $patch_path"
+  else
+    write_patch_header_error "failed to read grading patch: $patch_path"
+  fi
+  # Unreachable: write_patch_header_error exits the script (exit 2).
+  exit 2
 fi
-# Renames (`diff --git a/old b/new`): the old path is restored to BASE below
-# (it appears in the modified list) and the new path is left as the agent left
-# it — its content ships in the patch hunk, so there is no separate restore.
+while IFS=$'\t' read -r _kind _old_path _new_path; do
+  case "$_kind" in
+    M)
+      patch_modified_json="$(jq -cn --argjson acc "$patch_modified_json" --arg p "$_old_path" '$acc + [$p]')" || patch_modified_json="[]"
+      ;;
+    C)
+      if [ "$_old_path" = "/dev/null" ]; then
+        # Created: delete the new path if present (below).
+        patch_created_json="$(jq -cn --argjson acc "$patch_created_json" --arg p "$_new_path" '$acc + [$p]')" || patch_created_json="[]"
+      elif [ "$_new_path" = "/dev/null" ]; then
+        # Deleted by the patch: restore the old path from BASE (below).
+        patch_modified_json="$(jq -cn --argjson acc "$patch_modified_json" --arg p "$_old_path" '$acc + [$p]')" || patch_modified_json="[]"
+      else
+        : # both /dev/null — not a valid patch file, ignore.
+      fi
+      ;;
+  esac
+done <<< "$_parse_out"
 
 # For each file the patch modifies: if the working tree differs from BASE
 # (agent modified it) or it is absent, restore it from BASE and record it.
@@ -211,6 +295,8 @@ while IFS= read -r p; do
     _need_restore=1
   elif [ ! -f "$p" ]; then
     # File was deleted by the agent (tracked at BASE, missing in the tree).
+    # This is also the natural case for a file the patch DELETES: the old
+    # path is restored from BASE so `git apply` can delete it cleanly.
     _need_restore=1
   fi
   if [ "$_need_restore" -eq 1 ]; then
@@ -222,7 +308,7 @@ while IFS= read -r p; do
     fi
     restored_json="$(jq -cn --argjson rest "$restored_json" --arg f "$p" '$rest + [$f]')" || true
   fi
-done < <(jq -r '.[]' <<< "$patch_files_json" 2>/dev/null)
+done < <(jq -r '.[]' <<< "$patch_modified_json" 2>/dev/null)
 # For each file the patch creates: delete it if present (a stray copy of the
 # graded test file left by the agent would break `git apply`).
 while IFS= read -r p; do
