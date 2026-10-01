@@ -196,6 +196,13 @@ bench/collect.sh    <task> <arm> <run>  # one JSON line per run, jq-validated
 - Disables push: `push.default=nothing` (no remote is configured, so
   there is nothing to push to).
 - Runs `SETUP_CMD` (creates venv, installs deps) in the repo dir.
+- The test toolchain in `SETUP_CMD` is version-pinned (e.g.
+  `"pytest>=8,<9"`) for reproducibility: an unpinned install drifts with
+  time (a fresh `uv pip install pytest` now pulls pytest 9.x, whose
+  `PytestRemovedIn10Warning` on non-Collection iterables is fatal under
+  the click repo's `filterwarnings=error` and breaks the base suite of
+  the May 2026 base commits). The pin matches the era of each task's
+  base commit.
 - Secret-file scan (`.env`, `.env.*`, `*.pem`, `*.key`) — refuses (exit 3)
   if any are present (mirrors the pi-oneshot safety preflight).
 - Writes `setup.json`.

@@ -307,7 +307,71 @@ now_ms_shell() {
 
 t0="$(now_ms_shell)"
 
+# Record every invocation — including one that never completes (killed by
+# orchestrate's PI_TIMEOUT wrapper, or the shim itself SIGTERMed): the
+# completion-time append below is skipped by `exit` in a trap, and a run
+# whose only pi call was killed would otherwise report pi_call_count 0
+# while the loop's own total_pi_calls says 1 (MVS sentinel-pickle B2).
+# Write the record line as an atomic .tmp then rename (a partial line
+# from a torn write would fail collect.sh's per-line jq parse); the trap
+# finalizes with the same writer (duration 0, mode "text") and exits 143/130
+# before pi's stdout is ever consumed.
+shim_record_line() {
+  local dur_ms="$1" rc="$2" argcount=$(( $# - 2 ))
+  # This function is called with (dur_ms, rc, argv...): the remaining
+  # arguments (if any) are the argv to JSON-encode; the trap path calls
+  # it with no argv, and $args (the full top-level argv, set before the
+  # first command runs) is used as the fallback so a killed call still
+  # records the command it was launched with.
+  local -a argv_items=()
+  if [ "$argcount" -gt 0 ]; then
+    local a _i=0
+    for a in "$@"; do
+      if [ "$_i" -ge 2 ]; then
+        argv_items+=("$a")
+      fi
+      _i=$((_i + 1))
+    done
+  elif [ "${#args[@]}" -gt 0 ]; then
+    argv_items=("${args[@]}")
+  fi
+  local argv_json
+  if [ "${#argv_items[@]}" -eq 0 ]; then
+    argv_json="[]"
+  else
+    argv_json="$(for a in "${argv_items[@]}"; do printf '%s\n' "$a"; done | jq -Rn '[inputs]')" || argv_json="[]"
+  fi
+  local line
+  line="$(jq -cn \
+    --argjson argv "$argv_json" \
+    --argjson duration_ms "$dur_ms" \
+    --argjson exit "$rc" \
+    --arg mode text \
+    --arg call_id "$CALL_TAG" \
+    '{argv:$argv, duration_ms:$duration_ms, exit:$exit, mode:$mode, call_id:$call_id}' 2>/dev/null)" || line=""
+  [ -n "$line" ] || return 0
+  local tmp="$LOG_FILE.${CALL_TAG}.${$}.tmp"
+  # Overwrite (not append): the completion record replaces this line; the
+  # trap path (killed call) is the final writer.
+  printf '%s\n' "$line" > "$tmp" 2>/dev/null && mv -f "$tmp" "$LOG_FILE" 2>/dev/null
+  return 0
+}
+shim_on_term() {
+  shim_record_line 0 143
+  exit 143
+}
+shim_on_int() {
+  shim_record_line 0 130
+  exit 130
+}
+trap shim_on_term TERM
+trap shim_on_int INT
+
+# Record the 'started' line (full argv, duration 0, exit 0) up front; the
+# completion path overwrites it with the true duration/mode, and the trap
+# path (killed call) overwrites it with exit 143/130.
 args=("$@")
+shim_record_line 0 0 "${args[@]}"
 
 # Inject --no-context-files exactly once if not already present.
 injected=0
@@ -355,16 +419,19 @@ if [ "$rc" -ne 0 ]; then
   cp "$err_file" "$RUN_DIR/pi-err-$CALL_TAG.log"
 fi
 rm -f "$stdout_file" "$err_file"
+trap - TERM INT
 
 t1="$(now_ms_shell)"
 dur_ms=$(( t1 - t0 ))
 
-# Build argv as a JSON array. Each element is one argv entry: "${args[@]}"
-# (never "${args[*]}") so element boundaries survive even if an argument
-# contains spaces; one element per line, one line per argv element.
+# Append one metadata line to pi-calls.jsonl (completion record: real
+# duration and exit code, and the true mode once --mode json is known).
+# Overwrite the 'started' line written before pi ran (same call_id): a
+# killed call's trap line is the final writer, so this must not append a
+# duplicate.
+# argv is already scoped per call: rebuild it here (one element per line,
+# one line per argv element) for the completion line.
 argv_json="$(for a in "${args[@]}"; do printf '%s\n' "$a"; done | jq -Rn '[inputs]')"
-
-# Append one metadata line to pi-calls.jsonl.
 jq -cn \
   --argjson argv "$argv_json" \
   --argjson duration_ms "$dur_ms" \
@@ -372,7 +439,7 @@ jq -cn \
   --arg mode "$([ "$json_mode" -eq 1 ] && echo json || echo text)" \
   --arg call_id "$CALL_TAG" \
   '{argv:$argv, duration_ms:$duration_ms, exit:$exit, mode:$mode, call_id:$call_id}' \
-  >> "$LOG_FILE" 2>/dev/null
+  > "$LOG_FILE" 2>/dev/null
 
 exit "$rc"
 SHEOF
