@@ -48,7 +48,7 @@ Protocol & harness details: [docs/benchmark.md](benchmark.md)
 | sentinel-pickle | A | 2 | ✓ | 0.0558 | 1404 | 60250 | 7422 | 14635 | 21802 |
 | sentinel-pickle | A | 3 | ✓ | 0.0821 | 2398 | 115339 | 8754 | 22355 | 24783 |
 | sentinel-pickle | B | 1 | ✓ | 0.1431 | 2835 | 189853 | 19197 | 27896 | 483582 |
-| sentinel-pickle | B | 2 | ✓ | 0.1848 | 3542 | 280710 | 23287 | 37935 | 2310391 |
+| sentinel-pickle | B | 2 | ✓* | 0.1848 | 3542 | 280710 | 23287 | 37935 | 2310391 |
 | sentinel-pickle | B | 3 | ✓ | 0.2036 | 4259 | 347642 | 22851 | 44477 | 235211 |
 | param-source | A | 1 | ✓ | 0.0789 | 1841 | 101242 | 10042 | 19124 | 23294 |
 | param-source | A | 2 | ✓ | 0.0980 | 2078 | 130465 | 12779 | 22598 | 29787 |
@@ -56,6 +56,10 @@ Protocol & harness details: [docs/benchmark.md](benchmark.md)
 | param-source | B | 1 | ✓ | 0.1596 | 2906 | 228185 | 21205 | 34988 | 344235 |
 | param-source | B | 2 | ✓ | 0.1522 | 2670 | 203455 | 21189 | 46536 | 534592 |
 | param-source | B | 3 | ✓ | 0.1391 | 2341 | 168675 | 20475 | 22414 | 162037 |
+
+\*sentinel-pickle B2: the loop's review pi call timed out, so this pass was
+reached with Claude's own review standing in for the loop's review; the
+objective grading tests still passed (see [§4](#4-anomaly--sentinel-pickle-b2)).
 
 ### pi tokens per B run (context only — reported cost $0, self-hosted)
 
@@ -72,12 +76,23 @@ Protocol & harness details: [docs/benchmark.md](benchmark.md)
 
 ## 3. Findings
 
-**Quality is at par.** All 12 valid runs pass. One run (param-source, arm A
-run 1) was re-run after a broken test environment (unpinned pytest 9) was
-fixed, and the invalid first attempt was excluded from the tables above.
+**Quality is at par.** Test outcome is at par: all 12 valid runs (6 per
+arm) pass the grading tests. Two caveats on how those 12 are counted:
 
-**Arm B used more Claude, not less.** The ratio narrows with task size,
-consistent with a roughly fixed per-task delegation overhead:
+- One run (param-source, arm A run 1) was re-run after a broken test
+  environment (unpinned pytest 9) was fixed. The re-run — the param-source
+  A1 shown in the tables — is one of the 12; the broken first attempt is
+  excluded and not counted.
+- Sentinel-pickle B2 (marked ✓* above) passed with Claude's own review
+  standing in for the loop's timed-out review; the objective grading tests
+  still passed.
+
+Note that pass/fail grading does not distinguish between passing solutions of
+different quality — this only measures whether the graded tests pass.
+
+**Arm B used more Claude, not less.** Two data points; consistent with a
+roughly fixed per-task overhead, not yet distinguishable from other
+explanations — the larger-task experiment in §5 would test it:
 
 | Task | Claude cost ratio (B/A) | Absolute overhead (B−A mean) |
 |---|---|---|
@@ -93,8 +108,8 @@ consistent with a roughly fixed per-task delegation overhead:
    launch the loop, wait for pi to finish, and read back the summary.
 3. **Claude re-verifying pi's work** — after the loop's own adversarial
    review, Claude re-runs tests and reads the diff to confirm the result
-   before reporting completion. This is the largest single contributor
-   to the wall-clock gap.
+   before reporting completion. This contributes to the wall-clock gap —
+   though wall time is explicitly not a decision factor here.
 
 Both tasks are small (arm A finishes in ~15–25 s of API time). **This
 data says nothing yet about larger tasks** where the fixed overhead
@@ -108,8 +123,11 @@ The review pi call in run B2 hit `PI_TIMEOUT` (1800 s) on the slow
 self-hosted endpoint → `PI_ERROR` (exit 3). Claude reported the timeout
 honestly, reviewed the diff itself, and graded the run as pass.
 
-At the time the harness missed the killed call (`pi_call_count` showed 1
-instead of 2). **Fixed in PR #76** (per-call records in `pi-calls.d/`).
+**Part 1 (sentinel-pickle) was collected with the harness before PR #76**,
+so B2's recorded `pi_call_count` is 1 although the loop made 2 calls — the
+timed-out review call wasn't recorded. B2's pi token totals in the table
+above therefore cover the develop call only. Part 2 (param-source) was
+collected after PR #76, which added per-call records in `pi-calls.d/`.
 
 ---
 
