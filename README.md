@@ -47,8 +47,8 @@ instead of claiming success.
 - **Claude is told not to re-do the work** when the gate passes (re-reading the diff is what ate the savings
   in early benchmarks).
 - **Guardrails:** it refuses to run on your default branch or next to `.env`/`*.pem`/`*.key` files, and disables
-  `git push` for pi. This guards against mistakes, not a malicious model. For real isolation use a disposable
-  clone or a container.
+  `git push` for pi. This guards against mistakes, not a malicious model. For stronger isolation set `PI_DELEGATE_WRAP` (sandbox
+  recipes in [docs/configuration.md](docs/configuration.md#sandbox-optional)) or use a disposable clone or container.
 
 ## Other agents
 

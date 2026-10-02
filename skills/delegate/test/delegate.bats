@@ -323,3 +323,104 @@ child_dead() {
   child_dead
   grep -q 'timeout parameter' "$STUB_DIR/stdin"
 }
+
+# --- PI_DELEGATE_WRAP (issue #55): a command prefix run in front of every pi
+# call and the --verify command, after timeout. Fail-closed. No sandbox code
+# lives in run.sh; the docs carry example recipes. ---
+
+make_wrapper() {
+  printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$*" >> "$STUB_DIR/wraplog"' 'exec "$@"' > "$BIN/wrapper"
+  chmod +x "$BIN/wrapper"
+}
+
+@test "run.sh: PI_DELEGATE_WRAP runs in front of pi" {
+  make_wrapper
+  PI_DELEGATE_WRAP="$BIN/wrapper" run bash "$RUN" <<< "t"
+  [[ "$output" == *"EXIT CODE: 0"* ]]
+  head -n 1 "$STUB_DIR/wraplog" | grep -q "^$BIN/pi -p --no-session"
+  grep -qx -- '--no-session' "$STUB_DIR/argv"
+}
+
+@test "run.sh: PI_DELEGATE_WRAP is split on whitespace into a multi-word prefix" {
+  printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$*" >> "$STUB_DIR/wraplog"' 'shift 2' 'exec "$@"' > "$BIN/wrapper2"
+  chmod +x "$BIN/wrapper2"
+  PI_DELEGATE_WRAP="$BIN/wrapper2 --flag x" run bash "$RUN" <<< "t"
+  [[ "$output" == *"EXIT CODE: 0"* ]]
+  head -n 1 "$STUB_DIR/wraplog" | grep -q "^--flag x $BIN/pi "
+}
+
+@test "run.sh: PI_DELEGATE_WRAP also wraps the --verify command, and the retry's pi call" {
+  make_wrapper
+  PI_DELEGATE_WRAP="$BIN/wrapper" run bash "$RUN" --verify 'test -f fixed.txt' <<< "t"
+  [[ "$output" == *"VERIFY: PASS (retries=1)"* ]]
+  [ "$(grep -c "^$BIN/pi " "$STUB_DIR/wraplog")" -eq 2 ]
+  [ "$(grep -c 'bash -c test -f fixed.txt' "$STUB_DIR/wraplog")" -eq 2 ]
+}
+
+@test "run.sh: a missing PI_DELEGATE_WRAP command is refused (exit 3), pi never runs" {
+  PI_DELEGATE_WRAP="/nonexistent/sandbox" run bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"REFUSED: PI_DELEGATE_WRAP command not found: /nonexistent/sandbox"* ]]
+  [ ! -e "$STUB_DIR/argv" ]
+  [[ "$output" != *"RUN_DIR="* ]]
+}
+
+@test "run.sh: PI_DELEGATE_UNSAFE=1 does not bypass a missing PI_DELEGATE_WRAP command" {
+  PI_DELEGATE_UNSAFE=1 PI_DELEGATE_WRAP="/nonexistent/sandbox" run bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [ ! -e "$STUB_DIR/argv" ]
+}
+
+@test "run.sh: a whitespace-only PI_DELEGATE_WRAP is refused rather than ignored" {
+  PI_DELEGATE_WRAP="   " run bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [ ! -e "$STUB_DIR/argv" ]
+}
+
+@test "run.sh: unset or empty PI_DELEGATE_WRAP changes nothing" {
+  PI_DELEGATE_WRAP="" run bash "$RUN" <<< "t"
+  [[ "$output" == *"EXIT CODE: 0"* ]]
+  [ ! -e "$STUB_DIR/wraplog" ]
+  [[ "$output" != *"REFUSED"* ]]
+}
+
+@test "run.sh: the wrapper sits inside timeout (timeout is the outer process)" {
+  command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || skip "no timeout binary"
+  printf '%s\n' '#!/bin/sh' 'ps -o command= -p $PPID > "$STUB_DIR/parent"' 'exec "$@"' > "$BIN/wrapper"
+  chmod +x "$BIN/wrapper"
+  PI_DELEGATE_WRAP="$BIN/wrapper" run bash "$RUN" <<< "t"
+  grep -q 'timeout' "$STUB_DIR/parent"
+}
+
+@test "run.sh: --abort stops a run that goes through PI_DELEGATE_WRAP" {
+  make_wrapper
+  PI_DELEGATE_WRAP="$BIN/wrapper" STUB_SLEEP=60 bash "$RUN" <<< "t" > "$REPO/out.txt" 2>&1 &
+  waiter=$!
+  for _ in $(seq 1 50); do
+    [ -s "$REPO/out.txt" ] && break
+    sleep 0.1
+  done
+  dir="$(sed -n 's/^RUN_DIR=//p' "$REPO/out.txt")"
+  run bash "$RUN" --abort "$dir"
+  [[ "$output" == *"aborted"* ]]
+  wait "$waiter" || true
+  run pgrep -f "$BIN/pi"
+  [ "$status" -ne 0 ]
+}
+
+@test "docs/configuration.md documents PI_DELEGATE_WRAP and keeps its caveat" {
+  local cfg
+  cfg="$(dirname "$SKILL_FILE")/../../docs/configuration.md"
+  grep -q 'PI_DELEGATE_WRAP' "$cfg"
+  grep -q 'not a security boundary' "$cfg"
+}
+
+@test "run.sh: the wrapper sees PI_DELEGATE_RUN (the run dir) for the verify command too" {
+  printf '%s\n' '#!/bin/sh' 'printf "%s|%s\n" "$PI_DELEGATE_RUN" "$*" >> "$STUB_DIR/wraplog"' 'exec "$@"' > "$BIN/wrapper"
+  chmod +x "$BIN/wrapper"
+  PI_DELEGATE_WRAP="$BIN/wrapper" run bash "$RUN" --verify true <<< "t"
+  dir="$(printf '%s\n' "$output" | sed -n 's/^RUN_DIR=//p')"
+  [ -n "$dir" ]
+  grep -q "^$dir|$BIN/pi " "$STUB_DIR/wraplog"
+  grep -q "^$dir|bash -c true" "$STUB_DIR/wraplog"
+}

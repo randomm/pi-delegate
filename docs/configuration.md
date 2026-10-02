@@ -9,6 +9,7 @@ Environment variables read by `skills/delegate/run.sh`. None are required.
 | `PI_VERIFY_TIMEOUT` | 600 | Seconds allowed for the `--verify` command. |
 | `PI_WAIT_BUDGET` | 540 | Seconds one `run.sh` call waits before printing `STILL RUNNING` (keep it under the Bash tool's 10-minute limit). |
 | `PI_DELEGATE_UNSAFE` | unset | Set to `1` to skip the safety preflight. |
+| `PI_DELEGATE_WRAP` | unset | Command prefix run in front of every pi call and the `--verify` command (see [Sandbox](#sandbox-optional)). |
 
 All values must be positive integers.
 
@@ -25,8 +26,8 @@ and `run.sh` prints a warning.
 pi runs each bash-tool command in its own session, so the timeout's signal
 does not reach those commands directly: on SIGTERM pi normally stops its own
 tool commands, but after SIGKILL it cannot. `run.sh` therefore tags pi's
-environment with `PI_DELEGATE_RUN=<run dir>` and, after every pi call and on
-`--abort`, kills every process still carrying the tag, best effort. That
+environment with `PI_DELEGATE_RUN=<run dir>` (the `--verify` command gets it
+too) and, after every pi call, every verify call and on `--abort`, kills every process still carrying the tag, best effort. That
 includes servers the task deliberately left running. The scan is complete on
 Linux (`/proc`); on macOS it sees only non-Apple binaries (for example
 Homebrew or uv Python, node), and was checked on macOS 26.5 only.
@@ -58,8 +59,77 @@ Unless `PI_DELEGATE_UNSAFE=1`, `run.sh` refuses to start when:
   (`*.example`, `*.sample` and `*.template` are fine; the scan is fail-closed);
 
 and it disables `git push` for the pi process. This guards against mistakes,
-not against a malicious pi; use a container or a disposable clone for real
-isolation.
+not against a malicious pi, and a feature branch or worktree is not isolation
+(pi can `cd` into other checkouts and read `~/.ssh`). For real isolation use
+the [sandbox](#sandbox-optional) option, a container or a disposable clone.
+
+## Sandbox (optional)
+
+pi has no built-in sandbox. Set `PI_DELEGATE_WRAP` to a command prefix and
+`run.sh` puts it in front of every pi call and the `--verify` command (after
+`timeout`, so the time limit still applies). Unset, nothing changes. If the
+first word is not an executable, `run.sh` refuses with exit 3 (also under
+`PI_DELEGATE_UNSAFE=1`) rather than run unconfined. The prefix is split on
+whitespace; for anything with quoting, point it at a script that ends with
+`exec "$@"`. The wrapper runs with the repo as its working directory and sees
+`PI_DELEGATE_RUN` (the run directory, which it must keep writable).
+
+The recipes below are examples, not code this project tests or secures: they
+are not run in CI, they are **not a security boundary**, and the network stays
+open, so anything pi can read it can send to the model endpoint. Both need
+`~/.pi/agent` writable (pi keeps settings and credentials there), so pi can
+read its own API key.
+
+**macOS** (`sandbox-exec`, deprecated but working; checked on macOS 26.5 with
+a real pi: in-repo writes and `git commit` work, writes to a sibling
+directory and reads of `~/.ssh` and `~/.config` fail). Save as an executable
+script, for example `~/bin/pi-sandbox`, and set
+`PI_DELEGATE_WRAP=~/bin/pi-sandbox`:
+
+```sh
+#!/bin/sh
+RUN=$(cd "$PI_DELEGATE_RUN" && pwd -P)
+PROFILE='(version 1) (allow default) (deny file-write*)
+(allow file-write* (subpath (param "REPO")) (subpath (param "RUN"))
+  (subpath (param "PI")) (subpath (param "CACHE"))
+  (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper")
+  (regex #"^/dev/(fd/[0-9]+|ttys[0-9]+|std(in|out|err))$"))
+(deny file-read* file-write* (subpath (param "SSH")) (subpath (param "AWS"))
+  (subpath (param "CONFIG")) (subpath (param "GNUPG")))
+(allow file-read* (subpath (param "GITCFG")))'
+exec env TMPDIR="$RUN/" sandbox-exec -p "$PROFILE" \
+  -D REPO="$(pwd -P)" -D RUN="$RUN" -D PI="$HOME/.pi" -D CACHE="$HOME/.cache" \
+  -D SSH="$HOME/.ssh" -D AWS="$HOME/.aws" -D CONFIG="$HOME/.config" \
+  -D GNUPG="$HOME/.gnupg" -D GITCFG="$HOME/.config/git" "$@"
+```
+
+Paths must be resolved (`pwd -P`; `/tmp` and `/var` are under `/private`).
+Not shown: that `~/.aws` reads are blocked, that commit signing works
+(`~/.gnupg` is denied), or that macOS services (`open`, `osascript`) are
+blocked. It cannot nest inside another Seatbelt sandbox such as Claude Code's
+own Bash sandbox.
+
+**Linux** (`bwrap`; the mount layout was checked with bash, git and curl,
+not with pi itself). Save as an executable script:
+
+```sh
+#!/bin/sh
+exec bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --tmpfs "$HOME" \
+  --bind "$PWD" "$PWD" --bind "$PI_DELEGATE_RUN" "$PI_DELEGATE_RUN" \
+  --bind "$HOME/.pi/agent" "$HOME/.pi/agent" --ro-bind-try "$HOME/.bun" "$HOME/.bun" \
+  --ro-bind-try "$HOME/.gitconfig" "$HOME/.gitconfig" --bind-try "$HOME/.cache" "$HOME/.cache" \
+  --die-with-parent --unshare-pid --new-session -- "$@"
+```
+
+Adjust the read-only bind to wherever pi is installed. In a linked git
+worktree also bind the main repository's git directory
+(`git rev-parse --path-format=absolute --git-common-dir`) writable, which
+exposes its shared refs. On Ubuntu 24.04, `bwrap` fails with `setting up uid
+map: Permission denied` because unprivileged user namespaces are restricted
+(`kernel.apparmor_restrict_unprivileged_userns=1`); fixing that is a host
+policy decision (a scoped AppArmor profile is safer than the global sysctl).
+A container remains the stronger option when you need all of `$HOME` hidden
+or network control.
 
 ## `--verify`
 
