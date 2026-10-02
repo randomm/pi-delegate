@@ -26,8 +26,8 @@ and `run.sh` prints a warning.
 pi runs each bash-tool command in its own session, so the timeout's signal
 does not reach those commands directly: on SIGTERM pi normally stops its own
 tool commands, but after SIGKILL it cannot. `run.sh` therefore tags pi's
-environment with `PI_DELEGATE_RUN=<run dir>` and, after every pi call and on
-`--abort`, kills every process still carrying the tag, best effort. That
+environment with `PI_DELEGATE_RUN=<run dir>` (the `--verify` command gets it
+too) and, after every pi call, every verify call and on `--abort`, kills every process still carrying the tag, best effort. That
 includes servers the task deliberately left running. The scan is complete on
 Linux (`/proc`); on macOS it sees only non-Apple binaries (for example
 Homebrew or uv Python, node), and was checked on macOS 26.5 only.
