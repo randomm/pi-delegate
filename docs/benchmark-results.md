@@ -150,3 +150,25 @@ collected after PR #76, which added per-call records in `pi-calls.d/`.
   is $0 — token counts only, no dollar comparison possible for pi.
 - Dollar figures are Claude's reported `cost_usd` under the subscription
   rate; not API list price.
+
+---
+
+## 7. Follow-up: script-backed `pi-oneshot` (issue #78)
+
+Same two click tasks, arm B delegating through the slimmed `pi-oneshot`
+(a ~25-line SKILL.md; the preflight/launch/wait/abort logic lives in
+`run.sh`; the result is one compact tool output and Claude is told not to
+re-verify a clean result). Claude cost per run, USD, pass in all runs
+except the first v1 attempt below:
+
+| Task | Arm A (n) | Arm B (n) | B/A |
+|---|---|---|---|
+| sentinel-pickle | 0.082, 0.062, 0.104 (3) | 0.057, 0.057, 0.056 (3) | 0.69× |
+| param-source | 0.085, 0.069 (2) | 0.064, 0.067 (2) | 0.85× |
+
+Arm B now costs less Claude than plain Claude. The first v1 attempt
+(sentinel-pickle B2) failed because the skill did not tell Claude to raise
+the Bash tool timeout: the wait was cut at the 120 s default and Claude
+ended its turn while pi was still running. The skill now says
+`timeout: 590000`. Caveats: n = 2-3, run concurrently, one Claude model;
+`pi-review-loop` was not re-measured.

@@ -75,7 +75,7 @@ the role prompts.
 ### `PI_DELEGATE_UNSAFE` — opt out of the safety preflight (unset by default)
 
 **Applies to:** both skills (the preflight runs in `orchestrate.sh` and in
-the `pi-oneshot` preflight block).
+the `pi-oneshot` `run.sh` preflight).
 
 Set to `1` to skip all three safety guards: allow running on the default
 branch, allow secret-looking files, do not neutralise `git push`. Only set
@@ -135,8 +135,8 @@ detached, record the pid, wait with foreground bounded calls.**
   directory under the system temp dir) — untracked files inside the repo
   enter the reviewed diff. For `pi-review-loop` the completion signal is
   the final JSON summary line in `$LOG` (check the last line with
-  `tail -n 1`); for `pi-oneshot` (no JSON summary) the invocation is
-  wrapped so its exit code is written to an exit-code file (`$RC_FILE`).
+  `tail -n 1`); for `pi-oneshot` (no JSON summary) its bundled `run.sh` writes the pi
+  exit code to an exit-code file (`pi.rc` in the run dir).
   $LOG grows as pi streams output and can be deleted after the run.
 - **Wait in foreground, bounded calls**: repeat a foreground Bash call
   with `timeout` just under the 600000 ms ceiling (the Bash tool's
@@ -158,7 +158,7 @@ detached, record the pid, wait with foreground bounded calls.**
   its own group, but the group-leader check alone would still be fooled by
   a recycled pid that happens to lead one, so the block also checks the
   recorded process's command line — it must be the run itself (for the loop,
-  `orchestrate.sh`; for the oneshot, the resolved pi path) before any kill is
+  `orchestrate.sh`; for the oneshot, `run.sh`) before any kill is
   attempted. **State does not persist
   between Bash tool calls**: start the block with `D=` set to the
   `RUN_DIR` the launch call printed (the `D=$(mktemp -d)` directory),
@@ -194,13 +194,11 @@ fi
 PI_DELEGATE_BLOCK
 ```
 
-Both SKILL.md files carry a verbatim copy of this block (each skill must
-be self-contained; the oneshot copy resolves `PI_BIN` first, and if `pi`
-cannot be resolved it **exits 3** with "cannot verify command line —
-kill NOT performed" rather than matching a bare `pi` token — and the
-caller must then check liveness with `kill -0 <pid>` before reporting
-the abort as done); the BATS suites assert the
-copies are identical modulo the normalised tokens. This was verified on
+`pi-review-loop`'s SKILL.md carries a verbatim copy of this block;
+`pi-oneshot` ships the same logic in `run.sh --abort <RUN_DIR>`, so its
+SKILL.md stays small (the skill text is paid for in Claude tokens on every
+delegation). The BATS suite asserts the
+copy is identical to this block modulo the normalised tokens. This was verified on
 macOS (bash 3.2 and bash 5) against a stub tree
 (root → child → grandchild): the whole group dies, a bystander process
 survives, a pid that is not a group leader is skipped, and a group leader

@@ -459,3 +459,28 @@ override),
 - The contamination guard relies on `git fetch --depth=1` not fetching
   additional objects. A future git version change could alter this
   behaviour; the BATS test verifies the guard on every run.
+
+## Quick benchmark (`bench/quick.sh`)
+
+A fast, rough reward function for iterating on the skills — not a
+replacement for the protocol above. Tiny local Python tasks
+(`bench/quick/tasks/<id>/{repo,prompt.md,check.py}`, hidden check run after
+the agent finishes) run plain Claude (A) and Claude + the **working-tree**
+plugin (B, via `--plugin-dir`) in parallel, in a couple of minutes:
+
+```
+bench/quick.sh                       # all tasks, 1 run per arm
+bench/quick.sh -n 2 ledger           # 2 runs, one task
+bench/quick.sh -s pi-review-loop     # delegate through the loop instead
+```
+
+It prints per-run cost/turns/pi calls and `REWARD = 1 - costB/costA`
+(forced to -1 if a B run fails its check or never calls pi). Use it to
+decide whether a change helps, then confirm on the real protocol.
+
+What it showed: delegation is break-even on trivial tasks (`slugify`,
+`json-flag`, `merge-ranges`: Claude finishes in 3-6 cheap turns) and wins
+once Claude would need real exploration and editing (`ledger`, 6 files:
+about -48% Claude cost, same pass rate). The savings come from a thin
+skill (one script call, compact result, no re-verification) — a 500-line
+skill that makes Claude assemble the launch blocks costs more than it saves.
