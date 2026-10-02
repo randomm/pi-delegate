@@ -209,17 +209,11 @@ if [ "$arm" = "B" ]; then
 
 **Delegation instruction (benchmark arm B):**
 
-You have the `pi-delegate` plugin installed, which provides the
-`pi-review-loop` skill: a deterministic bash review loop that delegates a
-code-change task to the `pi` CLI, then reviews the diff and iterates
-(develop → review → fix, with hard caps).
-
-You MUST delegate the implementation work to pi via the `pi-review-loop`
-skill, passing the task description above as the task. Do NOT implement
-the code change yourself — the actual edit work must go through the skill.
-After the loop completes, verify the result by running the task's test
-command (if any) and report the final state (tests pass/fail, what
-changed).
+You have the `pi-delegate` plugin installed, which provides the `delegate`
+skill. Delegate the implementation work to pi via that skill, passing the
+task description above as the task and the repo's test command as
+`--verify`. Do NOT implement the code change yourself. When the skill
+reports back, report the final state (what changed).
 DELEGSUFFIX
 fi
 

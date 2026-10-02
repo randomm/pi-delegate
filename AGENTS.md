@@ -9,19 +9,15 @@
 
 ## Architecture Notes
 
-- skills/pi-review-loop/orchestrate.sh is the core engine and critical path — deterministic bash loop; SKILL.md files are thin wrappers (changes require BATS coverage)
-- skills/pi-review-loop/SKILL.md wraps orchestrate.sh; bundles orchestrate.sh, developer.md, adversarial-reviewer.md referenced via ${CLAUDE_SKILL_DIR}
-- skills/pi-oneshot/SKILL.md: single `pi -p --no-session "$ARGUMENTS"` call — no loop, no verdict parsing
-- developer.md / adversarial-reviewer.md are passed via --append-system-prompt, never --system-prompt (replacement breaks pi tool-calling)
-- Loop hard caps: develop ≤1, review ≤3, fix ≤2, total ≤6 pi invocations; no fix after terminal review
-- All loop pi calls use `pi --mode json -p --no-session`; final text extracted only from message_end events
-- Reviewer runs read-only: `--tools read,grep,find,ls`; developer/fixer get pi's full default toolset
-- Diff source is the start ref recorded before the develop round (`git rev-parse --verify -q HEAD`, empty tree on unborn repos) — `git diff <start-ref>` plus `git diff --no-index` for untracked non-ignored files, re-read fresh before every review round; there is no entry-time diff gate, and EMPTY_DIFF (exit 0) is reported only after the develop round produced no change
-- VERDICT parser takes the LAST occurrence, case-insensitive, tolerates optional colon and markdown bold; enum APPROVED|MINOR_OBSERVATIONS|ISSUES_FOUND|CRITICAL_ISSUES_FOUND
-- Exit codes: 0=PASS/PASSED_WITH_FINDINGS/EMPTY_DIFF, 1=REJECTED, 2=INCOMPLETE, 3=PI_ERROR; JSON summary is last stdout line, built with jq (never string interpolation)
-- pi discovery: `command -v pi` + `[ -x ]`, fallback ~/.bun/bin/pi then ~/.local/bin/pi; no pinned model, --model passthrough only
-- Tests: BATS with a mock pi binary (args logged, scripted responses via env/fixtures)
-- Out of scope: MCP server, pi SDK embedding, multi-worktree, session persistence
+- skills/delegate/run.sh is the core engine and critical path; SKILL.md is a thin wrapper kept tiny on purpose (its text is paid for in Claude tokens on every delegation). Changes require BATS coverage (stub pi, no network)
+- One pi call per task: `pi -p --no-session --no-extensions --no-skills --no-prompt-templates`, full default toolset, task on stdin; no pinned model, `--model` passthrough only
+- `--verify CMD` is the quality gate: deterministic command after pi, one fix retry with the failure output, no model reviewer (same-model reviewers approve most changes)
+- run.sh runs detached (`set -m`, pid file, run dir outside the repo) and is waited on in bounded calls; `--abort` kills the recorded group plus its children's groups (GNU timeout re-groups pi); pi.rc is written last as the completion signal
+- Safety preflight (default branch, secret files, git push disabled) is a guardrail against mistakes, not a sandbox
+- pi discovery: `command -v pi` + `[ -x ]`, fallback ~/.bun/bin/pi then ~/.local/bin/pi
+- Benchmarks: bench/quick.sh is the fast reward function (plain Claude vs Claude + plugin, hidden checks, REWARD = 1 - costB/costA, -1 if quality drops); the click-fork harness (bench/*.sh) is the slower evidence run
+- Tests: BATS with a stub pi binary
+- Out of scope: MCP server, pi SDK embedding, multi-worktree, session persistence, model reviewers/review loops until a benchmark shows they pay for their tokens
 
 # Minimalist Engineering
 

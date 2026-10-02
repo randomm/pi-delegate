@@ -1,4 +1,9 @@
-# Benchmark Results — First MVS Run
+# Benchmark Results
+
+Sections 1-6 are the first run (arm B = the since-removed `pi-review-loop`);
+section 7 and later measure the current `delegate` skill.
+
+## First MVS run
 
 Date: 2026-06-18 · Tasks: 2 · Runs: 3 × 2 arms · Model: `claude-sonnet-5-5`
 
@@ -150,3 +155,76 @@ collected after PR #76, which added per-call records in `pi-calls.d/`.
   is $0 — token counts only, no dollar comparison possible for pi.
 - Dollar figures are Claude's reported `cost_usd` under the subscription
   rate; not API list price.
+
+---
+
+## 7. Follow-up: script-backed `pi-oneshot` (issue #78)
+
+Same two click tasks, arm B delegating through the slimmed `pi-oneshot`
+(a ~25-line SKILL.md; the preflight/launch/wait/abort logic lives in
+`run.sh`; the result is one compact tool output and Claude is told not to
+re-verify a clean result). Claude cost per run, USD, pass in all runs
+except the first v1 attempt below:
+
+| Task | Arm A (n) | Arm B (n) | B/A |
+|---|---|---|---|
+| sentinel-pickle | 0.082, 0.062, 0.104 (3) | 0.057, 0.057, 0.056 (3) | 0.69× |
+| param-source | 0.085, 0.069 (2) | 0.064, 0.067 (2) | 0.85× |
+
+Arm B now costs less Claude than plain Claude. The first v1 attempt
+(sentinel-pickle B2) failed because the skill did not tell Claude to raise
+the Bash tool timeout: the wait was cut at the 120 s default and Claude
+ended its turn while pi was still running. The skill now says
+`timeout: 590000`. Caveats: n = 2-3, run concurrently, one Claude model;
+`pi-review-loop` was not re-measured.
+
+---
+
+## 8. Quick benchmark, single `delegate` skill with `--verify`
+
+`bench/quick.sh -n 2` (4 tiny local tasks, 2 runs per arm, run concurrently;
+pass = hidden check AND the task's own tests; `lines` = diff size). 16/16
+runs passed in both arms. Claude cost, USD (sum over runs):
+
+| Task | Plain Claude | With pi-delegate |
+|---|---|---|
+| json-flag | 0.097 | 0.092 |
+| ledger | 0.202 | 0.113 |
+| merge-ranges | 0.084 | 0.092 |
+| slugify | 0.083 | 0.090 |
+| **Total** | **0.466** | **0.386 (REWARD +0.17)** |
+
+Reading: on the three tiny tasks delegation is break-even (slightly more
+expensive: the skill text plus one tool round-trip cost about what pi saves);
+on `ledger` it is 44% cheaper. Scope note: pi's `ledger` diffs were larger
+(132-143 changed lines vs 78-81), mostly extra tests. Caveats: n = 2, rough
+costs, one Claude model, one self-hosted pi model, and the click tasks were
+not re-run with `--verify`.
+
+---
+
+## 9. Harder tasks and output trimming
+
+Three multi-file tasks on a 6-file ledger package were added to `bench/quick.sh`
+(`ledger`, `ledger-budget`, `ledger-export`) plus a mechanical rename
+(`ledger-rename`). Two tuning changes followed the first run: `run.sh` prints
+at most about 1.2 KB of pi's final text (the result is re-read, and paid for,
+by Claude), and the skill asks for a one-or-two-sentence reply and a minimal,
+in-scope change. Final run, `bench/quick.sh -n 2`, all 8 tasks: 28/28 runs
+pass in both arms (the earlier run had one delegated `ledger-export` failure
+caused by an under-specified task, since tightened, not by delegation).
+
+| Class | Plain Claude (mean/run) | With pi-delegate | Change |
+|---|---|---|---|
+| `ledger` | $0.103 | $0.054 | −47% |
+| `ledger-budget` | $0.081 | $0.060 | −26% |
+| `ledger-export` | $0.063 | $0.052 | −17% |
+| Multi-file features combined | $0.082 | $0.055 | −33% |
+| Tiny edits (`slugify`, `json-flag`, `merge-ranges`, `ledger-rename`) | $0.042 | $0.047 | +11% |
+| **All runs, total** | **$0.837** | **$0.712** | **REWARD +0.15** |
+
+Observations: delegated diffs are 1.3-1.8x larger than plain Claude's on the
+feature tasks (pi adds more tests); the fixed delegation overhead is roughly
+$0.005-0.01 per task (skill text, one extra tool round-trip, reading the
+result), which only pays for itself on multi-file work. Caveats: n = 2 per
+cell, concurrent runs, one Claude model and one self-hosted pi model.
