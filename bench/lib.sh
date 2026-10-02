@@ -74,6 +74,18 @@ require_task_fields() {
 
 # --- Arm helpers ---------------------------------------------------------------
 
+# warn_low_space — warns (never fails) when under 5 GiB is free where
+# BENCH_OUT lives: task venvs can exceed 1 GB per run and a RAM-backed /tmp
+# fills fast. The 5 GiB threshold is a judgment call, not a measurement.
+warn_low_space() {
+  local d="$BENCH_OUT" kb
+  while [ ! -d "$d" ]; do d="$(dirname "$d")"; done
+  kb="$(df -Pk "$d" 2>/dev/null | awk 'NR==2 {print $4}')" || kb=""
+  if [ "${kb:-0}" -lt 5242880 ] 2>/dev/null; then
+    echo "WARNING: only $(( ${kb:-0} / 1024 )) MB free under $BENCH_OUT; task venvs can need >1 GB per run" >&2
+  fi
+}
+
 # bench_out_guard — refuses to operate if BENCH_OUT is unset/empty or not an
 # absolute path under which runs may be created (rm -rf is run against run
 # dirs under BENCH_OUT; a relative or empty value would rm the wrong tree).

@@ -4,8 +4,9 @@
 # plugin (B), all runs in parallel (~2-5 min). Not scientifically accurate;
 # it only tells you whether a change to the skills moved Claude's cost.
 #
-# Usage: bench/quick.sh [-n runs] [task...]
+# Usage: bench/quick.sh [-k] [-n runs] [task...]
 #   -n  runs per arm per task (default 1)
+#   -k  keep the run dirs (their path is printed at the end); removed by default
 # Needs claude + pi on PATH (and `jq`; uses timeout/gtimeout when present); auth via the usual claude login (or
 # CLAUDE_CODE_OAUTH_TOKEN in the environment).
 # A run passes only if the hidden check.py passes AND the task's own tests (if
@@ -15,13 +16,15 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/.." && pwd)"
-n=1
-while getopts n: o; do case "$o" in n) n=$OPTARG ;; *) exit 2 ;; esac; done
+n=1; keep=0
+while getopts kn: o; do case "$o" in k) keep=1 ;; n) n=$OPTARG ;; *) exit 2 ;; esac; done
 shift $((OPTIND - 1))
 tasks=("$@"); [ "${#tasks[@]}" -gt 0 ] || { tasks=(); for d in "$here"/quick/tasks/*/; do tasks+=("$(basename "$d")"); done; }
 real_pi="$(command -v pi)"
 TMO=(); for c in timeout gtimeout; do command -v "$c" >/dev/null 2>&1 && { TMO=("$c" 1500); break; }; done
-out="$(mktemp -d)"
+# Explicit template: macOS mktemp -d ignores TMPDIR without one.
+out="$(mktemp -d "${TMPDIR:-/tmp}/pi-quick.XXXXXX")"
+[ "$keep" = 1 ] || trap 'rm -rf "$out"' EXIT
 
 run_one() {  # task arm i
   local task=$1 arm=$2 i=$3 d="$out/$1-$2-$3" t="$here/quick/tasks/$1"
@@ -56,4 +59,4 @@ cat "$out"/*/row.json | jq -s -r '
    | ($g[]|select(.arm=="A")) as $a | ($g[]|select(.arm=="B")) as $b
    | "A cost=\($a.cost*1000|round/1000) fails=\($a.bad)   B cost=\($b.cost*1000|round/1000) fails=\($b.bad) no-pi=\($b.nopi)",
      "REWARD \(if $b.bad>$a.bad or $b.nopi>0 then -1 else (1-$b.cost/([$a.cost,0.000001]|max))*100|round/100 end)")' | column -t -s "$(printf '\t')"
-echo "runs in $out"
+if [ "$keep" = 1 ]; then echo "runs kept in $out"; fi

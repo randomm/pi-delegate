@@ -54,6 +54,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 bench_out_guard || exit 1
+warn_low_space
 
 # Safe-execution env (docs/benchmark.md §safe-execution): no credential
 # prompts, no editor (would hang with no TTY), no pager.
