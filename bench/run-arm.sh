@@ -19,8 +19,6 @@
 #                    the repo is private, arm B never touches GitHub; a
 #                    remote URL is only an explicit override; a local repo
 #                    path also works). NEVER the task REPO.
-#   DELEGATE_SKILL   Skill arm B delegates through: pi-review-loop (default)
-#                    or pi-oneshot
 #   PI_DELEGATE_SHA  Pinned pi-delegate commit to measure (default: the
 #                    remote's default-branch HEAD at the first pin)
 #   CLAUDE_TIMEOUT   Claude wall-clock seconds (default: 10800)
@@ -110,7 +108,6 @@ command -v claude >/dev/null 2>&1 || {
 # reproducible and claude's JSON reports usage against the exact id.
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-5-5}"
 CLAUDE_PERM_MODE="${CLAUDE_PERM_MODE:-auto}"
-DELEGATE_SKILL="${DELEGATE_SKILL:-pi-review-loop}"
 # The pi-delegate pin comes from the pi-delegate repo itself
 # (PI_DELEGATE_REPO), never from the task REPO. The default is the LOCAL
 # pi-delegate repo root (derived from the harness location): the repo is
@@ -206,42 +203,18 @@ task_dir="$(task_dir "$task_id")"
 # Claude to use the pi-delegate skills for the implementation work.
 cat "$task_dir/prompt.md" > "$prompt_file"
 if [ "$arm" = "B" ]; then
-  case "$DELEGATE_SKILL" in
-    pi-review-loop)
-      cat >> "$prompt_file" <<'DELEGSUFFIX'
+  cat >> "$prompt_file" <<'DELEGSUFFIX'
 
 ---
 
 **Delegation instruction (benchmark arm B):**
 
-You have the `pi-delegate` plugin installed, which provides the
-`pi-review-loop` skill: a deterministic bash review loop that delegates a
-code-change task to the `pi` CLI, then reviews the diff and iterates
-(develop → review → fix, with hard caps).
-
-You MUST delegate the implementation work to pi via the `pi-review-loop`
-skill, passing the task description above as the task. Do NOT implement
-the code change yourself — the actual edit work must go through the skill.
-After the loop completes, verify the result by running the task's test
-command (if any) and report the final state (tests pass/fail, what
-changed).
-DELEGSUFFIX
-      ;;
-    pi-oneshot)
-      cat >> "$prompt_file" <<'DELEGSUFFIX'
-
----
-
-**Delegation instruction (benchmark arm B):**
-
-You have the `pi-delegate` plugin installed. Delegate the implementation
-work to pi via the `pi-oneshot` skill, passing the task description above
-as the task. Do NOT implement the code change yourself. When the skill
+You have the `pi-delegate` plugin installed, which provides the `delegate`
+skill. Delegate the implementation work to pi via that skill, passing the
+task description above as the task and the repo's test command as
+`--verify`. Do NOT implement the code change yourself. When the skill
 reports back, report the final state (what changed).
 DELEGSUFFIX
-      ;;
-    *) echo "run-arm: DELEGATE_SKILL must be pi-review-loop or pi-oneshot (got: $DELEGATE_SKILL)" >&2; exit 2 ;;
-  esac
 fi
 
 # --- Timeout wrapper -----------------------------------------------------------
@@ -339,7 +312,6 @@ jq -cn \
   --arg perm_mode "$CLAUDE_PERM_MODE" \
   --arg pi_delegate_sha "$([ "$arm" = "B" ] && echo "$PI_DELEGATE_SHA" || echo "")" \
   --arg config_dir "$config_dir" \
-  --arg delegate_skill "$([ "$arm" = "B" ] && echo "$DELEGATE_SKILL" || echo "")" \
   --arg prompt_file "$prompt_file" \
   --argjson claude_exit "$rc" \
   --argjson agent_ms "$agent_ms" \
@@ -348,7 +320,7 @@ jq -cn \
   --argjson started_ms "${agent_start_ms:-null}" \
   --argjson ended_ms "${agent_end_ms:-null}" \
   '{task:$task, arm:$arm, run:$run, model:$model, perm_mode:$perm_mode,
-    pi_delegate_sha:$pi_delegate_sha, delegate_skill:$delegate_skill, config_dir:$config_dir,
+    pi_delegate_sha:$pi_delegate_sha, config_dir:$config_dir,
     prompt_file:$prompt_file, claude_exit:$claude_exit, agent_ms:$agent_ms,
     started_at:$started_at, ended_at:$ended_at,
     started_ms: (if $started_ms == null then null else $started_ms end),

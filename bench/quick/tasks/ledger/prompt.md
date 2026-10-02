@@ -14,3 +14,5 @@ Add recurring transactions to this ledger package (run tests with
 
 Standard library only; keep existing tests passing; add tests for the new
 behaviour. Do not commit.
+
+Verification command: `python3 -m unittest discover -s tests`

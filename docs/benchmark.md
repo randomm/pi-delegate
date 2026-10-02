@@ -1,5 +1,10 @@
 # Benchmark Protocol
 
+> The review-loop skill this protocol was first run against has been
+> removed (see `docs/benchmark-results.md`); arm B now delegates through the
+> single `delegate` skill. References below to `pi-review-loop`, `--mode json`
+> calls and `pi-oneshot` describe the harness's handling of both call modes.
+
 Benchmark: plain **Claude Code** (arm A) vs **Claude Code + pi-delegate**
 (arm B) on the same tasks in the same target repo. Measures tokens,
 wall-clock, and outcome quality (objective test pass/fail).
@@ -11,7 +16,7 @@ wall-clock, and outcome quality (objective test pass/fail).
 | Claude model | `sonnet` (resolves to `claude-sonnet-5-5`) | same |
 | Permission mode | `auto` (fixed, documented) | same |
 | Plugin | none (fresh `CLAUDE_CONFIG_DIR`, no plugins) | `pi-delegate` installed at pinned commit |
-| Prompt | `prompt.md` (task body verbatim) | `prompt.md` + delegation suffix directing use of `pi-review-loop` |
+| Prompt | `prompt.md` (task body verbatim) | `prompt.md` + delegation suffix directing use of the `delegate` skill |
 | pi shim | installed (logs any accidental pi call) | installed (logs all pi calls) |
 | pi context files | n/a | `--no-context-files` (operator decision, enforced by shim) |
 
@@ -471,7 +476,6 @@ plugin (B, via `--plugin-dir`) in parallel, in a couple of minutes:
 ```
 bench/quick.sh                       # all tasks, 1 run per arm
 bench/quick.sh -n 2 ledger           # 2 runs, one task
-bench/quick.sh -s pi-review-loop     # delegate through the loop instead
 ```
 
 It prints per-run cost/turns/pi calls and `REWARD = 1 - costB/costA`

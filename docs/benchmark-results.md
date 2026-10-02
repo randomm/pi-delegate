@@ -1,4 +1,9 @@
-# Benchmark Results — First MVS Run
+# Benchmark Results
+
+Sections 1-6 are the first run (arm B = the since-removed `pi-review-loop`);
+section 7 and later measure the current `delegate` skill.
+
+## First MVS run
 
 Date: 2026-06-18 · Tasks: 2 · Runs: 3 × 2 arms · Model: `claude-sonnet-5-5`
 
@@ -172,3 +177,26 @@ the Bash tool timeout: the wait was cut at the 120 s default and Claude
 ended its turn while pi was still running. The skill now says
 `timeout: 590000`. Caveats: n = 2-3, run concurrently, one Claude model;
 `pi-review-loop` was not re-measured.
+
+---
+
+## 8. Quick benchmark, single `delegate` skill with `--verify`
+
+`bench/quick.sh -n 2` (4 tiny local tasks, 2 runs per arm, run concurrently;
+pass = hidden check AND the task's own tests; `lines` = diff size). 16/16
+runs passed in both arms. Claude cost, USD (sum over runs):
+
+| Task | Plain Claude | With pi-delegate |
+|---|---|---|
+| json-flag | 0.097 | 0.092 |
+| ledger | 0.202 | 0.113 |
+| merge-ranges | 0.084 | 0.092 |
+| slugify | 0.083 | 0.090 |
+| **Total** | **0.466** | **0.386 (REWARD +0.17)** |
+
+Reading: on the three tiny tasks delegation is break-even (slightly more
+expensive: the skill text plus one tool round-trip cost about what pi saves);
+on `ledger` it is 44% cheaper. Scope note: pi's `ledger` diffs were larger
+(132-143 changed lines vs 78-81), mostly extra tests. Caveats: n = 2, rough
+costs, one Claude model, one self-hosted pi model, and the click tasks were
+not re-run with `--verify`.

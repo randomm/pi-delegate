@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
-# run.sh — pi-oneshot driver: one headless `pi -p` call, run detached and
-# waited on inside bounded foreground calls (Claude Code's Bash tool kills
-# a foreground call at ~10 min; a detached pi run survives that).
+# run.sh — delegate driver: one headless `pi -p` call, optionally gated by a
+# verification command, run detached and waited on inside bounded foreground
+# calls (Claude Code's Bash tool kills a foreground call at ~10 min; a
+# detached run survives that).
 #
 # Usage:
-#   run.sh [--model M] < task     start pi on the task from stdin, then wait
+#   run.sh [--model M] [--verify CMD] < task
+#                                 start pi on the task from stdin, then wait.
+#                                 With --verify, CMD (run via bash -c in the
+#                                 repo) must pass after pi; if it fails, pi
+#                                 gets ONE more call with the failure output.
 #   run.sh --wait  RUN_DIR        keep waiting for a run that was still going
 #   run.sh --abort RUN_DIR        stop a run (kills its process group)
 #
-# Output: "EXIT CODE: <n>", the tail of pi's output, then `git status`/
-# `git diff --stat` of the working tree. While the run is still going after
+# Output: "EXIT CODE: <n>", the tail of pi's output, "VERIFY: PASS|FAIL
+# (retries=n)" with the failure tail when --verify was given, then `git
+# status`/`git diff --stat` of the working tree. While the run is still going after
 # the wait budget it prints "STILL RUNNING" and the --wait command to repeat.
 #
 # Environment: PI_TIMEOUT (default 1800 s), PI_KILL_AFTER (default 30 s),
-# PI_WAIT_BUDGET (default 540 s per call), PI_DELEGATE_UNSAFE=1 skips the
+# PI_VERIFY_TIMEOUT (default 600 s), PI_WAIT_BUDGET (default 540 s per call),
+# PI_DELEGATE_UNSAFE=1 skips the
 # safety preflight (default branch / secret files / push neutralisation).
 # Exit codes: 0 done (pi exit code is in the output), 1 run died or pi
 # missing, 2 usage/knob error, 3 preflight refusal.
@@ -23,7 +30,8 @@ set -euo pipefail
 PI_TIMEOUT="${PI_TIMEOUT:-1800}"
 PI_KILL_AFTER="${PI_KILL_AFTER:-30}"
 PI_WAIT_BUDGET="${PI_WAIT_BUDGET:-540}"
-for knob in PI_TIMEOUT PI_KILL_AFTER PI_WAIT_BUDGET; do
+PI_VERIFY_TIMEOUT="${PI_VERIFY_TIMEOUT:-600}"
+for knob in PI_TIMEOUT PI_KILL_AFTER PI_WAIT_BUDGET PI_VERIFY_TIMEOUT; do
   v="${!knob}"
   if ! [[ "$v" =~ ^[0-9]+$ ]] || [ "$v" -lt 1 ]; then
     echo "ERROR: $knob must be a positive integer (got: $v)" >&2
@@ -62,6 +70,10 @@ report() {
   fi
   echo "EXIT CODE: $(cat "$rc_file")  (124/137 = timed out)"
   tail -n 40 "$log_file"
+  if [ -s "$d/verify.txt" ]; then
+    cat "$d/verify.txt"
+    case "$(cat "$d/verify.txt")" in "VERIFY: FAIL"*) tail -n 30 "$d/verify.log" ;; esac
+  fi
   echo "--- working tree ---"
   git status --short 2>/dev/null | head -20 || true
   git diff --stat 2>/dev/null | tail -n 20 || true
@@ -95,12 +107,14 @@ case "${1:-}" in
 esac
 
 model_args=()
-if [ "${1:-}" = "--model" ]; then
-  [ -n "${2:-}" ] || { echo "usage: $0 --model MODEL < task" >&2; exit 2; }
-  model_args=(--model "$2")
-  shift 2
-fi
-[ "$#" -eq 0 ] || { echo "usage: $0 [--model M] < task | --wait RUN_DIR | --abort RUN_DIR" >&2; exit 2; }
+verify=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model) [ -n "${2:-}" ] || { echo "usage: $0 --model MODEL < task" >&2; exit 2; }; model_args=(--model "$2"); shift 2 ;;
+    --verify) [ -n "${2:-}" ] || { echo "usage: $0 --verify CMD < task" >&2; exit 2; }; verify="$2"; shift 2 ;;
+    *) echo "usage: $0 [--model M] [--verify CMD] < task | --wait RUN_DIR | --abort RUN_DIR" >&2; exit 2 ;;
+  esac
+done
 
 task="$(cat)"
 [ -n "$task" ] || { echo "ERROR: empty task on stdin" >&2; exit 2; }
@@ -121,7 +135,7 @@ else
   echo "WARNING: no GNU timeout/gtimeout found — pi runs without a time limit" >&2
 fi
 
-# --- Safety preflight (issue #30; same checks as orchestrate.sh) -----------
+# --- Safety preflight (issue #30; push neutralisation, default branch, secrets) -----------
 if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
   default_branch=""
   head_ref="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" || head_ref=""
@@ -189,12 +203,41 @@ if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
   export GIT_CONFIG_COUNT="${_gc}"
 fi
 
+# One pi call (stdin: the task file $1), output appended to pi.log.
+run_pi() {
+  local rc=0
+  ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates ${model_args[@]+"${model_args[@]}"} < "$1" >> "$D/pi.log" 2>&1 || rc=$?
+  return "$rc"
+}
+
+# pi, then (with --verify) the verification command, with one fix retry.
+# pi.rc is written last: it is the completion signal.
+pipeline() {
+  local rc=0 retries=0 vrc
+  : > "$D/pi.log"
+  run_pi "$D/task.txt" || rc=$?
+  if [ -n "$verify" ] && [ "$rc" -eq 0 ]; then
+    while :; do
+      vrc=0
+      ${vwrap[@]+"${vwrap[@]}"} bash -c "$verify" > "$D/verify.log" 2>&1 || vrc=$?
+      if [ "$vrc" -eq 0 ]; then echo "VERIFY: PASS (retries=$retries)" > "$D/verify.txt"; break; fi
+      if [ "$retries" -ge 1 ]; then echo "VERIFY: FAIL (retries=$retries, exit $vrc)" > "$D/verify.txt"; break; fi
+      retries=1
+      { cat "$D/task.txt"; printf '\n\nThe verification command `%s` failed (exit %s) with:\n' "$verify" "$vrc"; tail -n 40 "$D/verify.log"; printf '\nFix the cause in the code. Do not change the verification command or weaken tests.\n'; } > "$D/retry.txt"
+      run_pi "$D/retry.txt" || { rc=$?; break; }
+    done
+  fi
+  echo "$rc" > "$D/pi.rc"
+}
+
 # Run files live outside the repo (untracked files there would show up in
 # the diff).
 D="$(mktemp -d)"
 printf '%s' "$task" > "$D/task.txt"
+vwrap=()
+[ -z "$timeout_cmd" ] || vwrap=("$timeout_cmd" --kill-after="$PI_KILL_AFTER" "$PI_VERIFY_TIMEOUT")
 set -m
-( rc=0; ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates ${model_args[@]+"${model_args[@]}"} < "$D/task.txt" > "$D/pi.log" 2>&1 || rc=$?; echo "$rc" > "$D/pi.rc" ) &
+( pipeline ) &
 echo "$!" > "$D/pi.pid"
 set +m
 echo "RUN_DIR=$D"

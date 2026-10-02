@@ -1,15 +1,13 @@
 #!/usr/bin/env bats
-# Tests for skills/pi-oneshot/run.sh (a stub pi stands in for the real
-# one) and for the timeout contract that docs/configuration.md owns.
+# Tests for skills/delegate/run.sh (a stub pi stands in for the real
+# one).
 
 setup() {
   local test_dir root
   test_dir=$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)
   root=$(cd "$test_dir/../../.." && pwd)
-  SKILL_FILE="$root/skills/pi-oneshot/SKILL.md"
-  RUN="$root/skills/pi-oneshot/run.sh"
-  README_FILE="$root/README.md"
-  CONFIG_FILE="$root/docs/configuration.md"
+  SKILL_FILE="$root/skills/delegate/SKILL.md"
+  RUN="$root/skills/delegate/run.sh"
 
   # Throwaway repo on a feature branch, plus a stub pi that records its
   # argv/stdin/env and optionally edits a file, sleeps, or fails.
@@ -21,6 +19,7 @@ printf '%s\n' "$@" > "$STUB_DIR/argv"
 cat > "$STUB_DIR/stdin"
 env | grep '^GIT_CONFIG_COUNT=' > "$STUB_DIR/env" || true
 [ -z "$STUB_WRITE" ] || echo changed > "$STUB_WRITE"
+grep -q 'verification command' "$STUB_DIR/stdin" && echo fixed > fixed.txt
 [ -z "$STUB_SLEEP" ] || sleep "$STUB_SLEEP"
 echo "pi says done"
 exit "${STUB_EXIT:-0}"
@@ -42,73 +41,7 @@ teardown() {
   rm -rf "$REPO" "$BIN"
 }
 
-# --- docs/configuration.md is the single source of truth for the timeout
-# contract (issue #45); the SKILL.md must agree with it. ---
-
-@test "docs/configuration.md owns PI_TIMEOUT/PI_KILL_AFTER with the 1800/30 defaults" {
-  grep -qF 'PI_TIMEOUT:-1800' "$CONFIG_FILE"
-  grep -qF 'PI_KILL_AFTER:-30' "$CONFIG_FILE"
-}
-
-@test "docs/configuration.md owns the timeout wrapper (--kill-after)" {
-  grep -q -- '--kill-after' "$CONFIG_FILE"
-}
-
-@test "docs/configuration.md owns the gtimeout fallback" {
-  grep -q 'gtimeout' "$CONFIG_FILE"
-}
-
-@test "docs/configuration.md owns 124/137 = timed out" {
-  grep -qE '(^|[^0-9])124([^0-9]|$)' "$CONFIG_FILE"
-  grep -qE '(^|[^0-9])137([^0-9]|$)' "$CONFIG_FILE"
-}
-
-@test "docs/configuration.md owns the unbounded-with-warning path" {
-  grep -qEi 'unbounded|no time limit|without a time limit' "$CONFIG_FILE"
-  grep -qi 'warn' "$CONFIG_FILE"
-}
-
-@test "docs/configuration.md owns the long-run guidance (detached + foreground wait)" {
-  grep -q 'detached' "$CONFIG_FILE"
-  grep -q 'pid' "$CONFIG_FILE"
-  run grep -q 'run_in_background' "$CONFIG_FILE"
-  [ "$status" -ne 0 ]
-}
-
-@test "docs/configuration.md owns the worst-case loop wall clock (183 min, not 33)" {
-  grep -q '183 min' "$CONFIG_FILE"
-}
-
-@test "README carries no timeout-contract literals (single source: docs/configuration.md)" {
-  # The README points at configuration.md instead of re-stating the
-  # contract, so the literals must NOT appear there. (the long-run
-  # pointer may still appear; the contract literals may not.)
-  run grep -qF 'PI_TIMEOUT:-1800' "$README_FILE"
-  [ "$status" -ne 0 ]
-  run grep -qF 'PI_KILL_AFTER:-30' "$README_FILE"
-  [ "$status" -ne 0 ]
-  run grep -q -- '--kill-after' "$README_FILE"
-  [ "$status" -ne 0 ]
-  run grep -q 'gtimeout' "$README_FILE"
-  [ "$status" -ne 0 ]
-  run grep -qE '(^|[^0-9])124([^0-9]|$)' "$README_FILE"
-  [ "$status" -ne 0 ]
-  run grep -qE '(^|[^0-9])137([^0-9]|$)' "$README_FILE"
-  [ "$status" -ne 0 ]
-  run grep -qi 'unbounded' "$README_FILE"
-  [ "$status" -ne 0 ]
-  run grep -q '183 min' "$README_FILE"
-  [ "$status" -ne 0 ]
-}
-
-# --- Cross-file agreement: docs/configuration.md vs pi-oneshot SKILL.md
-# (SKILL.md is the executable wrapper spec; it must agree with the doc.) ---
-
-@test "SKILL.md and docs/configuration.md agree on the 1800 default and 124/137" {
-  grep -qF '1800' "$SKILL_FILE"
-  grep -qE '(^|[^0-9])124([^0-9]|$)' "$SKILL_FILE"
-  grep -qE '(^|[^0-9])137([^0-9]|$)' "$SKILL_FILE"
-}
+# --- SKILL.md contract ---
 
 @test "SKILL.md tells Claude to raise the Bash timeout and never use run_in_background" {
   grep -q 'timeout: 590000\|`590000`' "$SKILL_FILE"
@@ -116,7 +49,10 @@ teardown() {
   [ "$status" -ne 0 ]
 }
 
-@test "SKILL.md documents --wait, --abort and PI_DELEGATE_UNSAFE" {
+@test "SKILL.md documents --verify, --wait, --abort, 124/137 and PI_DELEGATE_UNSAFE" {
+  grep -q -- '--verify' "$SKILL_FILE"
+  grep -qE '(^|[^0-9])124([^0-9]|$)' "$SKILL_FILE"
+  grep -qE '(^|[^0-9])137([^0-9]|$)' "$SKILL_FILE"
   grep -q -- '--wait' "$SKILL_FILE"
   grep -q -- '--abort' "$SKILL_FILE"
   grep -q 'PI_DELEGATE_UNSAFE=1' "$SKILL_FILE"
@@ -282,4 +218,32 @@ teardown() {
   git checkout -q -b master
   run bash "$RUN" <<< "t"
   [ "$status" -eq 3 ]
+}
+
+@test "run.sh --verify: passing command -> VERIFY: PASS (retries=0), one pi call" {
+  run bash "$RUN" --verify "true" <<< "t"
+  [[ "$output" == *"VERIFY: PASS (retries=0)"* ]]
+}
+
+@test "run.sh --verify: failing command is retried once with the failure output, then passes" {
+  run bash "$RUN" --verify 'echo BOOM-DETAIL; test -f fixed.txt' <<< "t"
+  [[ "$output" == *"VERIFY: PASS (retries=1)"* ]]
+  grep -q 'BOOM-DETAIL' "$STUB_DIR/stdin"
+}
+
+@test "run.sh --verify: still failing after the one retry -> VERIFY: FAIL with the output tail" {
+  run bash "$RUN" --verify 'echo STILL-BAD; false' <<< "t"
+  [[ "$output" == *"VERIFY: FAIL (retries=1, exit 1)"* ]]
+  [[ "$output" == *"STILL-BAD"* ]]
+}
+
+@test "run.sh --verify: not run when pi itself failed" {
+  STUB_EXIT=5 run bash "$RUN" --verify "true" <<< "t"
+  [[ "$output" == *"EXIT CODE: 5"* ]]
+  [[ "$output" != *"VERIFY:"* ]]
+}
+
+@test "run.sh: no VERIFY line without --verify" {
+  run bash "$RUN" <<< "t"
+  [[ "$output" != *"VERIFY:"* ]]
 }
