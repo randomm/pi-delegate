@@ -1,18 +1,32 @@
 # pi-delegate
 
-**Hand coding tasks from Claude Code to a cheaper model. Same tests pass, fewer Claude tokens.**
+**Claude Code does the thinking. A cheaper model does the typing.**
 
-Claude plans and checks; [pi](https://pi.dev) (running any model you choose, even a local one) does the reading,
-editing and test-running that burn most of the tokens.
+![You ask Claude Code to delegate; Claude writes a brief; run.sh runs safety checks; pi, on any model you pick, reads, edits and runs your tests; your verify command decides, with one retry; Claude gets a short result. On multi-file tasks Claude's cost falls from $0.082 to $0.055 (−33%) because the work moves to pi.](docs/images/pi-delegate-flow.svg)
 
-| Claude cost per task (Sonnet 5.5; pi on a self-hosted Qwen) | Plain Claude | With pi-delegate |
+Ask Claude Code to "delegate to pi" and the heavy part of a coding task (reading files, editing, running tests)
+runs on [pi](https://pi.dev), an open-source coding agent that can drive any model you pick, even one on your own
+machine. Claude only writes the brief and reads a short result, and your tests decide whether it worked.
+
+> On multi-file tasks, delegating cut Claude's cost by **a third (−33%)** with every hidden test still passing.
+
+| Claude cost per run (benchmark) | Plain Claude | With pi-delegate |
 |---|---|---|
-| Multi-file features (3 tasks, 6 runs each arm) | $0.082 | **$0.055** (−33%) |
-| Tiny edits (4 tasks, 8 runs each arm) | $0.042 | $0.047 (+11%) |
+| Multi-file features | $0.082 | **$0.055** (−33%) |
+| Tiny edits (ten-line fixes) | $0.042 | $0.047 (+11%, so don't delegate these) |
 | Runs passing the hidden checks | 28 / 28 | 28 / 28 |
 
-Delegation pays off once a task needs real reading and editing across files; on a ten-line fix it costs slightly more, so do those yourself.
-Numbers, method and how to rerun them: [docs/benchmark.md](docs/benchmark.md) · [results](docs/benchmark-results.md).
+**The honest fine print.** The table counts Claude's cost only: pi's own spend comes on top (nothing if you
+self-host, cents on a hosted cheap model). Delegated runs are also slower, several times in our runs on a
+self-hosted pi (about 25 s plain vs 2-3 minutes). Samples are small (2 runs per task); the benchmark takes
+about five minutes to rerun yourself ([how](#rerun-the-benchmark)).
+
+## Is it for you?
+
+- **Yes:** you use Claude Code, your tasks touch several files, and you want fewer Claude tokens (or less of your
+  usage limit) spent on routine implementation, with a test command that can say whether the work is right.
+- **No:** quick one-file edits (Claude alone is cheaper), tasks with no way to check the result, or when speed
+  matters more than cost.
 
 ## Install (Claude Code)
 
@@ -21,14 +35,15 @@ Numbers, method and how to rerun them: [docs/benchmark.md](docs/benchmark.md) ·
 /plugin install pi-delegate@pi-delegate
 ```
 
-You also need `pi` set up once (`npm install -g @earendil-works/pi-coding-agent`, then run `pi` and `/login` or
-export an API key), plus `jq`. On macOS, `brew install coreutils` provides the `timeout` that bounds each pi call.
+You also need `pi` once: `npm install -g @earendil-works/pi-coding-agent`, then run `pi`, `/login` (or export an API
+key) and pick a model with `/model`. Cheap and local models work; the benchmark used a self-hosted Qwen. Also
+install `jq`; on macOS `brew install coreutils` gives the `timeout` that bounds each pi call.
 
 ## Use
 
 > delegate to pi: add a `--json` flag to cli.py, verify with `python3 -m unittest`
 
-Claude makes one call; pi does the work; the project's verify command decides whether it worked:
+Claude makes one call; pi does the work; your verify command decides whether it worked:
 
 ```
 EXIT CODE: 0
@@ -44,18 +59,20 @@ instead of claiming success.
 
 - **A deterministic gate, not a second opinion.** `--verify "<your tests>"` runs after pi. No model reviews the
   work: a same-model reviewer approves most changes, tests don't.
-- **Claude is told not to re-do the work** when the gate passes (re-reading the diff is what ate the savings
-  in early benchmarks).
+- **Claude is told not to redo the work** when the gate passes. Re-reading the diff and re-running the tests is
+  exactly what ate the savings in our first benchmark.
 - **Guardrails:** it refuses to run on your default branch or next to `.env`/`*.pem`/`*.key` files, and disables
-  `git push` for pi. This guards against mistakes, not a malicious model. For stronger isolation set `PI_DELEGATE_WRAP` (sandbox
-  recipes in [docs/configuration.md](docs/configuration.md#sandbox-optional)) or use a disposable clone or container.
+  `git push` for pi. This guards against mistakes, not a malicious model. For stronger isolation set
+  `PI_DELEGATE_WRAP` (sandbox recipes in [docs/configuration.md](docs/configuration.md#sandbox-optional)) or use a
+  disposable clone or container.
 
 ## Other agents
 
-`skills/delegate/run.sh` is plain bash. Any agent that can run a shell command can use it:
+`skills/delegate/run.sh` in this repo is plain bash. Any agent that can run a shell command can use it:
 
 ```bash
-bash skills/delegate/run.sh --verify "pytest -q" <<'TASK'
+git clone https://github.com/randomm/pi-delegate.git
+bash pi-delegate/skills/delegate/run.sh --verify "pytest -q" <<'TASK'
 Fix the failing date parsing in utils.py; do not commit.
 TASK
 ```
@@ -63,12 +80,12 @@ TASK
 ## Rerun the benchmark
 
 ```
-bench/quick.sh -n 3     # ~5 minutes: plain Claude vs Claude + pi-delegate, prints REWARD
+bench/quick.sh -n 3     # about five minutes: plain Claude vs Claude + pi-delegate, prints a REWARD score
 ```
 
-Details, tasks and the slower real-repo protocol: [docs/benchmark.md](docs/benchmark.md).
-Settings (timeouts, safety opt-out): [docs/configuration.md](docs/configuration.md).
+Method, tasks and the slower real-repo protocol: [docs/benchmark.md](docs/benchmark.md) ·
+[results](docs/benchmark-results.md). Settings (timeouts, safety, sandbox): [docs/configuration.md](docs/configuration.md).
 
 ## License
 
-Apache License 2.0 — see LICENSE. Copyright 2026 Janni Turunen.
+Apache License 2.0, see LICENSE. Copyright 2026 Janni Turunen.
