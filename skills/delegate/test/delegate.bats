@@ -414,3 +414,13 @@ make_wrapper() {
   grep -q 'PI_DELEGATE_WRAP' "$cfg"
   grep -q 'not a security boundary' "$cfg"
 }
+
+@test "run.sh: the wrapper sees PI_DELEGATE_RUN (the run dir) for the verify command too" {
+  printf '%s\n' '#!/bin/sh' 'printf "%s|%s\n" "$PI_DELEGATE_RUN" "$*" >> "$STUB_DIR/wraplog"' 'exec "$@"' > "$BIN/wrapper"
+  chmod +x "$BIN/wrapper"
+  PI_DELEGATE_WRAP="$BIN/wrapper" run bash "$RUN" --verify true <<< "t"
+  dir="$(printf '%s\n' "$output" | sed -n 's/^RUN_DIR=//p')"
+  [ -n "$dir" ]
+  grep -q "^$dir|$BIN/pi " "$STUB_DIR/wraplog"
+  grep -q "^$dir|bash -c true" "$STUB_DIR/wraplog"
+}

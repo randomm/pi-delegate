@@ -260,7 +260,8 @@ pipeline() {
   if [ -n "$verify" ] && [ "$rc" -eq 0 ]; then
     while :; do
       vrc=0
-      ${vwrap[@]+"${vwrap[@]}"} bash -c "$verify" > "$D/verify.log" 2>&1 || vrc=$?
+      PI_DELEGATE_RUN="$D" ${vwrap[@]+"${vwrap[@]}"} bash -c "$verify" > "$D/verify.log" 2>&1 || vrc=$?
+      reap "$D"
       if [ "$vrc" -eq 0 ]; then echo "VERIFY: PASS (retries=$retries)" > "$D/verify.txt"; break; fi
       if [ "$retries" -ge 1 ]; then echo "VERIFY: FAIL (retries=$retries, exit $vrc)" > "$D/verify.txt"; break; fi
       retries=1
