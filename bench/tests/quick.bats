@@ -66,3 +66,12 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *after* ]]
 }
+
+@test "quick.sh survives a run that leaves an empty diff (issue #82)" {
+  printf '%s\n' '#!/bin/sh' 'cat >/dev/null' \
+    'echo "{\"total_cost_usd\":0.01,\"num_turns\":1,\"duration_ms\":1000}"' > "$STUBS/claude"
+  run timeout 120 bash "$BENCH_DIR/quick.sh" slugify </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *REWARD* ]]
+  [[ "$output" == *"lines=0"* ]]
+}

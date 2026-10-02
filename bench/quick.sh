@@ -39,7 +39,7 @@ run_one() {  # task arm i
   ( cd "$d/repo" && PATH="$d/bin:$PATH" CLAUDE_CONFIG_DIR="$d/cfg" ${TMO[@]+"${TMO[@]}"} claude -p --output-format json \
       --model "${CLAUDE_MODEL:-claude-sonnet-5-5}" --permission-mode auto "${plug[@]+"${plug[@]}"}" \
       < "$d/prompt.txt" > "$d/out.json" 2> "$d/err.log" ) || true
-  local lines; lines="$(cd "$d/repo" && git add -A -N . 2>/dev/null; git diff --numstat | grep -v '__pycache__\|\.pyc' | awk '{s+=$1+$2} END {print s+0}')"
+  local lines; lines="$(cd "$d/repo" && git add -A -N . 2>/dev/null; git diff --numstat | grep -v '__pycache__\|\.pyc' | awk '{s+=$1+$2} END {print s+0}' || true)"
   local pass=false
   ( cd "$d/repo" && cp "$t/check.py" ./_check.py && python3 _check.py >/dev/null 2>&1 \
     && { [ ! -d tests ] || python3 -m unittest discover -s tests >/dev/null 2>&1; } ) && pass=true
