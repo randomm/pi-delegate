@@ -18,6 +18,9 @@ setup() {
 printf '%s\n' "$@" > "$STUB_DIR/argv"
 cat > "$STUB_DIR/stdin"
 env | grep '^GIT_CONFIG_COUNT=' > "$STUB_DIR/env" || true
+env | grep '^PI_DELEGATE_RUN=' > "$STUB_DIR/marker" || true
+[ -z "$STUB_IGNORE_TERM" ] || trap '' TERM
+[ -z "$STUB_DETACH" ] || bash -c 'set -m; sleep 300 >/dev/null 2>&1 & echo $! > "$STUB_DIR/child.pid"'
 [ -z "$STUB_WRITE" ] || echo changed > "$STUB_WRITE"
 grep -q 'verification command' "$STUB_DIR/stdin" && echo fixed > fixed.txt
 [ -z "$STUB_SLEEP" ] || sleep "$STUB_SLEEP"
@@ -73,7 +76,7 @@ teardown() {
   [[ "$output" == *"EXIT CODE: 0"* ]]
   [[ "$output" == *"pi says done"* ]]
   [[ "$output" == *"?? new.txt"* ]]
-  [ "$(cat "$STUB_DIR/stdin")" = "do the thing" ]
+  grep -q '^do the thing$' "$STUB_DIR/stdin"
   grep -qx -- '--no-session' "$STUB_DIR/argv"
   grep -qx -- '-p' "$STUB_DIR/argv"
 }
@@ -246,4 +249,77 @@ teardown() {
 @test "run.sh: no VERIFY line without --verify" {
   run bash "$RUN" <<< "t"
   [[ "$output" != *"VERIFY:"* ]]
+}
+
+# --- leftover-child reaping (issue #56): pi's bash-tool children run in
+# their own sessions, so the timeout's group kill never reaches them. run.sh
+# tags pi's environment with PI_DELEGATE_RUN=<run dir> and kills every process
+# carrying the tag after each pi call and on --abort. The environment scan is
+# complete on Linux (/proc); the tests skip where /proc is absent.
+
+# Wait up to ~5 s for the detached child recorded by the stub to be gone.
+child_dead() {
+  for _ in $(seq 1 50); do
+    kill -0 "$(cat "$STUB_DIR/child.pid")" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+@test "run.sh: pi's environment carries the PI_DELEGATE_RUN marker (the run dir)" {
+  run bash "$RUN" <<< "t"
+  dir="$(printf '%s\n' "$output" | sed -n 's/^RUN_DIR=//p')"
+  [ "$(cat "$STUB_DIR/marker")" = "PI_DELEGATE_RUN=$dir" ]
+}
+
+@test "run.sh: the task handed to pi asks for per-command timeouts" {
+  run bash "$RUN" <<< "t"
+  grep -q 'timeout parameter' "$STUB_DIR/stdin"
+}
+
+@test "run.sh: a detached child left behind by pi is reaped when pi exits" {
+  [ -d /proc/self ] || skip "environment scan needs /proc"
+  STUB_DETACH=1 run bash "$RUN" <<< "t"
+  [[ "$output" == *"EXIT CODE: 0"* ]]
+  child_dead
+}
+
+@test "run.sh: reaping spares processes without the marker" {
+  [ -d /proc/self ] || skip "environment scan needs /proc"
+  sleep 300 &
+  bystander=$!
+  STUB_DETACH=1 run bash "$RUN" <<< "t"
+  kill -0 "$bystander"
+  kill "$bystander"
+}
+
+@test "run.sh: --abort reaps a detached child (also with a trailing slash)" {
+  [ -d /proc/self ] || skip "environment scan needs /proc"
+  STUB_DETACH=1 STUB_SLEEP=60 bash "$RUN" <<< "t" > "$REPO/out.txt" 2>&1 &
+  waiter=$!
+  for _ in $(seq 1 50); do
+    [ -s "$STUB_DIR/child.pid" ] && break
+    sleep 0.1
+  done
+  dir="$(sed -n 's/^RUN_DIR=//p' "$REPO/out.txt")"
+  run bash "$RUN" --abort "$dir/"
+  [[ "$output" == *"aborted"* ]]
+  wait "$waiter" || true
+  child_dead
+}
+
+@test "run.sh: a SIGKILLed pi (timeout path) leaves no child behind" {
+  [ -d /proc/self ] || skip "environment scan needs /proc"
+  command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || skip "no timeout binary"
+  STUB_DETACH=1 STUB_IGNORE_TERM=1 STUB_SLEEP=30 PI_TIMEOUT=1 PI_KILL_AFTER=1 run bash "$RUN" <<< "t"
+  [[ "$output" == *"EXIT CODE: 137"* ]]
+  child_dead
+}
+
+@test "run.sh --verify: children of the retry call are reaped too" {
+  [ -d /proc/self ] || skip "environment scan needs /proc"
+  STUB_DETACH=1 run bash "$RUN" --verify 'test -f fixed.txt' <<< "t"
+  [[ "$output" == *"VERIFY: PASS (retries=1)"* ]]
+  child_dead
+  grep -q 'timeout parameter' "$STUB_DIR/stdin"
 }

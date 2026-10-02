@@ -4,7 +4,7 @@ Environment variables read by `skills/delegate/run.sh`. None are required.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PI_TIMEOUT` | 1800 | Seconds allowed for one pi call. On expiry pi gets SIGTERM, and SIGKILL after `PI_KILL_AFTER`. |
+| `PI_TIMEOUT` | 1800 | Seconds allowed for one pi call. On expiry pi gets SIGTERM, and SIGKILL after `PI_KILL_AFTER`. A hung command pi started is not killed earlier. |
 | `PI_KILL_AFTER` | 30 | Grace seconds between SIGTERM and SIGKILL. |
 | `PI_VERIFY_TIMEOUT` | 600 | Seconds allowed for the `--verify` command. |
 | `PI_WAIT_BUDGET` | 540 | Seconds one `run.sh` call waits before printing `STILL RUNNING` (keep it under the Bash tool's 10-minute limit). |
@@ -19,6 +19,21 @@ The pi call is wrapped in GNU `timeout --kill-after=$PI_KILL_AFTER $PI_TIMEOUT`
 **124** means SIGTERM at the deadline and **137** means SIGKILL: both mean
 "timed out". If neither binary supports `--kill-after`, pi runs unbounded
 and `run.sh` prints a warning.
+
+## Leftover processes
+
+pi runs each bash-tool command in its own session, so the timeout's signal
+does not reach those commands directly: on SIGTERM pi normally stops its own
+tool commands, but after SIGKILL it cannot. `run.sh` therefore tags pi's
+environment with `PI_DELEGATE_RUN=<run dir>` and, after every pi call and on
+`--abort`, kills every process still carrying the tag, best effort. That
+includes servers the task deliberately left running. The scan is complete on
+Linux (`/proc`); on macOS it sees only non-Apple binaries (for example
+Homebrew or uv Python, node), and was checked on macOS 26.5 only.
+
+This does not stop a hung test early: it still blocks the call until
+`PI_TIMEOUT`. The task text asks pi to pass its bash tool's `timeout`
+parameter, which the model may ignore.
 
 ## Long runs
 
