@@ -18,6 +18,12 @@
 # status`/`git diff --stat` of the working tree. While the run is still going after
 # the wait budget it prints "STILL RUNNING" and the --wait command to repeat.
 #
+# PI_DELEGATE_WRAP="cmd args": a command prefix run in front of every pi call
+# and the --verify command (inside timeout). If its first word is not an
+# executable the run is refused (exit 3), also under PI_DELEGATE_UNSAFE=1.
+# Whitespace-split; for anything quoted point it at a script that execs "$@".
+# See docs/configuration.md (Sandbox) for example recipes.
+#
 # Environment: PI_TIMEOUT (default 1800 s), PI_KILL_AFTER (default 30 s),
 # PI_VERIFY_TIMEOUT (default 600 s), PI_WAIT_BUDGET (default 540 s per call),
 # PI_DELEGATE_UNSAFE=1 skips the
@@ -160,6 +166,14 @@ if [ -n "$timeout_cmd" ]; then
 else
   echo "WARNING: no GNU timeout/gtimeout found — pi runs without a time limit" >&2
 fi
+# A sandbox the user asked for must never be silently dropped: refuse when
+# the wrapper is missing (PI_DELEGATE_UNSAFE does not cover this).
+userwrap=()
+if [ -n "${PI_DELEGATE_WRAP:-}" ]; then
+  IFS=' ' read -r -a userwrap <<< "$PI_DELEGATE_WRAP"
+  command -v "${userwrap[0]:-}" >/dev/null 2>&1 || { echo "REFUSED: PI_DELEGATE_WRAP command not found: ${userwrap[0]:-}" >&2; exit 3; }
+  wrap+=("${userwrap[@]}")
+fi
 
 # --- Safety preflight (issue #30; push neutralisation, default branch, secrets) -----------
 if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
@@ -263,6 +277,7 @@ D="$(mktemp -d)"
 printf '%s\n\nWhen running tests, builds or servers with the bash tool, always pass its timeout parameter (in seconds): about 120 for a single test file, more for a full suite.\n' "$task" > "$D/task.txt"
 vwrap=()
 [ -z "$timeout_cmd" ] || vwrap=("$timeout_cmd" --kill-after="$PI_KILL_AFTER" "$PI_VERIFY_TIMEOUT")
+vwrap+=(${userwrap[@]+"${userwrap[@]}"})
 set -m
 ( pipeline ) &
 echo "$!" > "$D/pi.pid"
