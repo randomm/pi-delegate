@@ -65,18 +65,20 @@ report() {
   done
   if [ ! -s "$rc_file" ]; then
     echo "RUN DIED — no exit code recorded; tail of log:"
-    tail -n 20 "$log_file"
+    tail -c 800 "$log_file"
     return 1
   fi
   echo "EXIT CODE: $(cat "$rc_file")  (124/137 = timed out)"
-  tail -n 40 "$log_file"
+  # Bounded on purpose: everything printed here is re-read (and paid for) by
+  # the orchestrating model.
+  tail -c 1200 "$log_file"
   if [ -s "$d/verify.txt" ]; then
     cat "$d/verify.txt"
-    case "$(cat "$d/verify.txt")" in "VERIFY: FAIL"*) tail -n 30 "$d/verify.log" ;; esac
+    case "$(cat "$d/verify.txt")" in "VERIFY: FAIL"*) tail -c 1500 "$d/verify.log" ;; esac
   fi
   echo "--- working tree ---"
-  git status --short 2>/dev/null | head -20 || true
-  git diff --stat 2>/dev/null | tail -n 20 || true
+  git status --short 2>/dev/null | head -12 || true
+  git diff --stat 2>/dev/null | tail -n 12 || true
 }
 
 abort() {

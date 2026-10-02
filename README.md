@@ -7,11 +7,11 @@ editing and test-running that burn most of the tokens.
 
 | Claude cost per task (Sonnet 5.5; pi on a self-hosted Qwen) | Plain Claude | With pi-delegate |
 |---|---|---|
-| Multi-file feature (`ledger`, 6 files) | $0.10 | **$0.057** (−44%) |
-| Tiny one-function tasks (×3) | $0.04–0.05 | $0.045 (break-even) |
-| Tasks passing the hidden checks | 16 / 16 | 16 / 16 |
+| Multi-file features (3 tasks, 6 runs each arm) | $0.082 | **$0.055** (−33%) |
+| Tiny edits (4 tasks, 8 runs each arm) | $0.042 | $0.047 (+11%) |
+| Runs passing the hidden checks | 28 / 28 | 28 / 28 |
 
-Delegation pays off once a task needs real reading and editing; on a ten-line fix there is nothing to save.
+Delegation pays off once a task needs real reading and editing across files; on a ten-line fix it costs slightly more, so do those yourself.
 Numbers, method and how to rerun them: [docs/benchmark.md](docs/benchmark.md) · [results](docs/benchmark-results.md).
 
 ## Install (Claude Code)

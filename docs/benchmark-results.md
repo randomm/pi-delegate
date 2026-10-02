@@ -200,3 +200,31 @@ on `ledger` it is 44% cheaper. Scope note: pi's `ledger` diffs were larger
 (132-143 changed lines vs 78-81), mostly extra tests. Caveats: n = 2, rough
 costs, one Claude model, one self-hosted pi model, and the click tasks were
 not re-run with `--verify`.
+
+---
+
+## 9. Harder tasks and output trimming
+
+Three multi-file tasks on a 6-file ledger package were added to `bench/quick.sh`
+(`ledger`, `ledger-budget`, `ledger-export`) plus a mechanical rename
+(`ledger-rename`). Two tuning changes followed the first run: `run.sh` prints
+at most about 1.2 KB of pi's final text (the result is re-read, and paid for,
+by Claude), and the skill asks for a one-or-two-sentence reply and a minimal,
+in-scope change. Final run, `bench/quick.sh -n 2`, all 8 tasks: 28/28 runs
+pass in both arms (the earlier run had one delegated `ledger-export` failure
+caused by an under-specified task, since tightened, not by delegation).
+
+| Class | Plain Claude (mean/run) | With pi-delegate | Change |
+|---|---|---|---|
+| `ledger` | $0.103 | $0.054 | −47% |
+| `ledger-budget` | $0.081 | $0.060 | −26% |
+| `ledger-export` | $0.063 | $0.052 | −17% |
+| Multi-file features combined | $0.082 | $0.055 | −33% |
+| Tiny edits (`slugify`, `json-flag`, `merge-ranges`, `ledger-rename`) | $0.042 | $0.047 | +11% |
+| **All runs, total** | **$0.837** | **$0.712** | **REWARD +0.15** |
+
+Observations: delegated diffs are 1.3-1.8x larger than plain Claude's on the
+feature tasks (pi adds more tests); the fixed delegation overhead is roughly
+$0.005-0.01 per task (skill text, one extra tool round-trip, reading the
+result), which only pays for itself on multi-file work. Caveats: n = 2 per
+cell, concurrent runs, one Claude model and one self-hosted pi model.
