@@ -2,6 +2,8 @@
 
 **Claude Code does the thinking. A cheaper model does the typing.**
 
+![You ask Claude Code to delegate; Claude writes a brief; run.sh runs safety checks; pi, on any model you pick, reads, edits and runs your tests; your verify command decides, with one retry; Claude gets a short result. On multi-file tasks Claude's cost falls from $0.082 to $0.055 (−33%) because the work moves to pi.](docs/images/pi-delegate-flow.svg)
+
 Ask Claude Code to "delegate to pi" and the heavy part of a coding task (reading files, editing, running tests)
 runs on [pi](https://pi.dev), an open-source coding agent that can drive any model you pick, even one on your own
 machine. Claude only writes the brief and reads a short result, and your tests decide whether it worked.

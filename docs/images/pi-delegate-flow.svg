@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 408" width="880" height="408" role="img" aria-labelledby="pd-flow-title pd-flow-desc">
+<title id="pd-flow-title">pi-delegate: Claude briefs, pi does the work, your tests decide</title>
+<desc id="pd-flow-desc">Flow from you to Claude Code, to run.sh safety checks, to pi on any model, to your verify tests, with a retry back to pi and a short result back to Claude Code; below, a bar chart showing Claude's cost falling from $0.082 to $0.055 on multi-file tasks because the work moves to pi.</desc>
+<defs>
+<marker id="pd-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#111111"/></marker>
+<marker id="pd-arrow-m" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#595959"/></marker>
+</defs>
+<rect width="880" height="408" fill="#ffffff"/>
+<line x1="152" y1="140" x2="200" y2="140" stroke="#111111" stroke-width="1.2" marker-end="url(#pd-arrow)"/>
+<line x1="328" y1="140" x2="376" y2="140" stroke="#111111" stroke-width="1.2" marker-end="url(#pd-arrow)"/>
+<line x1="504" y1="140" x2="552" y2="140" stroke="#111111" stroke-width="1.2" marker-end="url(#pd-arrow)"/>
+<line x1="680" y1="140" x2="728" y2="140" stroke="#111111" stroke-width="1.2" marker-end="url(#pd-arrow)"/>
+<path d="M792,96 V76 Q792,68 784,68 H624 Q616,68 616,76 V96" fill="none" stroke="#595959" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#pd-arrow-m)"/>
+<rect x="672" y="48" width="64" height="12" rx="2" fill="#ffffff"/>
+<text x="704" y="57" fill="#595959" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.06em">ONE RETRY</text>
+<path d="M792,184 V216 Q792,224 784,224 H272 Q264,224 264,216 V184" fill="none" stroke="#595959" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#pd-arrow-m)"/>
+<rect x="496" y="200" width="88" height="12" rx="2" fill="#ffffff"/>
+<text x="540" y="209" fill="#595959" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.06em">SHORT RESULT</text>
+<rect x="24" y="96" width="128" height="88" rx="6" fill="#ffffff"/>
+<rect x="24" y="96" width="128" height="88" rx="6" fill="#ffffff" stroke="#111111" stroke-width="1"/>
+<rect x="32" y="104" width="30" height="12" rx="2" fill="none" stroke="#111111" stroke-opacity="0.5" stroke-width="0.8"/>
+<text x="47.0" y="113" fill="#111111" fill-opacity="0.8" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">ASK</text>
+<text x="88" y="144" fill="#111111" font-size="16" font-weight="600" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">You</text>
+<text x="88" y="160" fill="#595959" font-size="12" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">“delegate to pi”</text>
+<rect x="200" y="96" width="128" height="88" rx="6" fill="#ffffff"/>
+<rect x="200" y="96" width="128" height="88" rx="6" fill="#ffffff" stroke="#111111" stroke-width="1"/>
+<rect x="208" y="104" width="42" height="12" rx="2" fill="none" stroke="#111111" stroke-opacity="0.5" stroke-width="0.8"/>
+<text x="229.0" y="113" fill="#111111" fill-opacity="0.8" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">BRIEF</text>
+<text x="264" y="144" fill="#111111" font-size="16" font-weight="600" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Claude Code</text>
+<text x="264" y="160" fill="#595959" font-size="12" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">writes the brief</text>
+<rect x="376" y="96" width="128" height="88" rx="6" fill="#ffffff"/>
+<rect x="376" y="96" width="128" height="88" rx="6" fill="#ffffff" stroke="#111111" stroke-width="1"/>
+<rect x="384" y="104" width="42" height="12" rx="2" fill="none" stroke="#111111" stroke-opacity="0.5" stroke-width="0.8"/>
+<text x="405.0" y="113" fill="#111111" fill-opacity="0.8" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">GUARD</text>
+<text x="440" y="144" fill="#111111" font-size="16" font-weight="600" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">run.sh</text>
+<text x="440" y="160" fill="#595959" font-size="12" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">safety checks</text>
+<rect x="552" y="96" width="128" height="88" rx="6" fill="#ffffff"/>
+<rect x="552" y="96" width="128" height="88" rx="6" fill="#111111" stroke="#111111" stroke-width="1"/>
+<rect x="560" y="104" width="42" height="12" rx="2" fill="none" stroke="#ffffff" stroke-opacity="0.5" stroke-width="0.8"/>
+<text x="581.0" y="113" fill="#ffffff" fill-opacity="0.8" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">BUILD</text>
+<text x="616" y="144" fill="#ffffff" font-size="16" font-weight="600" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">pi</text>
+<text x="616" y="160" fill="#d0d0d0" font-size="12" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">reads · edits</text>
+<text x="616" y="176" fill="#d0d0d0" font-size="12" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">runs your tests</text>
+<rect x="728" y="96" width="128" height="88" rx="6" fill="#ffffff"/>
+<rect x="728" y="96" width="128" height="88" rx="6" fill="#ffffff" stroke="#111111" stroke-width="1"/>
+<rect x="736" y="104" width="42" height="12" rx="2" fill="none" stroke="#111111" stroke-opacity="0.5" stroke-width="0.8"/>
+<text x="757.0" y="113" fill="#111111" fill-opacity="0.8" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle" letter-spacing="0.08em">CHECK</text>
+<text x="792" y="144" fill="#111111" font-size="16" font-weight="600" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">Your tests</text>
+<text x="792" y="160" fill="#595959" font-size="12" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" text-anchor="middle">--verify</text>
+<text x="24" y="268" fill="#595959" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" letter-spacing="0.14em">CLAUDE’S COST ON A MULTI-FILE TASK (BENCHMARK)</text>
+<text x="24" y="298" fill="#111111" font-size="12" font-weight="600" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">Plain Claude</text>
+<rect x="176" y="280" width="680" height="28" rx="4" fill="#111111"/>
+<text x="188" y="298" fill="#ffffff" font-size="12" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">$0.082 · reads, edits and tests, all on Claude</text>
+<text x="24" y="338" fill="#111111" font-size="12" font-weight="600" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">With pi-delegate</text>
+<rect x="176" y="320" width="456" height="28" rx="4" fill="#111111"/>
+<text x="188" y="338" fill="#ffffff" font-size="12" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">$0.055 · the brief and a short result</text>
+<rect x="632" y="320" width="224" height="28" rx="4" fill="none" stroke="#595959" stroke-width="1" stroke-dasharray="4,3"/>
+<text x="644" y="338" fill="#595959" font-size="12" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">−33% moves to pi</text>
+<line x1="24" y1="372" x2="856" y2="372" stroke="#d9d9d9" stroke-width="0.8"/>
+<text x="24" y="392" fill="#595959" font-size="8" font-family="'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace" letter-spacing="0.14em">LEGEND</text>
+<rect x="96" y="383" width="12" height="12" rx="2" fill="#111111"/>
+<text x="116" y="393" fill="#595959" font-size="12" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">Claude’s cost</text>
+<rect x="240" y="383" width="12" height="12" rx="2" fill="none" stroke="#595959" stroke-dasharray="3,2"/>
+<text x="260" y="393" fill="#595959" font-size="12" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">work moved to pi (cheap or local model)</text>
+<line x1="540" y1="389" x2="568" y2="389" stroke="#595959" stroke-dasharray="4,3"/>
+<text x="576" y="393" fill="#595959" font-size="12" font-family="'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">result or retry</text>
+</svg>
