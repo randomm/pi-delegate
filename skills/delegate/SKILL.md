@@ -23,6 +23,7 @@ The output is `EXIT CODE: n`, pi's text, `VERIFY: PASS|FAIL`, then the diff stat
 - `EXIT CODE: 0` and `VERIFY: PASS`: reply in one or two sentences (what changed). Do not re-read the diff or re-run the tests.
 - `VERIFY: FAIL` (pi already retried once), or no `--verify` given: say so plainly, then check the diff yourself or fix it.
 - `124`/`137` = timed out (`PI_TIMEOUT`, 1800 s default); other non-zero, `REFUSED:` or `RUN DIED`: relay it, do not retry.
+- A hung test pi started blocks until `PI_TIMEOUT`; leftovers are killed afterwards.
 - Stop a run: `bash "${CLAUDE_SKILL_DIR}/run.sh" --abort <RUN_DIR>`.
 
 `PI_DELEGATE_UNSAFE=1` skips the preflight (default branch, secret files, `git push`); see `docs/configuration.md`.

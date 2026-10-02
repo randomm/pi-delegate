@@ -22,6 +22,12 @@
 # PI_VERIFY_TIMEOUT (default 600 s), PI_WAIT_BUDGET (default 540 s per call),
 # PI_DELEGATE_UNSAFE=1 skips the
 # safety preflight (default branch / secret files / push neutralisation).
+# pi's bash-tool children run in their own sessions, so the timeout's group
+# kill does not reach them. pi's environment is tagged PI_DELEGATE_RUN=<run
+# dir> and every process carrying the tag is killed after each pi call and on
+# --abort (complete on Linux; best effort on macOS, where ps shows the
+# environment of non-Apple binaries only). A hung command is NOT killed
+# before PI_TIMEOUT; the task asks pi to pass per-command timeouts instead.
 # Exit codes: 0 done (pi exit code is in the output), 1 run died or pi
 # missing, 2 usage/knob error, 3 preflight refusal.
 
@@ -81,8 +87,25 @@ report() {
   git diff --stat 2>/dev/null | tail -n 12 || true
 }
 
+# SIGKILL every process whose environment carries run $1's marker.
+reap() {
+  local f p
+  if [ -d /proc/self ]; then
+    for f in /proc/[0-9]*/environ; do
+      grep -qzxF "PI_DELEGATE_RUN=$1" "$f" 2>/dev/null || continue
+      p=${f#/proc/}
+      kill -KILL "${p%/environ}" 2>/dev/null || true
+    done
+  else
+    # The marker is built inside awk so awk's own argv cannot match it.
+    while read -r p; do kill -KILL "$p" 2>/dev/null || true; done < <(
+      ps -Aww -E -o pid=,command= 2>/dev/null |
+        awk -v d="$1" -v me="$$" 'index($0, "PI_DELEGATE_RUN=" d) && $1 != me { print $1 }')
+  fi
+}
+
 abort() {
-  local d="$1" pid c
+  local d="${1%/}" pid c
   pid="$(cat "$d/pi.pid" 2>/dev/null || true)"
   [ -n "$pid" ] || { echo "PID FILE UNREADABLE — check RUN_DIR"; return 1; }
   # Two-factor guard against a recycled pid: it must lead its own process
@@ -97,6 +120,7 @@ abort() {
     for c in $groups; do kill -TERM -- "-$c" 2>/dev/null || true; done
     sleep 5
     for c in $groups; do kill -KILL -- "-$c" 2>/dev/null || true; done
+    reap "$d"
     echo "aborted"
   else
     echo "not a pi-delegate run group — skipping"
@@ -208,7 +232,8 @@ fi
 # One pi call (stdin: the task file $1), output appended to pi.log.
 run_pi() {
   local rc=0
-  ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates ${model_args[@]+"${model_args[@]}"} < "$1" >> "$D/pi.log" 2>&1 || rc=$?
+  PI_DELEGATE_RUN="$D" ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates ${model_args[@]+"${model_args[@]}"} < "$1" >> "$D/pi.log" 2>&1 || rc=$?
+  reap "$D"
   return "$rc"
 }
 
@@ -235,7 +260,7 @@ pipeline() {
 # Run files live outside the repo (untracked files there would show up in
 # the diff).
 D="$(mktemp -d)"
-printf '%s' "$task" > "$D/task.txt"
+printf '%s\n\nWhen running tests, builds or servers with the bash tool, always pass its timeout parameter (in seconds): about 120 for a single test file, more for a full suite.\n' "$task" > "$D/task.txt"
 vwrap=()
 [ -z "$timeout_cmd" ] || vwrap=("$timeout_cmd" --kill-after="$PI_KILL_AFTER" "$PI_VERIFY_TIMEOUT")
 set -m
