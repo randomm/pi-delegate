@@ -385,9 +385,16 @@ bench/collect.sh    click-sentinel-pickle A 1
 # Full matrix: loop task × arm × run over the task list above.
 ```
 
-**Disk use:** one run pair (arms A + B for one task) uses ~44 MB of disk
-under `$BENCH_OUT` (the repo checkout, venv, and per-run transcripts).
-After collecting, clean up with `rm -rf "$BENCH_OUT"`.
+**Disk use:** a task with a Python venv or `node_modules` can use over 1 GB
+per run, and parallel runs multiply that. On a small or RAM-backed (tmpfs)
+`/tmp`, run the arms one at a time or point `BENCH_OUT` at a disk-backed
+path; `setup-run.sh` warns (it does not fail) when under 5 GiB is free under
+`BENCH_OUT`. After collecting, clean up with `rm -rf "$BENCH_OUT"`, and also
+when a run is abandoned. Do not run it while runs are active: it also removes
+the shared `pin/` cache (re-fetched on the next run) and any run not yet
+collected. `bench/quick.sh` removes its own temp dir on exit unless `-k` is
+given (`-k` prints the path); it starts all tasks x arms x `-n` runs at once,
+so `-n` and the task list bound its parallelism.
 
 Environment overrides: `BENCH_OUT`, `CLAUDE_MODEL` (default: the literal
 id `claude-sonnet-5-5`), `CLAUDE_PERM_MODE`, `PI_DELEGATE_REPO` (default:
@@ -476,6 +483,7 @@ plugin (B, via `--plugin-dir`) in parallel, in a couple of minutes:
 ```
 bench/quick.sh                       # all tasks, 1 run per arm
 bench/quick.sh -n 2 ledger           # 2 runs, one task
+bench/quick.sh -k                    # keep the run dirs for inspection
 ```
 
 It prints per-run cost/turns/pi calls and `REWARD = 1 - costB/costA`
