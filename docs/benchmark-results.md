@@ -5,7 +5,7 @@ section 7 and later measure the current `delegate` skill.
 
 ## First MVS run
 
-Date: 2026-06-18 · Tasks: 2 · Runs: 3 × 2 arms · Model: `claude-sonnet-5-5`
+Recorded: 2026-10-01 · Tasks: 2 · Runs: 3 × 2 arms · Model: `claude-sonnet-5-5`
 
 ---
 
@@ -158,7 +158,7 @@ collected after PR #76, which added per-call records in `pi-calls.d/`.
 
 ---
 
-## 7. Follow-up: script-backed `pi-oneshot` (issue #78)
+## 7. Follow-up: script-backed `pi-oneshot` (issue #78) (2026-10-02)
 
 Same two click tasks, arm B delegating through the slimmed `pi-oneshot`
 (a ~25-line SKILL.md; the preflight/launch/wait/abort logic lives in
@@ -180,7 +180,7 @@ ended its turn while pi was still running. The skill now says
 
 ---
 
-## 8. Quick benchmark, single `delegate` skill with `--verify`
+## 8. Quick benchmark, single `delegate` skill with `--verify` (2026-10-02)
 
 `bench/quick.sh -n 2` (4 tiny local tasks, 2 runs per arm, run concurrently;
 pass = hidden check AND the task's own tests; `lines` = diff size). 16/16
@@ -203,7 +203,7 @@ not re-run with `--verify`.
 
 ---
 
-## 9. Harder tasks and output trimming
+## 9. Harder tasks and output trimming (2026-10-02)
 
 Three multi-file tasks on a 6-file ledger package were added to `bench/quick.sh`
 (`ledger`, `ledger-budget`, `ledger-export`) plus a mechanical rename
