@@ -79,8 +79,10 @@ instead of claiming success.
   work: a same-model reviewer approves most changes, tests don't.
 - **Claude is told not to redo the work** when the gate passes. Re-reading the diff and re-running the tests is
   exactly what ate the savings in our first benchmark.
-- **Guardrails:** it refuses to run on your default branch or next to `.env`/`*.pem`/`*.key` files, and disables
-  `git push` for pi. This guards against mistakes, not a malicious model. For stronger isolation set
+- **Guardrails:** it refuses to run on your default branch or next to `.env`/`*.pem`/`*.key` files (dependency
+  dirs — `node_modules`, `.venv`, `venv`, `site-packages`, `vendor` — are not scanned), and disables
+  `git push` for pi. This guards against mistakes, not a malicious model. Each guard has its own
+  `PI_DELEGATE_ALLOW_*` opt-out and says so on stderr when used; for stronger isolation set
   `PI_DELEGATE_WRAP` (sandbox recipes in [docs/configuration.md](docs/configuration.md#sandbox-optional)) or use a
   disposable clone or container.
 

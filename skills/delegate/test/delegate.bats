@@ -130,6 +130,266 @@ teardown() {
   [ "$status" -eq 3 ]
 }
 
+# --- Secret scan: vendored trees are pruned, the scan stays content-blind ---
+# (issue #97). The scan matches file NAMES only, so a public CA bundle inside
+# a dependency tree used to refuse the whole run — and the only documented
+# escape then also dropped the default-branch guard and push neutralisation.
+
+@test "run.sh: a .pem under .venv/.../site-packages does not refuse (regression #97)" {
+  mkdir -p .venv/lib/python3.12/site-packages/certifi
+  printf '%s\n' 'placeholder-bundle' > .venv/lib/python3.12/site-packages/certifi/cacert.pem
+  run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  [ -e "$STUB_DIR/argv" ]
+}
+
+@test "run.sh: nested node_modules and vendor dirs at any depth do not refuse" {
+  mkdir -p app/node_modules/pkg/certs packages/foo/node_modules/bar vendor/ssl
+  printf key > app/node_modules/pkg/certs/x.pem
+  printf key > packages/foo/node_modules/bar/ca.pem
+  printf key > vendor/ssl/deploy.key
+  run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+}
+
+@test "run.sh: a .pem or .key outside a pruned dir still refuses (content-blind)" {
+  printf CERT > server.pem
+  printf KEY > deploy.key
+  run bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"server.pem"* ]]
+}
+
+@test "run.sh: the search root is never pruned — a repo dir named vendor still refuses" {
+  # find matches pruned names by basename, so without -mindepth 1 a repo whose
+  # own directory is named vendor/venv/... prunes its own root and the guard
+  # fails OPEN. This pins the fail-open regression. $BIN is removed by teardown.
+  local named_repo="$BIN/vendor"
+  git init -q -b feat "$named_repo"
+  printf SECRET=1 > "$named_repo/.env"
+  run env -C "$named_repo" bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"REFUSED: secret-looking file(s) present: .env"* ]]
+}
+
+@test "run.sh: a pruned dir is not traversed — a mode-000 dir under it does not fail closed" {
+  # Proves non-traversal observably: find reports a permission error (non-zero
+  # exit => the fail-closed REFUSED) for a directory it cannot read. Under a
+  # pruned name it must never be opened at all.
+  [[ "$(id -u)" != 0 ]] || skip "mode-000 is not enforced for root"
+  mkdir -p node_modules/pkg/locked
+  printf CERT > node_modules/pkg/locked/bundle.pem
+  chmod 000 node_modules/pkg/locked
+  run bash "$RUN" <<< "t"
+  chmod 755 node_modules/pkg/locked
+  [ "$status" -eq 0 ]
+}
+
+@test "run.sh: a mode-000 dir outside a pruned name still fails closed" {
+  [[ "$(id -u)" != 0 ]] || skip "mode-000 is not enforced for root"
+  mkdir -p src/locked
+  printf CERT > src/locked/bundle.pem
+  chmod 000 src/locked
+  run bash "$RUN" <<< "t"
+  chmod 755 src/locked
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"secret-file scan failed"* ]]
+}
+
+@test "run.sh: more than five matching files still refuse with a name listed" {
+  # The refusal display is capped at 5 names; the break must never become a
+  # pass.
+  for n in a b c d e f g; do printf CERT > "cert-$n.pem"; done
+  run bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"REFUSED: secret-looking file(s) present: "* ]]
+  [[ "$output" == *".pem"* ]]
+}
+
+# --- Per-check escape hatches (issue #98): bypassing one guard keeps the others
+# enforced, and each skipped guard announces itself on stderr.
+
+@test "run.sh: PI_DELEGATE_ALLOW_SECRETS=1 skips only the secret scan" {
+  printf SECRET=1 > .env
+  PI_DELEGATE_ALLOW_SECRETS=1 run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  # push neutralisation still ran
+  grep -q '^GIT_CONFIG_COUNT=' "$STUB_DIR/env"
+  [[ "$output" == *"WARNING: secret-file refusal suppressed (PI_DELEGATE_ALLOW_SECRETS=1)"* ]]
+}
+
+@test "run.sh: PI_DELEGATE_ALLOW_SECRETS=1 still refuses on the default branch" {
+  printf SECRET=1 > .env
+  git checkout -q -b main
+  PI_DELEGATE_ALLOW_SECRETS=1 run bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"default branch"* ]]
+  [ ! -e "$STUB_DIR/argv" ]
+}
+
+@test "run.sh: PI_DELEGATE_ALLOW_SECRETS=1 keeps the scan fail-closed on a find error" {
+  [[ "$(id -u)" != 0 ]] || skip "mode-000 is not enforced for root"
+  mkdir -p src/locked
+  chmod 000 src/locked
+  PI_DELEGATE_ALLOW_SECRETS=1 run bash "$RUN" <<< "t"
+  chmod 755 src/locked
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"secret-file scan failed"* ]]
+}
+
+@test "run.sh: PI_DELEGATE_ALLOW_SECRETS=1 still refuses when the repo root cannot be determined" {
+  # The flag suppresses only the refusal on matches: the fail-closed repo-root
+  # check keeps running (documented in docs/configuration.md).
+  mkdir -p "$BIN/outside"
+  cd "$BIN/outside"
+  PI_DELEGATE_ALLOW_SECRETS=1 run bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"could not determine the repo root"* ]]
+  [ ! -e "$STUB_DIR/argv" ]
+}
+
+@test "run.sh: PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1 skips only the branch check" {
+  git checkout -q -b main
+  PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1 run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  grep -q '^GIT_CONFIG_COUNT=' "$STUB_DIR/env"
+  [[ "$output" == *"WARNING: default-branch check skipped (PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1)"* ]]
+}
+
+@test "run.sh: PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1 also bypasses the detached-at-default-tip refusal" {
+  # The AC names both branch refusals; both share the skip_branch gate.
+  git checkout -q --detach
+  git branch -q main
+  PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1 run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  grep -q '^GIT_CONFIG_COUNT=' "$STUB_DIR/env"
+  [[ "$output" == *"WARNING: default-branch check skipped (PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1)"* ]]
+}
+
+@test "run.sh: PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1 still refuses on a secret file" {
+  git checkout -q -b main
+  printf SECRET=1 > .env
+  PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1 run bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"secret-looking file(s) present"* ]]
+  [ ! -e "$STUB_DIR/argv" ]
+}
+
+@test "run.sh: PI_DELEGATE_ALLOW_PUSH=1 skips only push neutralisation" {
+  PI_DELEGATE_ALLOW_PUSH=1 run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  [ ! -s "$STUB_DIR/env" ]
+  [[ "$output" == *"WARNING: git push neutralisation skipped (PI_DELEGATE_ALLOW_PUSH=1)"* ]]
+}
+
+@test "run.sh: PI_DELEGATE_ALLOW_PUSH=1 still refuses on the default branch and on secrets" {
+  git branch -q main
+  printf SECRET=1 > .env
+  PI_DELEGATE_ALLOW_PUSH=1 run bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"secret-looking file(s) present"* ]]
+  rm -f .env
+  git checkout -q main
+  PI_DELEGATE_ALLOW_PUSH=1 run bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"default branch"* ]]
+}
+
+
+@test "run.sh: the GIT_CONFIG_COUNT refusal follows the push gate" {
+  # A value git accepts but the numeric guard rejects — otherwise git itself
+  # dies on the bogus count and the run fails earlier, at the repo-root check.
+  local -a cfg=(GIT_CONFIG_COUNT=' 3' GIT_CONFIG_KEY_0=alias.a GIT_CONFIG_VALUE_0=x
+    GIT_CONFIG_KEY_1=alias.b GIT_CONFIG_VALUE_1=x GIT_CONFIG_KEY_2=alias.c GIT_CONFIG_VALUE_2=x)
+  run env "${cfg[@]}" bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"REFUSED: pre-existing GIT_CONFIG_COUNT"*"PI_DELEGATE_ALLOW_PUSH=1"* ]]
+  # Skipped with the push bypass: nothing is appended, so the caller's own
+  # count reaches pi untouched (proof that no neutralisation ran).
+  run env "${cfg[@]}" PI_DELEGATE_ALLOW_PUSH=1 bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$STUB_DIR/env")" = "GIT_CONFIG_COUNT= 3" ]
+}
+
+@test "run.sh: each refusal names its own per-check variable" {
+  printf SECRET=1 > .env
+  run bash "$RUN" <<< "t"
+  [[ "$output" == *"REFUSED: secret-looking file(s) present:"*"PI_DELEGATE_ALLOW_SECRETS=1"* ]]
+  [[ "$output" != *"PI_DELEGATE_UNSAFE"* ]]
+  rm -f .env
+  git checkout -q -b main
+  run bash "$RUN" <<< "t"
+  [[ "$output" == *"REFUSED: current branch is the default branch"*"PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1"* ]]
+  GIT_CONFIG_COUNT=' 3' GIT_CONFIG_KEY_0=alias.a GIT_CONFIG_VALUE_0=x \
+    GIT_CONFIG_KEY_1=alias.b GIT_CONFIG_VALUE_1=x \
+    GIT_CONFIG_KEY_2=alias.c GIT_CONFIG_VALUE_2=x \
+    PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1 run bash "$RUN" <<< "t"
+  [[ "$output" == *"REFUSED: pre-existing GIT_CONFIG_COUNT"*"PI_DELEGATE_ALLOW_PUSH=1"* ]]
+}
+
+@test "run.sh: only the literal 1 activates a per-check override" {
+  printf SECRET=1 > .env
+  for v in 0 true '' yes; do
+    PI_DELEGATE_ALLOW_SECRETS="$v" run bash "$RUN" <<< "t"
+    [ "$status" -eq 3 ]
+  done
+  unset PI_DELEGATE_ALLOW_SECRETS
+  rm -f .env
+  # A non-1 push bypass must still neutralise.
+  PI_DELEGATE_ALLOW_PUSH=0 run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  grep -q '^GIT_CONFIG_COUNT=' "$STUB_DIR/env"
+  # A non-1 branch bypass must still refuse the default branch.
+  git checkout -q -b main
+  PI_DELEGATE_ALLOW_DEFAULT_BRANCH=true run bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+}
+
+@test "run.sh: no bypass is announced when no override is set" {
+  run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"(PI_DELEGATE_ALLOW"* ]]
+}
+
+@test "run.sh: PI_DELEGATE_UNSAFE=1 prints no per-check bypass warning" {
+  git checkout -q -b main
+  printf SECRET=1 > .env
+  PI_DELEGATE_UNSAFE=1 run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"(PI_DELEGATE_ALLOW"* ]]
+  [ ! -s "$STUB_DIR/env" ]
+}
+
+@test "run.sh: PI_DELEGATE_WRAP stays non-bypassable under every per-check override" {
+  printf SECRET=1 > .env
+  git checkout -q -b main
+  PI_DELEGATE_UNSAFE=1 PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1 PI_DELEGATE_ALLOW_SECRETS=1 \
+    PI_DELEGATE_ALLOW_PUSH=1 PI_DELEGATE_WRAP="/nonexistent/sandbox" run bash "$RUN" <<< "t"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"REFUSED: PI_DELEGATE_WRAP command not found"* ]]
+  [ ! -e "$STUB_DIR/argv" ]
+}
+
+@test "run.sh and bench/setup-run.sh prune the same dependency dirs (anti-drift #97)" {
+  local root mirror
+  root="$(cd "$(dirname "$RUN")/../.." && pwd)"
+  mirror="$root/bench/setup-run.sh"
+  [ -f "$mirror" ]
+  for dir in .git node_modules .venv venv site-packages vendor; do
+    grep -qF -- "-name $dir" "$RUN"
+    grep -qF -- "-name $dir" "$mirror"
+  done
+  grep -q -- '-prune' "$RUN"
+  grep -q -- '-prune' "$mirror"
+  grep -q -- '-mindepth 1' "$RUN"
+  grep -q -- '-mindepth 1' "$mirror"
+  # Output filters are not pruning: a regression to -not -path must fail here.
+  run grep -q -- '-not -path' "$RUN"
+  [ "$status" -ne 0 ]
+  run grep -q -- '-not -path' "$mirror"
+  [ "$status" -ne 0 ]
+}
+
 @test "run.sh: bad PI_TIMEOUT / PI_KILL_AFTER / PI_WAIT_BUDGET -> exit 2, pi not called" {
   for v in PI_TIMEOUT PI_KILL_AFTER PI_WAIT_BUDGET; do
     env "$v=abc" bash "$RUN" <<< "t" && return 1

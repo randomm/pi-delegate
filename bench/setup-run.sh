@@ -45,7 +45,8 @@
 #     so neither arm can push.
 #   - A secret-file scan (.env, .env.*, *.pem, *.key) runs before setup
 #     completes; if any are present the script refuses (exit 3). This
-#     mirrors the safety preflight in skills/pi-oneshot/SKILL.md.
+#     mirrors the safety preflight in skills/delegate/run.sh, including the
+#     pruning of dependency/vendored dirs (see the scan block below).
 
 set -euo pipefail
 # shellcheck disable=SC2034  # SCRIPT_DIR is used by lib.sh source path
@@ -155,14 +156,20 @@ fi
 git -C "$repo_dir" config push.default nothing
 
 # --- Secret-file scan ---------------------------------------------------------
-# Mirrors the safety preflight: refuse if .env, .env.*, *.pem, or *.key
-# is present anywhere in the tree (regular files or symlinks).
-# Fail-closed: any non-zero find exit is a refusal.
+# Mirrors the safety preflight in skills/delegate/run.sh: refuse if .env,
+# .env.*, *.pem, or *.key is present anywhere in the tree (regular files or
+# symlinks). Fail-closed: any non-zero find exit is a refusal. Dependency and
+# vendored trees are pruned by name at any depth (issue #97) — a fetched
+# BASE_SHA shipping a virtualenv or a node_modules tree is not a secret, and
+# walking it is pure cost. -mindepth 1 keeps the search root itself out of the
+# prune set. Unlike run.sh this scan has no per-check escape hatch: it runs
+# before SETUP_CMD creates anything and needs no bypass.
 scan_err_file="$run_dir/secret-scan-err.tmp"
 scan_file="$run_dir/secret-scan.tmp"
-if ! find "$repo_dir" -not -path "$repo_dir/.git" -not -path "$repo_dir/.git/*" \
-    \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' \) \
-    \( -type f -o -type l \) > "$scan_file" 2> "$scan_err_file"; then
+if ! find "$repo_dir" -mindepth 1 \
+    \( -type d \( -name .git -o -name node_modules -o -name .venv -o -name venv -o -name site-packages -o -name vendor \) -prune \) -o \
+    \( \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' \) \( -type f -o -type l \) -print \) \
+    > "$scan_file" 2> "$scan_err_file"; then
   echo "setup-run: secret-file scan failed: $(cat "$scan_err_file")" >&2
   rm -f "$scan_err_file" "$scan_file"
   exit 3

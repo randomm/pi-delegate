@@ -9,6 +9,9 @@ Environment variables read by `skills/delegate/run.sh`. None are required.
 | `PI_VERIFY_TIMEOUT` | 600 | Seconds allowed for the `--verify` command. |
 | `PI_WAIT_BUDGET` | 540 | Seconds one `run.sh` call waits before printing `STILL RUNNING` (keep it under the Bash tool's 10-minute limit). |
 | `PI_DELEGATE_UNSAFE` | unset | Set to `1` to skip the safety preflight. |
+| `PI_DELEGATE_ALLOW_DEFAULT_BRANCH` | unset | Set to `1` to skip the default-branch / detached-at-default-tip refusal only. |
+| `PI_DELEGATE_ALLOW_SECRETS` | unset | Set to `1` to suppress the secret-file refusal only (the scan itself still runs). |
+| `PI_DELEGATE_ALLOW_PUSH` | unset | Set to `1` to keep `git push` working for pi. |
 | `PI_DELEGATE_WRAP` | unset | Command prefix run in front of every pi call and the `--verify` command (see [Sandbox](#sandbox-optional)). |
 
 All values must be positive integers.
@@ -62,6 +65,32 @@ and it disables `git push` for the pi process. This guards against mistakes,
 not against a malicious pi, and a feature branch or worktree is not isolation
 (pi can `cd` into other checkouts and read `~/.ssh`). For real isolation use
 the [sandbox](#sandbox-optional) option, a container or a disposable clone.
+
+Each guard also has its own escape hatch, so bypassing one does not also drop
+the others. Like `PI_DELEGATE_UNSAFE`, each is active only at the literal `1`,
+and each active bypass prints one `WARNING:` line before pi starts — a
+guardrail that silently disappeared is the failure these flags exist to
+prevent.
+
+| Set to `1` | Stops protecting against |
+|---|---|
+| `PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1` | work landing on the default branch (or a detached HEAD at its tip) |
+| `PI_DELEGATE_ALLOW_SECRETS=1` | a delegated run reading a credential file from the tree |
+| `PI_DELEGATE_ALLOW_PUSH=1` | pi pushing on its own: it gets a working `git push` |
+
+The secret scan matches file *names* only — no content or entropy checking —
+and it prunes these directory names at any depth: `node_modules`, `.venv`,
+`venv`, `site-packages`, `vendor`, plus `.git`. Other ignored trees such as
+`.claude/` and `worktrees/` are deliberately **not** pruned — they are not
+dependency dirs and a real `.env` may legitimately sit in one — so they are
+still walked. That is the trade: a
+`cacert.pem` shipped inside a dependency tree no longer refuses the run, and
+neither would a real `.env` planted in one. Outside those names the scan stays
+content-blind: a public CA bundle named `*.pem` anywhere else still refuses.
+The scan itself is never skipped by `PI_DELEGATE_ALLOW_SECRETS=1` — the search
+still runs and a scan error or an undeterminable repo root still refuses; only
+the refusal on matches is suppressed. `PI_DELEGATE_UNSAFE=1` skips all three
+guards at once and prints nothing, as before.
 
 ## Sandbox (optional)
 

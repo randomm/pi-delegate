@@ -209,7 +209,10 @@ bench/collect.sh    <task> <arm> <run>  # one JSON line per run, jq-validated
   the May 2026 base commits). The pin matches the era of each task's
   base commit.
 - Secret-file scan (`.env`, `.env.*`, `*.pem`, `*.key`) — refuses (exit 3)
-  if any are present (mirrors the pi-oneshot safety preflight).
+  if any are present, pruning dependency dirs by name at any depth
+  (`node_modules`, `.venv`, `venv`, `site-packages`, `vendor`, `.git`).
+  Mirrors the safety preflight in `skills/delegate/run.sh`; unlike run.sh this
+  copy has no per-check opt-out, since the scan runs before `SETUP_CMD`.
 - Writes `setup.json`.
 
 ### run-arm.sh
