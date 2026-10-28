@@ -666,6 +666,57 @@ EOF
   cd /
 }
 
+# --- setup-run.sh: vendored trees are pruned, like skills/delegate/run.sh ----
+
+@test "setup-run.sh: a .pem under a vendored dir does not refuse" {
+  local vendored_repo="$BENCH_OUT/vendored-repo"
+  git init -q -b main "$vendored_repo"
+  cd "$vendored_repo"
+  git config user.email t@t.t
+  git config user.name t
+  mkdir -p venv/lib/python3.12/site-packages/certifi packages/app/node_modules/pkg/certs
+  echo "public CA bundle" > venv/lib/python3.12/site-packages/certifi/cacert.pem
+  echo "bundled cert" > packages/app/node_modules/pkg/certs/x.pem
+  git add venv packages
+  git commit -qm "add vendored bundles"
+  local sha
+  sha="$(git rev-parse HEAD)"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$vendored_repo
+BASE_SHA=$sha
+FIX_SHA=$sha
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 6
+  [ "$status" -eq 0 ]
+  cd /
+}
+
+@test "setup-run.sh: a .pem outside a vendored dir still refuses" {
+  local outside_repo="$BENCH_OUT/outside-repo"
+  git init -q -b main "$outside_repo"
+  cd "$outside_repo"
+  git config user.email t@t.t
+  git config user.name t
+  mkdir -p ssl
+  echo "private key material" > ssl/deploy.key
+  git add ssl
+  git commit -qm "add key"
+  local sha
+  sha="$(git rev-parse HEAD)"
+  cat > "$TASK_DIR/task.env" <<EOF
+REPO=$outside_repo
+BASE_SHA=$sha
+FIX_SHA=$sha
+TEST_CMD=true
+GRADING_PATCH=grading.patch
+EOF
+  run bash "$BENCH_DIR/setup-run.sh" "$TASK_ID" A 7
+  [ "$status" -eq 3 ]
+  cd /
+}
+
 # --- grade.sh: FAIL path writes grade.json with correct test_rc ----------------
 
 @test "grade.sh: FAIL path writes grade.json with test_rc" {

@@ -27,7 +27,15 @@
 # Environment: PI_TIMEOUT (default 1800 s), PI_KILL_AFTER (default 30 s),
 # PI_VERIFY_TIMEOUT (default 600 s), PI_WAIT_BUDGET (default 540 s per call),
 # PI_DELEGATE_UNSAFE=1 skips the
-# safety preflight (default branch / secret files / push neutralisation).
+# safety preflight (default branch / secret files / push neutralisation). Each
+# guard also has its own escape hatch, active only at the literal "1" and each
+# printing a WARNING when it skips or suppresses:
+# PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1 (branch and detached-at-default-tip
+# checks), PI_DELEGATE_ALLOW_SECRETS=1 (suppresses the secret-file refusal;
+# the scan itself always runs), PI_DELEGATE_ALLOW_PUSH=1 (git push
+# neutralisation).
+# The secret scan prunes dependency/vendored dirs by name at any depth
+# (.git, node_modules, .venv, venv, site-packages, vendor).
 # pi's bash-tool children run in their own sessions, so the timeout's group
 # kill does not reach them. pi's environment is tagged PI_DELEGATE_RUN=<run
 # dir> and every process carrying the tag is killed after each pi call and on
@@ -176,7 +184,38 @@ if [ -n "${PI_DELEGATE_WRAP:-}" ]; then
 fi
 
 # --- Safety preflight (issue #30; push neutralisation, default branch, secrets) -----------
-if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
+# Three guards, each with its own escape hatch so bypassing one no longer
+# drops the others (issue #98). Like PI_DELEGATE_UNSAFE, a per-check variable
+# is active only at the literal "1", and a guard it skips announces itself on
+# stderr — a guardrail silently gone is the failure these flags exist to
+# prevent. PI_DELEGATE_UNSAFE=1 keeps its umbrella meaning exactly: every
+# guard off, nothing printed.
+unsafe=0
+skip_branch=0
+skip_secrets=0
+skip_push=0
+if [ "${PI_DELEGATE_UNSAFE:-}" = "1" ]; then
+  # Umbrella: every guard off, nothing printed (semantics unchanged).
+  unsafe=1
+  skip_branch=1
+  skip_secrets=1
+  skip_push=1
+else
+  if [ "${PI_DELEGATE_ALLOW_DEFAULT_BRANCH:-}" = "1" ]; then
+    skip_branch=1
+    echo "WARNING: default-branch check skipped (PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1)" >&2
+  fi
+  if [ "${PI_DELEGATE_ALLOW_SECRETS:-}" = "1" ]; then
+    skip_secrets=1
+    echo "WARNING: secret-file refusal suppressed (PI_DELEGATE_ALLOW_SECRETS=1) — files still scanned" >&2
+  fi
+  if [ "${PI_DELEGATE_ALLOW_PUSH:-}" = "1" ]; then
+    skip_push=1
+    echo "WARNING: git push neutralisation skipped (PI_DELEGATE_ALLOW_PUSH=1)" >&2
+  fi
+fi
+
+if [ "$skip_branch" = "0" ]; then
   default_branch=""
   head_ref="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" || head_ref=""
   if [ -n "$head_ref" ]; then
@@ -192,23 +231,35 @@ if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
   cur_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || cur_branch=""
   if [ -n "$default_branch" ]; then
     if [ "$cur_branch" = "$default_branch" ]; then
-      echo "REFUSED: current branch is the default branch '${default_branch}' (set PI_DELEGATE_UNSAFE=1 to override)" >&2
+      echo "REFUSED: current branch is the default branch '${default_branch}' (set PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1 to override)" >&2
       exit 3
     fi
     if [ -z "$cur_branch" ]; then
       head_sha="$(git rev-parse --quiet --verify HEAD 2>/dev/null)" || head_sha=""
       def_sha="$(git rev-parse --quiet --verify "refs/heads/${default_branch}" 2>/dev/null)" || def_sha=""
       if [ -n "$head_sha" ] && [ "$head_sha" = "$def_sha" ]; then
-        echo "REFUSED: detached HEAD at the tip of the default branch '${default_branch}' (set PI_DELEGATE_UNSAFE=1 to override)" >&2
+        echo "REFUSED: detached HEAD at the tip of the default branch '${default_branch}' (set PI_DELEGATE_ALLOW_DEFAULT_BRANCH=1 to override)" >&2
         exit 3
       fi
     fi
   fi
-  # Secret-looking files, fail-closed: any find error is a refusal.
+fi
+
+# Secret-looking files, fail-closed: any find error is a refusal. The scan is
+# skipped only by the umbrella flag — PI_DELEGATE_ALLOW_SECRETS=1 suppresses
+# the refusal on matches, never the repo-root check or the fail-closed find
+# error. Dependency/vendored trees are pruned by name at any depth (issue
+# #97): they are never the guard's target and walking them is pure cost.
+# -mindepth 1 keeps the search root itself out of the prune set, so a repo
+# checked out into a directory named vendor/venv/... still refuses on its own
+# .env. The scan stays content-blind: a *.pem outside a pruned dir still
+# refuses.
+if [ "$unsafe" = "0" ]; then
   repo_root="$(git rev-parse --show-toplevel)" || { echo "REFUSED: could not determine the repo root" >&2; exit 3; }
   scan_file="$(mktemp)"; scan_err="$(mktemp)"
-  find "$repo_root" -not -path "$repo_root/.git" -not -path "$repo_root/.git/*" -not -path "$repo_root/node_modules" -not -path "$repo_root/node_modules/*" \
-    \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' \) \( -type f -o -type l \) \
+  find "$repo_root" -mindepth 1 \
+    \( -type d \( -name .git -o -name node_modules -o -name .venv -o -name venv -o -name site-packages -o -name vendor \) -prune \) -o \
+    \( \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' \) \( -type f -o -type l \) -print \) \
     > "$scan_file" 2> "$scan_err" || { echo "REFUSED: secret-file scan failed: $(cat "$scan_err")" >&2; exit 3; }
   secrets_found=""; shown=0
   while IFS= read -r sf; do
@@ -219,14 +270,17 @@ if [ "${PI_DELEGATE_UNSAFE:-}" != "1" ]; then
     [ "$shown" -ge 5 ] && break
   done < "$scan_file"
   rm -f "$scan_file" "$scan_err"
-  if [ -n "$secrets_found" ]; then
-    echo "REFUSED: secret-looking file(s) present: ${secrets_found} (set PI_DELEGATE_UNSAFE=1 to override)" >&2
+  if [ -n "$secrets_found" ] && [ "$skip_secrets" = "0" ]; then
+    echo "REFUSED: secret-looking file(s) present: ${secrets_found} (set PI_DELEGATE_ALLOW_SECRETS=1 to override)" >&2
     exit 3
   fi
-  # Neutralise git push for the pi process (appends to any caller entries).
+fi
+
+# Neutralise git push for the pi process (appends to any caller entries).
+if [ "$skip_push" = "0" ]; then
   _gc="${GIT_CONFIG_COUNT:-0}"
   if ! [[ "$_gc" =~ ^[0-9]+$ ]]; then
-    echo "REFUSED: pre-existing GIT_CONFIG_COUNT='${GIT_CONFIG_COUNT}' is not a non-negative integer (set PI_DELEGATE_UNSAFE=1 to override)" >&2
+    echo "REFUSED: pre-existing GIT_CONFIG_COUNT='${GIT_CONFIG_COUNT}' is not a non-negative integer (set PI_DELEGATE_ALLOW_PUSH=1 to override)" >&2
     exit 3
   fi
   export GIT_CONFIG_KEY_${_gc}=push.default GIT_CONFIG_VALUE_${_gc}=nothing
