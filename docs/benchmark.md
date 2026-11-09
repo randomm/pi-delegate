@@ -489,9 +489,13 @@ bench/quick.sh -n 2 ledger           # 2 runs, one task
 bench/quick.sh -k                    # keep the run dirs for inspection
 ```
 
-It prints per-run cost/turns/pi calls and `REWARD = 1 - costB/costA`
-(forced to -1 if a B run fails its check or never calls pi). Use it to
-decide whether a change helps, then confirm on the real protocol.
+It prints a per-task table grouped by `CLASS` (see "Task-class taxonomy")
+with a `fbc=` column (failing hidden-check cases), per-arm summaries with
+`fbc=` and `fbc_unknown=`, and
+`REWARD = 1 - costB/costA` (forced to -1 if a B run fails its check or
+never calls pi). Use it to decide whether a change helps, then confirm on
+the real protocol. `fbc` is deliberately named apart from the
+`bugs_found_in_verification` metric below, which counts the opposite.
 
 What it showed: delegation is break-even on trivial tasks (`slugify`,
 `json-flag`, `merge-ranges`: Claude finishes in 3-6 cheap turns) and wins
@@ -499,3 +503,134 @@ once Claude would need real exploration and editing (`ledger`, 6 files:
 about -48% Claude cost, same pass rate). The savings come from a thin
 skill (one script call, compact result, no re-verification) — a 500-line
 skill that makes Claude assemble the launch blocks costs more than it saves.
+
+## Task-class taxonomy (issue #96)
+
+Every task directory carries a `task.env` with two labels:
+
+```
+CLASS=MECHANICAL          # or INTRICATE | ASYNC_TIMING | MULTI_FILE_REFACTOR
+BRIEF_STYLE=PINPOINT      # or DISCOVERY
+```
+
+The classes exist because the ~20-task anecdotal dataset split roughly
+half mechanical / half intricate, and mechanical tasks mostly just measure
+Claude's knowledge of Python — cheap signal, and it inflated the observed
+win rate. Per-class reporting exists so a 1-on-1 win on one
+MULTI_FILE_REFACTOR task can never be confused with a win on the suite.
+
+| CLASS | What it probes | Example tasks |
+|-------|----------------|---------------|
+| `MECHANICAL` | known solution, small edit — measures knowledge + tool overhead | `slugify`, `json-flag` |
+| `INTRICATE` | subtle parsing / escape / boundary logic, no obvious solution | `merge-ranges`, `tokenize-lines`, `cache-*` |
+| `ASYNC_TIMING` | time-dependent behavior; the model's weakest class — a correct-looking fix ships and the hidden check catches it when the real one hangs or flakes | `debounce-queue` |
+| `MULTI_FILE_REFACTOR` | coordinated change across files; the test suite must keep passing | `ledger-*`, `move-report` |
+
+`BRIEF_STYLE` is orthogonal and answers the "vague prompt" half of the
+suggestion dataset: `PINPOINT` briefs name the file, the function, the
+expected behavior, and the verification command; `DISCOVERY` briefs state
+the symptom only and make the model find the defect itself. The pilot
+dataset was **all-PINPOINT and never measured this axis** (~20 delegated
+tasks: ~8 clean, ~6 good drafts with 1-2 bugs verification caught, ~4-5
+weak/unfinished) — there is no per-style success rate to quote, and
+`cache-pinpoint` and `cache-discovery` are the paired exemplars built to
+produce one: the same buggy repo and the same hidden check, differing
+**only** in brief style, so a cost delta between their rows is
+attributable to the brief, not to the task.
+
+`ASYNC_TIMING` grading is bounded: the hidden check and the agent's own
+`tests/` run under `QUICK_CHECK_TIMEOUT` (default 120 s) — a hang scores
+FAIL, it never wedges the harness.
+
+## Retry-feedback experiment (issue #96)
+
+`bench/experiment-retry-feedback.sh` A/Bs the one `run.sh` knob the
+dataset blamed for retry waste: the verify-failure tail relayed into the
+retry prompt (arm A, reproduced with run.sh's framing — the production
+code path itself is untouched; the excerpt is passed through an
+**allowlist** filter, see "Keeping the hidden check hidden from both
+models") vs a short numbered
+instruction list authored by one `claude -p` call (arm B). Metrics per
+arm: `retry_success` (did the retry pass verify), `pi_retry_tokens`
+(retry-call input tokens, a proxy for prompt size — the "3× more
+expensive retries" signal), and `claude_instruction_cost_usd` (arm B's
+authoring cost, null for arm A).
+
+One invocation runs both arms over every quick task (or only the ones you
+name):
+
+```
+bash bench/experiment-retry-feedback.sh            # all tasks, 1 run per arm
+bash bench/experiment-retry-feedback.sh -n 10      # 10 runs per arm per task
+bash bench/experiment-retry-feedback.sh -k tokenize-lines
+```
+
+It needs claude + pi + jq + git on PATH (uses timeout/gtimeout when
+present) and uses the quick suite's task template (any
+`bench/quick/tasks/*` dir works). Rows are emitted **on stdout** — one
+JSON object per run, pipe it to a file if you want to keep it; nothing is
+written into the repo and there is no results directory or viewer. A
+per-arm summary goes to stderr. `-n` takes runs per arm per task
+(positive integer), `-k` keeps the run dirs and prints their path **and
+the separate private dir holding the raw verify logs**.
+Readout: B pays more per retry attempt (one claude call) — it earns that
+back only if `retry_success` is materially higher or `pi_retry_tokens`
+drops enough. The harness never implements the task, so the initial
+verify fails and every run exercises the retry path. Both pi calls run
+**inside** the per-run repo copy (never the invoking tree).
+
+### Keeping the hidden check hidden from both models
+
+Both models get read/bash tools, so anything on disk near their cwd is
+readable, and a prompt that quotes it hands out the grading tests. Two
+channels were confirmed by reading from inside a real run dir:
+
+- the grader at `$d/check.py` — reachable as `../check.py` from either
+  model's cwd, invisible to `author_touched_repo`, which snapshots
+  `git status` and so detects **writes**, not reads;
+- unittest's **column-0** assertion diff in the failure output —
+  `+ ['a""b']` is the hidden expected value itself, with the test names
+  and `Ran 8 tests` alongside it, while the old denylist counter reported
+  a tidy 6 lines dropped.
+
+So: (1) the grader is staged into a private dir **outside the run tree**
+and deleted before `verify` returns, and the raw log stays there (under
+`-k` it is never copied into the run dir — sibling run dirs are `../`
+from a still-running model); during a model call there is no grading file
+anywhere the model can traverse to. (2) The excerpt is an **allowlist**:
+only unittest's separators, `FAIL:`/`ERROR:` headers with the
+`(__main__.T.<name>)` tail stripped, the `OK`/`Ran`/`FAILED` summaries,
+and the terminal `SomeError: message` line survive. Anything naming an
+expected value (`AssertionError`, the diff block, any line containing
+`!=`) is dropped, and a second pass re-checks the kept lines against the
+private/run paths. `feedback_dropped_lines` counts what the allowlist
+removed; on a real failure it is large **by design** — read it as "how
+much the model did not see", not as a contamination alarm. Arm B's
+instruction author also runs outside the graded copy, and a row with
+`author_touched_repo: true` is contaminated on the write channel and must
+be discarded.
+
+**Read arm A as a lower bound, not as production arm A.** The control
+here is run.sh's framing with the tail run through that allowlist, which
+also strips unittest's traceback body — the informative part of a
+failure. Production arm A gets `tail -n 40` of the operator's own
+`--verify` log, unsanitized. A **B-win** here is therefore evidence that
+the instruction format helps relative to a deliberately thinned control;
+it is **not** an absolute claim that arm B beats the tail `run.sh` ships,
+which carries strictly more information than the excerpt does.
+
+## bugs_found_in_verification
+
+A green `pass` can still hide a missing acceptance criterion — the
+click-fork sentinel bug shipped through a passing test suite. The metric
+captures what grading misses: a human (or a separate model, manually)
+reads the diff against the criteria and records how many bugs
+verification failed to catch. It is deliberately **recorded, never
+model-automated** — AGENTS.md defers model reviewers until a benchmark
+pays for their tokens. The analyst writes `<run-dir>/verification-bugs.json`
+(`{"count": <int>, "notes": "..."}`); `collect.sh` copies `count` into
+every row as `bugs_found_in_verification` — `null` means nobody looked,
+`0` means looked and nothing was missed, a malformed file is a malformed
+run (exit 2). Report it **separately** from `pass_rate` and never fold it
+into REWARD: it is a quality signal, not a gate — like the adversarial
+review's finding count.

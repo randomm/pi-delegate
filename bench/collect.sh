@@ -37,6 +37,15 @@
 #       when no json-mode call recorded usage — arm A has the same shape,
 #       keyed by model, since it too runs the pi shim),
 #     grade: {pass, test_cmd, error},
+#     bugs_found_in_verification (number | null — recorded, never
+#       model-automated; AGENTS.md defers model reviewers until a benchmark
+#       pays for them. A green grade can still hide a missing acceptance
+#       criterion, so the analyst reads the diff against the criteria and
+#       writes <run-dir>/verification-bugs.json:
+#         {"count": <non-negative int>, "notes": "<optional free text>"}
+#       collect.sh copies `count` into the row. Absent file => null (nobody
+#       looked yet), which is distinct from 0 (looked, nothing missed).
+#       A present-but-invalid file is a malformed run: exit 2.)
 #     wall_clock_ms (run wall clock: claude started → ended. Prefer the
 #       ms-resolution started_ms/ended_ms from run-meta.json when present;
 #       otherwise fall back to the second-resolution started_at/ended_at;
@@ -411,6 +420,23 @@ if [ -n "${start_epoch:-}" ] && [ -n "${end_epoch:-}" ]; then
   wall_clock_ms=$(( (end_epoch - start_epoch) * 1000 ))
 fi
 
+# bugs_found_in_verification — operator/analyst-recorded beside pass/fail
+# (see the header). Absent file => null; invalid file => malformed run.
+bugs_found="null"
+if [ -f "$run_dir/verification-bugs.json" ]; then
+  bugs_found="$(jq -c '
+    # Non-negative integer. `floor` rejects 2.5; the upper bound rejects
+    # 1e999, which jq prints as 1E+999 and whose floor equals itself, so
+    # floor alone would let it through `--argjson`.
+    if (.count | type) == "number" and .count >= 0 and (.count | floor) == .count
+       and .count <= 1000000
+    then .count
+    else error("count is not a non-negative integer") end
+  ' "$run_dir/verification-bugs.json" 2>/dev/null)" || {
+    echo "collect: verification-bugs.json has no non-negative integer count" >&2; exit 2; }
+  [ -n "$bugs_found" ] || { echo "collect: verification-bugs.json produced no value" >&2; exit 2; }
+fi
+
 # Build the final JSON line.
 final_json="$(jq -cn \
   --arg task "$task_id" \
@@ -427,6 +453,7 @@ final_json="$(jq -cn \
   --argjson delegation_exercised "$delegation_exercised" \
   --argjson pi_tokens_total "$pi_tokens_total" \
   --argjson grade "$grade_obj" \
+  --argjson bugs_found_in_verification "$bugs_found" \
   --argjson wall_clock_ms "$wall_clock_ms" \
   --argjson agent_ms "$agent_ms" \
   '{
@@ -443,6 +470,7 @@ final_json="$(jq -cn \
     delegation_exercised: $delegation_exercised,
     pi_tokens_total: $pi_tokens_total,
     grade: $grade,
+    bugs_found_in_verification: $bugs_found_in_verification,
     agent_ms: $agent_ms,
     wall_clock_ms: $wall_clock_ms
   }')"
@@ -463,6 +491,8 @@ validation_out="$(printf '%s' "$final_json" | jq -r '
     then "grade is null (a null grade must never pass validation)"
     elif (.grade.pass | type) != "boolean"
     then "grade.pass is not a boolean"
+    elif .bugs_found_in_verification != null and ((.bugs_found_in_verification | type) != "number")
+    then "bugs_found_in_verification is not a number or null"
     elif .claude.duration_ms != null and (.claude.duration_ms | type) != "number"
     then "claude.duration_ms is not numeric or null"
     elif .claude.duration_api_ms != null and (.claude.duration_api_ms | type) != "number"
