@@ -18,7 +18,13 @@ wall-clock, and outcome quality (objective test pass/fail).
 | Plugin | none (fresh `CLAUDE_CONFIG_DIR`, no plugins) | `pi-delegate` installed at pinned commit |
 | Prompt | `prompt.md` (task body verbatim) | `prompt.md` + delegation suffix directing use of the `delegate` skill |
 | pi shim | installed (logs any accidental pi call) | installed (logs all pi calls) |
-| pi context files | n/a | `--no-context-files` (operator decision, enforced by shim) |
+| pi context files | n/a | `--no-context-files` (the shipped `run.sh` default since #94; the shim re-injects it idempotently) |
+
+`--no-context-files` is what `skills/delegate/run.sh` passes on every pi call,
+so arm B's pi is configured the way a user's is. The opt-in
+`PI_DELEGATE_CONTEXT_FILES=1` (`docs/configuration.md`, §project-context-files)
+changes behaviour outside the harness only: inside these runs the shim injects
+the flag regardless, so the opt-in is a no-op the harness cannot observe.
 
 Both arms use a **fresh `CLAUDE_CONFIG_DIR` per run** (`$BENCH_OUT/<task>/<arm>/<run>/claude-config`).
 The subscription OAuth credential lives in the macOS **login keychain** under
@@ -265,8 +271,10 @@ A `pi` wrapper at `<run-dir>/bin/pi`, prepended to `PATH`, that:
 
 - **Resolves the real pi** at install time (stable path).
 - **Injects `--no-context-files`** exactly once if not already in argv
-  (enforces the operator decision for pi-oneshot; no-op for pi-review-loop
-  which passes it itself).
+  (`--no-context-files` or `-nc` counts as present). Since #94 the shipped
+  `run.sh` passes the flag itself, so for a run against the pinned commit this
+  is a no-op; the injection still enforces the operator decision for any call
+  path that does not.
 - **`--mode json` calls** (pi-review-loop): tees pi's stdout (one JSON event per
   line) to `<run-dir>/pi-<call_id>.jsonl`; collect.sh parses usage from the
   last assistant `message_end`.

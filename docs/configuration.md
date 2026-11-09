@@ -12,9 +12,11 @@ Environment variables read by `skills/delegate/run.sh`. None are required.
 | `PI_DELEGATE_ALLOW_DEFAULT_BRANCH` | unset | Set to `1` to skip the default-branch / detached-at-default-tip refusal only. |
 | `PI_DELEGATE_ALLOW_SECRETS` | unset | Set to `1` to suppress the secret-file refusal only (the scan itself still runs). |
 | `PI_DELEGATE_ALLOW_PUSH` | unset | Set to `1` to keep `git push` working for pi. |
+| `PI_DELEGATE_CONTEXT_FILES` | unset | Set to `1` to let pi discover and load `AGENTS.md` / `AGENTS.override.md` / `CLAUDE.md` (project and agent directory). Unset, `run.sh` passes `--no-context-files` so pi does not load them (see [Project context files](#project-context-files)). |
 | `PI_DELEGATE_WRAP` | unset | Command prefix run in front of every pi call and the `--verify` command (see [Sandbox](#sandbox-optional)). |
 
-All values must be positive integers.
+The timeout values must be positive integers; the `PI_DELEGATE_*` flags are
+active only at the literal `1`.
 
 ## Timeouts
 
@@ -91,6 +93,37 @@ The scan itself is never skipped by `PI_DELEGATE_ALLOW_SECRETS=1` — the search
 still runs and a scan error or an undeterminable repo root still refuses; only
 the refusal on matches is suppressed. `PI_DELEGATE_UNSAFE=1` skips all three
 guards at once and prints nothing, as before.
+
+## Project context files
+
+By default `run.sh` passes `--no-context-files` (`-nc`) on every pi call, so pi
+does not discover or load `AGENTS.md` / `AGENTS.override.md` / `CLAUDE.md` —
+not the project's and not the agent directory's either: `~/.pi/agent/AGENTS.md`
+(standing cross-project instructions) is dropped the same way, silently, since
+the `WARNING:` below fires only on the opt-in. The seal is partial: other
+project-supplied resources under `.pi/` (`settings.json`, `mcp.json`,
+`SYSTEM.md` / `APPEND_SYSTEM.md`, `themes/`) still load wherever the directory
+has a saved trust decision, and `run.sh` does not pass `--no-approve`.
+`.pi/extensions/`, `.pi/skills/` and `.pi/prompts/` are not part of that
+residue: `run.sh` always passes `--no-extensions --no-skills
+--no-prompt-templates`, which disable those regardless of trust.
+
+Two reasons for that default:
+
+- **Behaviour.** Context files are written for an interactive coding agent and
+  routinely tell it to open PRs, push, run deploys or reach for other tools.
+  A pi that reads them can act on instructions the brief never gave — the push
+  neutralisation stops `git push`, not the rest. Conventions, commands to run
+  and files to touch belong in the brief.
+- **Measurement.** The benchmark arms run pi with `--no-context-files`
+  (`docs/benchmark.md`, §pi-shim). The shipped default matching it keeps the
+  published numbers describing the configuration users actually run.
+
+Set `PI_DELEGATE_CONTEXT_FILES=1` to opt back in: pi then loads context files as
+it does interactively. Like the guard escape hatches, the opt-in is active only
+at the literal `1` and prints one `WARNING:` line before pi starts. It is not a
+safety bypass — the preflight guards, the secret scan and `git push`
+neutralisation behave the same either way.
 
 ## Sandbox (optional)
 

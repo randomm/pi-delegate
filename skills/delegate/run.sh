@@ -34,6 +34,10 @@
 # checks), PI_DELEGATE_ALLOW_SECRETS=1 (suppresses the secret-file refusal;
 # the scan itself always runs), PI_DELEGATE_ALLOW_PUSH=1 (git push
 # neutralisation).
+# pi is run with --no-context-files, so it sees the brief and not the project's
+# AGENTS.md / AGENTS.override.md / CLAUDE.md (other .pi/ resources still load
+# under a saved trust decision); PI_DELEGATE_CONTEXT_FILES=1 (literal "1",
+# prints a WARNING) opts back into context files. See docs/configuration.md.
 # The secret scan prunes dependency/vendored dirs by name at any depth
 # (.git, node_modules, .venv, venv, site-packages, vendor).
 # pi's bash-tool children run in their own sessions, so the timeout's group
@@ -297,10 +301,22 @@ if [ "$skip_push" = "0" ]; then
   export GIT_CONFIG_COUNT="${_gc}"
 fi
 
+# pi discovers AGENTS.md / CLAUDE.md unless told not to, and those files are
+# written for an interactive agent: they can tell it to open PRs, push or run
+# deploys the brief never asked for. A delegated run gets the brief and nothing
+# else — the same configuration the benchmark arms run, so the published
+# numbers describe what ships (issue #94). Like the per-check guard overrides,
+# the opt-in is active only at the literal "1" and announces itself on stderr.
+context_args=(--no-context-files)
+if [ "${PI_DELEGATE_CONTEXT_FILES:-}" = "1" ]; then
+  context_args=()
+  echo "WARNING: pi will load project context files (PI_DELEGATE_CONTEXT_FILES=1)" >&2
+fi
+
 # One pi call (stdin: the task file $1), output appended to pi.log.
 run_pi() {
   local rc=0
-  PI_DELEGATE_RUN="$D" ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates ${model_args[@]+"${model_args[@]}"} < "$1" >> "$D/pi.log" 2>&1 || rc=$?
+  PI_DELEGATE_RUN="$D" ${wrap[@]+"${wrap[@]}"} "$PI_BIN" -p --no-session --no-extensions --no-skills --no-prompt-templates ${context_args[@]+"${context_args[@]}"} ${model_args[@]+"${model_args[@]}"} < "$1" >> "$D/pi.log" 2>&1 || rc=$?
   reap "$D"
   return "$rc"
 }

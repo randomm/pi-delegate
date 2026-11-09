@@ -98,6 +98,44 @@ teardown() {
   [[ "$output" == *"EXIT CODE: 7"* ]]
 }
 
+# --- Project context files (issue #94): pi runs with --no-context-files so a
+# delegated run sees the brief and not the project's AGENTS.md /
+# AGENTS.override.md / CLAUDE.md — the configuration the benchmark arms run,
+# and the one whose instructions (open PRs, push, deploy) are written for an
+# interactive agent. ---
+
+@test "run.sh: pi gets --no-context-files by default, with no warning" {
+  run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  grep -qx -- '--no-context-files' "$STUB_DIR/argv"
+  [[ "$output" != *"PI_DELEGATE_CONTEXT_FILES"* ]]
+}
+
+@test "run.sh: PI_DELEGATE_CONTEXT_FILES=1 opts pi back into context files, with a warning" {
+  PI_DELEGATE_CONTEXT_FILES=1 run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING: pi will load project context files (PI_DELEGATE_CONTEXT_FILES=1)"* ]]
+  run grep -qx -- '--no-context-files' "$STUB_DIR/argv"
+  [ "$status" -ne 0 ]
+}
+
+@test "run.sh: only the literal 1 opts pi back into context files" {
+  for v in 0 true '' yes; do
+    rm -f "$STUB_DIR/argv"
+    PI_DELEGATE_CONTEXT_FILES="$v" run bash "$RUN" <<< "t"
+    [ "$status" -eq 0 ]
+    grep -qx -- '--no-context-files' "$STUB_DIR/argv"
+  done
+}
+
+@test "run.sh: the --verify retry pi call also gets --no-context-files" {
+  make_wrapper
+  PI_DELEGATE_WRAP="$BIN/wrapper" run bash "$RUN" --verify 'test -f fixed.txt' <<< "t"
+  [[ "$output" == *"VERIFY: PASS (retries=1)"* ]]
+  [ "$(grep -c "^$BIN/pi -p" "$STUB_DIR/wraplog")" -eq 2 ]
+  [ "$(grep "^$BIN/pi -p" "$STUB_DIR/wraplog" | grep -c -- '--no-context-files')" -eq 2 ]
+}
+
 @test "run.sh: refuses the default branch, pi not called" {
   git checkout -q -b main
   run bash "$RUN" <<< "t"
@@ -673,6 +711,25 @@ make_wrapper() {
   cfg="$(dirname "$SKILL_FILE")/../../docs/configuration.md"
   grep -q 'PI_DELEGATE_WRAP' "$cfg"
   grep -q 'not a security boundary' "$cfg"
+}
+
+@test "docs/configuration.md documents PI_DELEGATE_CONTEXT_FILES and the flag it gates" {
+  local cfg
+  cfg="$(dirname "$SKILL_FILE")/../../docs/configuration.md"
+  grep -q 'PI_DELEGATE_CONTEXT_FILES' "$cfg"
+  grep -q -- '--no-context-files' "$cfg"
+}
+
+@test "docs/benchmark.md ties the benchmarked arms to the shipped default (anti-drift #94)" {
+  local bmd
+  bmd="$(dirname "$SKILL_FILE")/../../docs/benchmark.md"
+  grep -q -- '--no-context-files' "$bmd"
+  grep -q 'PI_DELEGATE_CONTEXT_FILES' "$bmd"
+  # the tie is only real while run.sh still passes the flag by default —
+  # assert the behaviour (stub pi argv), not a literal source string
+  run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  grep -qx -- '--no-context-files' "$STUB_DIR/argv"
 }
 
 @test "run.sh: the wrapper sees PI_DELEGATE_RUN (the run dir) for the verify command too" {
