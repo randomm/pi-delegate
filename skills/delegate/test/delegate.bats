@@ -22,6 +22,15 @@ env | grep '^PI_DELEGATE_RUN=' > "$STUB_DIR/marker" || true
 [ -z "$STUB_IGNORE_TERM" ] || trap '' TERM
 [ -z "$STUB_DETACH" ] || bash -c 'set -m; sleep 300 >/dev/null 2>&1 & echo $! > "$STUB_DIR/child.pid"'
 [ -z "$STUB_WRITE" ] || echo changed > "$STUB_WRITE"
+if [ -n "$STUB_PUSH" ]; then
+  { git push "$STUB_PUSH_URL" HEAD
+    printf 'url_rc=%s\n' "$?"
+    git push origin HEAD
+    printf 'origin_rc=%s\n' "$?"
+    git push second HEAD
+    printf 'second_rc=%s\n' "$?"
+  } > "$STUB_DIR/push" 2>&1
+fi
 grep -q 'verification command' "$STUB_DIR/stdin" && echo fixed > fixed.txt
 [ -z "$STUB_SLEEP" ] || sleep "$STUB_SLEEP"
 echo "pi says done"
@@ -166,6 +175,54 @@ teardown() {
   grep -q '^GIT_CONFIG_COUNT=' "$STUB_DIR/env"
   GIT_CONFIG_COUNT=junk run bash "$RUN" <<< "t"
   [ "$status" -eq 3 ]
+}
+
+# The GIT_CONFIG_COUNT grep above only proves the env was set; issue #95's
+# escape was an explicit-URL `git push <url> HEAD`, which bypasses
+# push.default and per-remote pushurl — only the per-prefix pushInsteadOf
+# closes it. These two tests make the grep meaningful: real pushes at local
+# bare repos (never a remote URL), blocked one way, allowed the other.
+
+make_push_targets() {
+  # Three push targets, all local bare repos: explicit URL, origin, second.
+  git init -q --bare "$BIN/url.git"
+  git init -q --bare "$BIN/one.git"
+  git init -q --bare "$BIN/two.git"
+  git remote add origin "$BIN/one.git"
+  git remote add second "$BIN/two.git"
+}
+
+all_targets_empty() {
+  local d
+  for d in url.git one.git two.git; do
+    [ -z "$(git --git-dir="$BIN/$d" for-each-ref)" ] || return 1
+  done
+}
+
+@test "run.sh: explicit-URL and every named-remote push fail, and the bare targets stay empty" {
+  make_push_targets
+  STUB_PUSH=1 STUB_PUSH_URL="$BIN/url.git" run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  # the stub really attempted all three pushes, and each failed
+  grep -Eq '^url_rc=[1-9]' "$STUB_DIR/push"
+  grep -Eq '^origin_rc=[1-9]' "$STUB_DIR/push"
+  grep -Eq '^second_rc=[1-9]' "$STUB_DIR/push"
+  all_targets_empty
+  grep -q '^GIT_CONFIG_COUNT=' "$STUB_DIR/env"
+}
+
+@test "run.sh: with PI_DELEGATE_ALLOW_PUSH=1 the same pushes land (the block is not a fixture artefact)" {
+  make_push_targets
+  STUB_PUSH=1 STUB_PUSH_URL="$BIN/url.git" PI_DELEGATE_ALLOW_PUSH=1 run bash "$RUN" <<< "t"
+  [ "$status" -eq 0 ]
+  grep -q '^url_rc=0$' "$STUB_DIR/push"
+  grep -q '^origin_rc=0$' "$STUB_DIR/push"
+  grep -q '^second_rc=0$' "$STUB_DIR/push"
+  local d landed=0
+  for d in url.git one.git two.git; do
+    [ -n "$(git --git-dir="$BIN/$d" for-each-ref)" ] && landed=$((landed + 1))
+  done
+  [ "$landed" -eq 3 ]
 }
 
 # --- Secret scan: vendored trees are pruned, the scan stays content-blind ---

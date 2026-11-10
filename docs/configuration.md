@@ -140,7 +140,10 @@ The recipes below are examples, not code this project tests or secures: they
 are not run in CI, they are **not a security boundary**, and the network stays
 open, so anything pi can read it can send to the model endpoint. Both need
 `~/.pi/agent` writable (pi keeps settings and credentials there), so pi can
-read its own API key.
+read its own API key. The Linux block below is checked by the escape probes
+in `skills/delegate/test/sandbox-probes.bats`, which extract it from this
+page and run a mock pi under it, skipping with a stated reason wherever the
+host cannot create the sandbox.
 
 **macOS** (`sandbox-exec`, deprecated but working; checked on macOS 26.5 with
 a real pi: in-repo writes and `git commit` work, writes to a sibling
